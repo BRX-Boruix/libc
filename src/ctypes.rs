@@ -42,6 +42,12 @@ pub type c_double = f64;
 pub type c_void = core::ffi::c_void;
 /// `wchar_t`：宽字符（x86_64 LP64 → 32 位有符号，与 `%lc/%ls` 目标一致）。
 pub type wchar_t = i32;
+/// `mode_t`：文件权限/模式（x86_64 → 32 位无符号）。
+pub type mode_t = u32;
+/// `ino_t`：inode 号（x86_64 LP64 → 64 位无符号）。
+pub type ino_t = u64;
+/// `off_t`：文件偏移（x86_64 LP64 → 64 位有符号）。
+pub type off_t = i64;
 
 /// NULL 指针。
 pub const NULL: *mut c_void = core::ptr::null_mut();

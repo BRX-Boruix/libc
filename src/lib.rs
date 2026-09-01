@@ -17,7 +17,9 @@
 //! - \`stdio_format\`：printf 格式引擎（纯逻辑）
 //! - \`float\`：f64 十进制格式化（%f/%e/%g）
 //! - \`stdlib\`：strtol/atoi/abs/rand/div
-//! - \`unistd\`：open/close/read/write/lseek
+//! - \`unistd\`：open/close/read/write/lseek/mkdir/remove/fcntl
+//! - \`dirent\`：opendir/readdir/closedir
+//! - \`signal\`：signal/sigaction/sigprocmask/raise
 //! - \`process\`：exit/getpid/kill/waitpid
 //! - \`time\`：time/clock/sleep
 //! - \`errno\`：errno 机制与错误码
@@ -40,12 +42,14 @@ extern crate alloc;
 
 pub mod ctype;
 pub mod ctypes;
+pub mod dirent;
 pub mod errno;
 pub mod float;
 mod float_bigint;
 pub mod malloc;
 pub mod process;
 pub mod random;
+pub mod signal;
 pub mod stdio;
 pub mod stdio_format;
 pub mod stdlib;
