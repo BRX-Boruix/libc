@@ -957,3 +957,41 @@ fn test_decompose_fast_fuzz_formats() {
         }
     }
 }
+
+
+// ---- 浮点解析快速路径：对拍 Rust 标准库正确舍入 ----
+
+#[test]
+fn test_strtod_fast_roundtrip_reference() {
+    // 快速路径应触发且正确的值（Rust f64::from_str 为正确舍入参考）。
+    let cases = [
+        "0", "1", "2", "42", "3.5", "1.25", "0.5", "0.25", "-7",
+        "100", "1e6", "1e10", "2.5e3", "0.0625", "123456789",
+        "1.0", "3.14159", "0.1", "1e-5", "255.5", "0.2", "1.1",
+        "9e18", "123456789012345", "1.5e-10",
+    ];
+    for &s in &cases {
+        let bytes = format!("{}\0", s);
+        let fast = unsafe { stdlib::strtod(bytes.as_ptr() as *const i8, core::ptr::null_mut()) };
+        let reference: f64 = s.parse().unwrap();
+        assert_eq!(fast, reference, "strtod fast != reference for {s}");
+    }
+}
+
+#[test]
+fn test_strtod_fast_fuzz_reference() {
+    // 随机尾数×指数（含精确与舍入情况）对拍参考。
+    let mut seed: u64 = 0xFEED_FACE_1234_5678;
+    let mut next = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); seed };
+    for _ in 0..2000 {
+        let mant = next() % 10_000_000_000u64; // 1..10 位
+        let e = (next() % 41) as i32 - 20;     // -20..20
+        if mant == 0 { continue; }
+        let s = format!("{}e{}", mant, e);
+        let bytes = format!("{}\0", s);
+        let fast = unsafe { stdlib::strtod(bytes.as_ptr() as *const i8, core::ptr::null_mut()) };
+        let reference: f64 = s.parse().unwrap();
+        assert_eq!(fast, reference, "strtod fast != reference for {s}");
+    }
+}
+

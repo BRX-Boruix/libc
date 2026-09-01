@@ -202,7 +202,10 @@ unsafe fn strtof_impl<T: FloatConv>(s: *const crate::ctypes::c_char, endptr: *mu
             return T::zero();
         }
         // 严格正确舍入到目标类型（float_bigint::strtod_exact / strtof_exact）。
-        let value = T::from_digits(&mant, frac_digits, exp);
+        // 快速路径：恰好可精确表示时直接组装（免大整数），否则回退精确路径。
+        let value = T::from_fast(&mant, frac_digits, exp).unwrap_or_else(|| {
+            T::from_digits(&mant, frac_digits, exp)
+        });
         if T::is_infinite(value) || (T::is_zero(value) && !mant.is_zero()) {
             set_errno(ERANGE);
         }
@@ -214,11 +217,17 @@ unsafe fn strtof_impl<T: FloatConv>(s: *const crate::ctypes::c_char, endptr: *mu
     }
 }
 
+
 /// 浮点转换器 trait（f32/f64 的通用封装）。
 trait FloatConv: Sized + Copy {
     fn zero() -> Self;
     /// 由精确大整数尾数/小数位数/指数组装正确舍入的值。
     fn from_digits(mant: &crate::float_bigint::BigInt, frac_digits: i64, exp: i64) -> Self;
+    /// 精确快速路径：恰好可精确表示时直接组装；否则 None（回退 from_digits）。
+    fn from_fast(mant: &crate::float_bigint::BigInt, frac_digits: i64, exp: i64) -> Option<Self> {
+        let _ = (mant, frac_digits, exp);
+        None
+    }
     fn negate(v: Self) -> Self;
     fn is_infinite(v: Self) -> bool;
     fn is_zero(v: Self) -> bool;
@@ -228,6 +237,9 @@ impl FloatConv for f64 {
     fn zero() -> Self { 0.0 }
     fn from_digits(m: &crate::float_bigint::BigInt, f: i64, e: i64) -> Self {
         crate::float_bigint::strtod_exact(m, f, e)
+    }
+    fn from_fast(m: &crate::float_bigint::BigInt, frac_digits: i64, exp: i64) -> Option<f64> {
+        fast_decimal(m, frac_digits, exp, 1u64 << 53)
     }
     fn negate(v: Self) -> Self { -v }
     fn is_infinite(v: Self) -> bool { v.is_infinite() }
@@ -239,11 +251,51 @@ impl FloatConv for f32 {
     fn from_digits(m: &crate::float_bigint::BigInt, f: i64, e: i64) -> Self {
         crate::float_bigint::strtof_exact(m, f, e)
     }
+    fn from_fast(m: &crate::float_bigint::BigInt, frac_digits: i64, exp: i64) -> Option<f32> {
+        let v = fast_decimal(m, frac_digits, exp, 1u64 << 24)?;
+        let bits = v.to_bits();
+        let mant_f = bits & ((1u64 << 52) - 1);
+        // f32 尾数 24 位：f64 无舍入值需低 29 位尾数为 0 才在 f32 精确。
+        if mant_f & ((1u64 << 29) - 1) != 0 { return None; }
+        let exp_field = ((bits >> 52) & 0x7FF) as i64;
+        if exp_field == 0x7FF { return None; }
+        Some(v as f32)
+    }
     fn negate(v: Self) -> Self { -v }
     fn is_infinite(v: Self) -> bool { v.is_infinite() }
     fn is_zero(v: Self) -> bool { v == 0.0 }
 }
 
+
+/// 通用的精确快速路径（尾数上限按类型：f64 2^53 / f32 2^24）。
+fn fast_decimal(
+    mant: &crate::float_bigint::BigInt,
+    frac_digits: i64,
+    exp: i64,
+    mant_limit: u64,
+) -> Option<f64> {
+    let d = exp - frac_digits;
+    if mant.len > 2 { return None; }
+    let mant_u: u64 = mant.limbs[0] as u64 | if mant.len >= 2 { (mant.limbs[1] as u64) << 32 } else { 0 };
+    if mant_u > mant_limit { return None; }
+    if d >= 0 {
+        let d = d as u32;
+        if d > 24 { return None; }
+        let mut scaled = mant_u;
+        for _ in 0..d { scaled = scaled.checked_mul(5)?; }
+        if scaled > mant_limit { return None; }
+        Some((scaled as f64) * (1u64 << d) as f64)
+    } else {
+        let dd = (-d) as u32;
+        if dd > 24 { return None; }
+        let mut den: u64 = 1;
+        for _ in 0..dd { den = den.checked_mul(10)?; }
+        if mant_u % den != 0 { return None; }
+        let q = mant_u / den;
+        if q > mant_limit { return None; }
+        Some(q as f64)
+    }
+}
 /// 通用有符号解析。
 unsafe fn strtox<T>(
     s: *const crate::ctypes::c_char,
