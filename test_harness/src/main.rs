@@ -857,3 +857,103 @@ fn test_hexfloat_alt_flag() {
 
 
 
+
+
+// ---- 浮点打印快速路径差分测试 ----
+
+// 差分：快速路径与精确路径经相同精度渲染，输出必须一致。
+fn render_fixed_any(d: &float::Decomposed, prec: usize) -> Vec<u8> {
+    let s = Spec { left: false, plus: false, space: false, zero: false, alt: false,
+        width: -1, prec: prec as i64, len: Length::None, conv: Conv::Float, upper: false };
+    let mut out = Vec::new();
+    let mut sink = VecSink(&mut out);
+    float::emit_fixed(&s, &mut (d.clone()), prec, &mut sink).unwrap();
+    out
+}
+
+#[test]
+fn test_decompose_fast_matches_exact() {
+    let values = [
+        0.0f64, -0.0, 1.0, -1.0, 2.0, 42.0, 100.0, -12345.0,
+        0.5, -0.5, 3.14, 2.5, 1e6, 1e15, 255.5, 0.1, 1e-5,
+        1.23456789e10, 9e18, -7.5, 0.0625, 123456789.0,
+    ];
+    for &v in &values {
+        let fast = float::decompose_fast(v);
+        let mut digits = [0u8; 800];
+        let (len, dec_exp, neg, special) = float_bigint::decompose_exact(v, &mut digits);
+        let exact = float::Decomposed {
+            digits, digit_len: len, dec_exp, negative: neg, special,
+        };
+        if let Some(fd) = fast {
+            for prec in [0usize, 2, 6, 12] {
+                assert_eq!(render_fixed_any(&fd, prec), render_fixed_any(&exact, prec),
+                    "fast != exact for {v} at prec {prec}");
+            }
+        }
+    }
+}
+
+#[test]
+fn test_decompose_fast_int_roundtrip() {
+    let mut x: u64 = 1;
+    let mut seed: u64 = 0x1234_5678_9ABC_DEF0;
+    for _ in 0..200 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        x = (seed >> 1) & ((1u64 << 52) - 1); // < 2^53：f64 可精确表示
+        if x == 0 { continue; }
+                let v = x as f64;
+        let fast = float::decompose_fast(v).expect("fast path should handle integers");
+        let mut acc: u64 = 0;
+        for i in 0..fast.digit_len {
+            acc = acc.wrapping_mul(10).wrapping_add((fast.digits[i] - b'0') as u64);
+        }
+        assert_eq!(acc, x, "decompose_fast mis-reconstructed {v}");
+    }
+}
+
+
+
+#[test]
+fn test_decompose_fast_fuzz_formats() {
+    let mut seed: u64 = 0xDEADBEEF_CAFEF00D;
+    let mut next = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1); seed };
+    let spec = |conv: Conv, prec: i64| Spec {
+        left: false, plus: false, space: false, zero: false, alt: false,
+        width: -1, prec, len: Length::None, conv, upper: false,
+    };
+    let cases: [(&str, Conv, &[i64]); 3] = [
+        ("f", Conv::Float, &[0, 3, 6, 9]),
+        ("e", Conv::Exp, &[2, 6, 10]),
+        ("g", Conv::General, &[0, 6, 12]),
+    ];
+    for _ in 0..300 {
+        let x = next() & ((1u64 << 52) - 1);
+        if x == 0 { continue; }
+        let v = x as f64;
+        let fast = float::decompose_fast(v).expect("integer should hit fast path");
+        let mut digits = [0u8; 800];
+        let (len, dec_exp, neg, special) = float_bigint::decompose_exact(v, &mut digits);
+        let exact = float::Decomposed { digits, digit_len: len, dec_exp, negative: neg, special };
+        for (cname, conv, precs) in &cases {
+            for &prec in precs.iter() {
+                let s = spec(*conv, prec);
+                let mut o1 = Vec::new(); let mut k1 = VecSink(&mut o1);
+                let mut fd = fast.clone();
+                match conv {
+                    Conv::Float => float::emit_fixed(&s, &mut fd, prec.max(0) as usize, &mut k1).unwrap(),
+                    Conv::Exp => float::emit_exp(&s, &mut fd, prec.max(0) as usize, &mut k1).unwrap(),
+                    _ => float::emit_general(&s, &mut fd, prec.max(0) as usize, &mut k1).unwrap(),
+                }
+                let mut o2 = Vec::new(); let mut k2 = VecSink(&mut o2);
+                let mut ed = exact.clone();
+                match conv {
+                    Conv::Float => float::emit_fixed(&s, &mut ed, prec.max(0) as usize, &mut k2).unwrap(),
+                    Conv::Exp => float::emit_exp(&s, &mut ed, prec.max(0) as usize, &mut k2).unwrap(),
+                    _ => float::emit_general(&s, &mut ed, prec.max(0) as usize, &mut k2).unwrap(),
+                }
+                assert_eq!(o1, o2, "fast != exact for {v} conv={cname} prec={prec}");
+            }
+        }
+    }
+}

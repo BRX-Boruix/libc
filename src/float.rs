@@ -18,6 +18,7 @@
 use crate::stdio_format::{Spec, FmtSink};
 
 /// 浮点值的分解结果（未舍入的原始数字序列，最多 800 位）。
+#[derive(Clone)]
 pub struct Decomposed {
     /// 数字位（\`0..=9\` 的 ASCII），不含小数点。
     pub digits: [u8; 800],
@@ -34,6 +35,10 @@ pub struct Decomposed {
 /// 经大整数精确法（\`decompose_exact\`，float_bigint.rs）把 value 写成
 /// \`N × 10^-k\` 并展开 N 的十进制数字，覆盖最大/最小次正规数（S33 如实）。
 pub fn decompose(value: f64) -> Decomposed {
+    // 快速路径：小整数直接展开（避免大整数除法）；否则回退精确路径。
+    if let Some(d) = decompose_fast(value) {
+        return d;
+    }
     let mut digits = [0u8; 800];
     let (len, dec_exp, neg, special) = crate::float_bigint::decompose_exact(value, &mut digits);
     Decomposed {
@@ -43,6 +48,72 @@ pub fn decompose(value: f64) -> Decomposed {
         negative: neg,
         special,
     }
+}
+
+/// `%f/%e/%g` 的快速路径：当 value 是**可精确表示的小整数**（|value| <= 2^63）
+/// 时，直接十进制展开，避免大整数除法。返回 Some(展开结果) 或 None（回退精确路径）。
+/// 判定：把 value 拆成 m × 2^e2（e2>=0）且整数部分 m<<e2 不溢出 i64 范围。
+pub fn decompose_fast(value: f64) -> Option<Decomposed> {
+    let bits = value.to_bits();
+    let sign = (bits >> 63) != 0;
+    let biased_exp = ((bits >> 52) & 0x7FF) as i64;
+    let mant = bits & ((1u64 << 52) - 1);
+
+    if biased_exp == 0x7FF || (mant == 0 && biased_exp == 0) {
+        return None;
+    }
+    let m: u64 = if biased_exp == 0 { mant } else { mant | (1u64 << 52) };
+    let e2 = if biased_exp == 0 { -1074 } else { (biased_exp - 1023) - 52 };
+
+    // value = m × 2^e2。若 e2<0 但 m 含足够尾随零位，值仍是整数（如 2^51）。
+    if e2 < 0 {
+        let shift = (-e2) as u32;
+        if shift >= 64 || m & ((1u64 << shift) - 1) != 0 {
+            return None; // 非整数或无法归约。
+        }
+        let m2 = m >> shift;
+        if m2 > (1u64 << 63) { return None; }
+        let mut digits = [0u8; 800];
+        let mut buf = [0u8; 20];
+        let mut v = m2;
+        let mut i = buf.len();
+        loop {
+            i -= 1;
+            buf[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 { break; }
+        }
+        let l = buf.len() - i;
+        let mut idx = 0usize;
+        while idx < l { digits[idx] = buf[i + idx]; idx += 1; }
+        return Some(Decomposed { digits, digit_len: l, dec_exp: l as i32 - 1, negative: sign, special: 0 });
+    }
+    if e2 > 62 { return None; }
+    let int_val: u64 = m << e2;
+    if int_val > (1u64 << 63) { return None; }
+    let mut digits = [0u8; 800];
+    let mut buf = [0u8; 20];
+    let mut v = int_val;
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 { break; }
+    }
+    let l = buf.len() - i;
+    let mut idx = 0usize;
+    while idx < l {
+        digits[idx] = buf[i + idx];
+        idx += 1;
+    }
+    Some(Decomposed {
+        digits,
+        digit_len: l,
+        dec_exp: l as i32 - 1,
+        negative: sign,
+        special: 0,
+    })
 }
 
 /// 舍入到 \`n\` 个有效数字（round-half-even），就地更新 digit_len。
