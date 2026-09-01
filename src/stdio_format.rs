@@ -56,6 +56,7 @@ pub enum Conv {
     Float,
     Exp,
     General,
+    HexFloat,
     Percent,
     Count,
 }
@@ -201,6 +202,8 @@ fn parse_spec(fmt: &[u8], mut pos: usize) -> Option<(Spec, usize)> {
         b'E' => { spec.upper = true; Conv::Exp }
         b'g' => { spec.upper = false; Conv::General }
         b'G' => { spec.upper = true; Conv::General }
+        b'a' => { spec.upper = false; Conv::HexFloat }
+        b'A' => { spec.upper = true; Conv::HexFloat }
         b'%' => Conv::Percent,
         b'n' => Conv::Count,
         _ => return None,

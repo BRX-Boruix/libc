@@ -225,6 +225,44 @@ fn test_strtoul() {
     assert_eq!(v, 4294967295u64);
 }
 
+#[test]
+fn test_strtoll_base0_probe() {
+    // base=0 前缀探测：0x→16，0→8，否则→10。
+    // 十六进制。
+    let hex = b"0x2A ".as_ptr() as *const i8;
+    assert_eq!(unsafe { stdlib::strtoll(hex, core::ptr::null_mut(), 0) }, 0x2A);
+    // 大写 X。
+    let hexU = b"0X2A ".as_ptr() as *const i8;
+    assert_eq!(unsafe { stdlib::strtoll(hexU, core::ptr::null_mut(), 0) }, 0x2A);
+    // 八进制。
+    let oct = b"0777 ".as_ptr() as *const i8;
+    assert_eq!(unsafe { stdlib::strtoll(oct, core::ptr::null_mut(), 0) }, 0o777);
+    // 十进制。
+    let dec = b"123 ".as_ptr() as *const i8;
+    assert_eq!(unsafe { stdlib::strtoll(dec, core::ptr::null_mut(), 0) }, 123);
+    // 前导空白 + 负号 + 十六进制。
+    let ws = b"  -0x1F ".as_ptr() as *const i8;
+    assert_eq!(unsafe { stdlib::strtoll(ws, core::ptr::null_mut(), 0) }, -0x1F);
+    // 0x 无数字 → 0（仅前缀，无有效数字）。
+    let bare = b"0x ".as_ptr() as *const i8;
+    assert_eq!(unsafe { stdlib::strtoll(bare, core::ptr::null_mut(), 0) }, 0);
+    // 单独 0 → 0（八进制解析，值 0）。
+    let lone = b"0 ".as_ptr() as *const i8;
+    assert_eq!(unsafe { stdlib::strtoll(lone, core::ptr::null_mut(), 0) }, 0);
+    // endptr 停在首个非法字符（探测后）。
+    let mut end: *const i8 = core::ptr::null();
+    let mix = b"0x1G ".as_ptr() as *const i8;
+    let val = unsafe { stdlib::strtoll(mix, &mut end, 0) };
+    assert_eq!(val, 0x1);
+    // G 的位置（跳过 0x1 三个字符）。
+    assert_eq!(unsafe { *end as u8 }, b'G');
+    // 溢出 → i64::MAX 且 ERANGE。
+    let ovf = b"0xFFFFFFFFFFFFFFFFF ".as_ptr() as *const i8;
+    let v = unsafe { stdlib::strtoll(ovf, core::ptr::null_mut(), 0) };
+    assert_eq!(v, i64::MAX);
+}
+
+
 // ---------- ctype 单测 ----------
 
 #[test]
@@ -742,6 +780,80 @@ fn test_wcrtomb_eilseq() {
     let r = unsafe { wchar::wcrtomb(mb.as_mut_ptr(), 0x1FFFF, core::ptr::null_mut()) };
     assert_eq!(r, usize::MAX);
 }
+
+// ---- %a 十六进制浮点测试 ----
+
+fn render_hexfloat(v: f64, spec: Spec) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut sink = VecSink(&mut out);
+    float::emit_hexfloat(&spec, v, &mut sink).unwrap();
+    out
+}
+
+#[test]
+fn test_hexfloat_basic() {
+    let s = Spec { left: false, plus: false, space: false, zero: false, alt: false,
+        width: -1, prec: -1, len: Length::None, conv: Conv::HexFloat, upper: false };
+    // 1.0 → 0x1p+0
+    assert_eq!(render_hexfloat(1.0, s), b"0x1p+0".to_vec());
+    // 0.5 → 0x1p-1
+    assert_eq!(render_hexfloat(0.5, s), b"0x1p-1".to_vec());
+    // 1.5 → 0x1.8p+0
+    assert_eq!(render_hexfloat(1.5, s), b"0x1.8p+0".to_vec());
+    // 2.0 → 0x1p+1
+    assert_eq!(render_hexfloat(2.0, s), b"0x1p+1".to_vec());
+    // 0.0 → 0x0p+0
+    assert_eq!(render_hexfloat(0.0, s), b"0x0p+0".to_vec());
+}
+
+#[test]
+fn test_hexfloat_uppercase() {
+    let s = Spec { left: false, plus: false, space: false, zero: false, alt: false,
+        width: -1, prec: -1, len: Length::None, conv: Conv::HexFloat, upper: true };
+    assert_eq!(render_hexfloat(1.5, s), b"0X1.8P+0".to_vec());
+    // 0xa.5 → 0X1.5P+3 (10.5 = 0x1.5 * 2^3)
+    assert_eq!(render_hexfloat(10.5, s), b"0X1.5P+3".to_vec());
+}
+
+#[test]
+fn test_hexfloat_special() {
+    let s = Spec { left: false, plus: false, space: false, zero: false, alt: false,
+        width: -1, prec: -1, len: Length::None, conv: Conv::HexFloat, upper: false };
+    assert_eq!(render_hexfloat(f64::INFINITY, s), b"inf".to_vec());
+    assert_eq!(render_hexfloat(f64::NEG_INFINITY, s), b"-inf".to_vec());
+    assert_eq!(render_hexfloat(f64::NAN, s), b"nan".to_vec());
+}
+
+#[test]
+fn test_hexfloat_explicit_precision() {
+    let s = Spec { left: false, plus: false, space: false, zero: false, alt: false,
+        width: -1, prec: 1, len: Length::None, conv: Conv::HexFloat, upper: false };
+    // 1.0 显式精度 1 → 0x1.0p+0
+    assert_eq!(render_hexfloat(1.0, s), b"0x1.0p+0".to_vec());
+}
+
+#[test]
+fn test_hexfloat_known_values() {
+    let s = Spec { left: false, plus: false, space: false, zero: false, alt: false,
+        width: -1, prec: -1, len: Length::None, conv: Conv::HexFloat, upper: false };
+    // 0.1 = 0x1.999999999999ap-4（glibc 一致）
+    assert_eq!(render_hexfloat(0.1, s), b"0x1.999999999999ap-4".to_vec());
+    // 255.5 = 0x1.ffp+7
+    assert_eq!(render_hexfloat(255.5, s), b"0x1.ffp+7".to_vec());
+    // 最小次正规 5e-324 = 0x0.0000000000001p-1022
+    assert_eq!(render_hexfloat(f64::from_bits(1), s), b"0x0.0000000000001p-1022".to_vec());
+    // 负数
+    assert_eq!(render_hexfloat(-1.5, s), b"-0x1.8p+0".to_vec());
+}
+
+#[test]
+fn test_hexfloat_alt_flag() {
+    // # 标志：始终显示小数点。
+    let s = Spec { left: false, plus: false, space: false, zero: false, alt: true,
+        width: -1, prec: -1, len: Length::None, conv: Conv::HexFloat, upper: false };
+    assert_eq!(render_hexfloat(1.0, s), b"0x1.p+0".to_vec());
+}
+
 
 
 

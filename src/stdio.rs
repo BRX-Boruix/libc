@@ -646,6 +646,10 @@ fn render_spec(
                 _ => crate::float::emit_general(&s, &mut d, precision, sink),
             }
         }
+        Conv::HexFloat => {
+            let v = unsafe { ap.next_arg::<f64>() };
+            crate::float::emit_hexfloat(&s, v, sink)
+        }
     }
 }
 

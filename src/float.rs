@@ -1,4 +1,4 @@
-//! f64 十进制格式化（\`%f/%e/%g\` 的 dtoa 核心）。
+//! f64 十进制格式化（`%f/%e/%g` 的 dtoa 核心）与 `%a` 十六进制浮点。
 //!
 //! 纯逻辑、可移植、可 host 单测。把 f64 分解为 \`0.digits × 10^dec_exp\` 形式，
 //! \`%f/%e/%g\` 据此重排与舍入。
@@ -109,6 +109,10 @@ impl<const N: usize> StackBuf<N> {
         }
     }
     pub fn as_slice(&self) -> &[u8] { &self.buf[..self.len] }
+    pub fn pop_byte(&mut self) -> Option<u8> {
+        if self.len == 0 { None } else { self.len -= 1; Some(self.buf[self.len]) }
+    }
+    pub fn is_empty(&self) -> bool { self.len == 0 }
 }
 
 /// 写一个字节数组，带 width/left/zero 对齐。
@@ -328,6 +332,131 @@ fn emit_fixed_g(
 }
 
 /// 特殊值输出：inf / nan。
+
+
+/// `%a/%A`（十六进制浮点）：把 f64 输出为 `0xh.hhhhp±d`。
+/// 十六进制表示是**精确**的（无需舍入）：正常数形如 0x1.xxx×2^e，
+/// 次正规数形如 0x0.xxx×2^-1022。默认精度为足够精确表示全部 13 位十六进制
+/// 尾数数字；`#` 强制显示小数点与尾随零；大写 `%A` 用 `X/P`。
+/// 特殊值 inf/nan 与 `%f` 相同（经 decompose 的 special 标记）。
+pub fn emit_hexfloat(spec: &Spec, v: f64, sink: &mut dyn FmtSink) -> Result<(), ()> {
+    let bits = v.to_bits();
+    let sign = (bits >> 63) & 1 == 1;
+    let exp_field = ((bits >> 52) & 0x7FF) as i64;
+    let frac = bits & 0x000F_FFFF_FFFF_FFFF;
+    // sign_len：零填充时保留的前导符号字节数。
+    let sign_len = if sign { 1 } else if spec.plus || spec.space { 1 } else { 0 };
+
+    // 特殊值：inf/nan。
+    if exp_field == 0x7FF {
+        let word: &[u8] = if frac != 0 {
+            if spec.upper { b"NAN" } else { b"nan" }
+        } else if sign {
+            b"-inf"
+        } else {
+            b"inf"
+        };
+        // 加号/空格标志。
+        let mut s = StackBuf::<32>::new();
+        if word == b"-inf" {
+            s.extend(word);
+        } else {
+            if spec.plus { s.push_byte(b'+'); }
+            else if spec.space { s.push_byte(b' '); }
+            s.extend(word);
+        }
+        return emit_aligned(spec, s.as_slice(), sign_len, sink)
+    }
+
+    // 零。
+    if bits == 0 || bits == 0x8000_0000_0000_0000 {
+        let precision = if spec.prec >= 0 { spec.prec as usize } else { 0 };
+        let mut s = StackBuf::<64>::new();
+        if sign { s.push_byte(b'-'); }
+        else if spec.plus { s.push_byte(b'+'); }
+        else if spec.space { s.push_byte(b' '); }
+        s.extend(if spec.upper { b"0X0" } else { b"0x0" });
+        if precision > 0 || spec.alt {
+            s.push_byte(b'.');
+            for _ in 0..precision { s.push_byte(b'0'); }
+        }
+        s.push_byte(b'p');
+        s.push_byte(b'+');
+        s.extend(b"0");
+        return emit_aligned(spec, s.as_slice(), sign_len, sink)
+    }
+
+    let upper = spec.upper;
+    let digits: &[u8; 16] = if upper { b"0123456789ABCDEF" } else { b"0123456789abcdef" };
+    let mut s = StackBuf::<80>::new();
+    if sign { s.push_byte(b'-'); }
+    else if spec.plus { s.push_byte(b'+'); }
+    else if spec.space { s.push_byte(b' '); }
+    s.extend(if upper { b"0X" } else { b"0x" });
+
+    // 正常数：0x1.xxxp+e；次正规：0x0.xxxp-1022。
+    let (first, exp2) = if exp_field == 0 {
+        // 次正规：值 = 0.frac × 2^-1022。
+        (0u64, -1022i64)
+    } else {
+        (1u64, exp_field - 1023)
+    };
+
+    // 默认精度 = 需表示 frac 的最低非零位所需的十六进制数字数（尾随零截断）。
+    // 正常数隐含前导 1；次正规前导为 0。
+    let lowest_set = if frac == 0 {
+        0 // 无小数位。
+    } else {
+        // frac 最低非零位下标（0..=51），换算为十六进制数字数（每 4 位一个）。
+        let lsb = frac.trailing_zeros() as u32; // 0..52
+        // 从最高位组到该组共需的 hex 数字：52 位 → 13 组，最后一组 4 位对齐。
+        // 最低非零位所在组：lsb/4（0 基）。它之后到最高组共有 13 - lsb/4 组？
+        // 精确：有效 hex 位数 = ceil((51 - lsb + 1)/4)？用更直观方式：
+        // frac 有效位宽 = 52 - lsb；hex 数字数 = ceil(有效位宽/4)。
+        let width = 52 - lsb;
+        width.div_ceil(4)
+    };
+    let default_prec = lowest_set as usize;
+    let precision = if spec.prec >= 0 { spec.prec as usize } else { default_prec };
+
+    // 首数字。
+    s.push_byte(digits[first as usize]);
+    // 逐 4 位输出 frac 的十六进制数字到临时缓冲。
+    let n_hex: usize = 13; // 52 位 → 13 个 hex 数字。
+    let mut frac_buf = StackBuf::<16>::new();
+    for i in 0..n_hex {
+        if frac_buf.len >= precision {
+            break;
+        }
+        let shift = 52 - 4 - (i as u32) * 4; // 最高组 i=0: shift=48。
+        let nib = ((frac >> shift) & 0xF) as usize;
+        frac_buf.push_byte(digits[nib]);
+    }
+    // 显式精度下补足。
+    while spec.prec >= 0 && frac_buf.len < precision {
+        frac_buf.push_byte(b'0');
+    }
+    // 有小数数字或 # 标志 → 显示小数点（0x1.xxx）；否则省略（0x1p+0）。
+    if frac_buf.len > 0 || spec.alt {
+        s.push_byte(b'.');
+        s.extend(frac_buf.as_slice());
+    }
+    s.push_byte(if upper { b'P' } else { b'p' });
+    if exp2 >= 0 { s.push_byte(b'+'); } else { s.push_byte(b'-'); }
+    let mut ebuf = [0u8; 24];
+    let mut v = exp2.abs();
+    let mut ei = ebuf.len();
+    loop {
+        ei -= 1;
+        ebuf[ei] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 { break; }
+    }
+    s.extend(&ebuf[ei..]);
+    emit_aligned(spec, s.as_slice(), sign_len, sink)
+}
+
+
 fn emit_special(spec: &Spec, d: &Decomposed, sink: &mut dyn FmtSink) -> Result<(), ()> {
     let word: &[u8] = match d.special {
         1 => b"inf",
