@@ -310,3 +310,155 @@ pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, args: ...) -> c_int {
         }
     }
 }
+// ---------- struct stat / stat / fstat / chmod / rename ----------
+
+/// struct timespec (stat 时间戳用)。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+/// POSIX struct stat (x86_64 LP64 布局)。
+///
+/// 转业但诚实子集 (S09)：内核只暴露 r/w/x + system_only 四布尔，
+/// 不存在 owner/group/other 矩阵。故：
+/// - st_mode 的类型位 (S_IF*) 如实填入；
+/// - 权限位：owner rwx 为真值，组/其他位镜像 owner (单用户擦平)。
+/// - st_ino/st_dev 等内核未暴露的字段如实置 0，不伪造。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct stat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_nlink: u64,
+    pub st_mode: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub __pad0: i32,
+    pub st_rdev: u64,
+    pub st_size: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    pub st_atim: timespec,
+    pub st_mtim: timespec,
+    pub st_ctim: timespec,
+    pub __unused: [i64; 3],
+}
+
+pub const S_IFMT: u32 = 0o170000;
+pub const S_IFSOCK: u32 = 0o140000;
+pub const S_IFLNK: u32 = 0o120000;
+pub const S_IFREG: u32 = 0o100000;
+pub const S_IFBLK: u32 = 0o060000;
+pub const S_IFDIR: u32 = 0o040000;
+pub const S_IFCHR: u32 = 0o020000;
+pub const S_IFIFO: u32 = 0o010000;
+
+pub fn stat_type_bits(node_type: u32) -> u32 {
+    match node_type {
+        libsys::StatInfo::TYPE_DIR => S_IFDIR,
+        libsys::StatInfo::TYPE_SYMLINK => S_IFLNK,
+        libsys::StatInfo::TYPE_CHARDEV => S_IFCHR,
+        libsys::StatInfo::TYPE_BLKDEV => S_IFBLK,
+        libsys::StatInfo::TYPE_FIFO => S_IFIFO,
+        libsys::StatInfo::TYPE_SOCKET => S_IFSOCK,
+        _ => S_IFREG,
+    }
+}
+
+pub fn stat_perm_bits(perms: u32) -> u32 {
+    let mut m = 0u32;
+    if perms & (1 << 0) != 0 { m |= 0o444; }
+    if perms & (1 << 1) != 0 { m |= 0o222; }
+    if perms & (1 << 2) != 0 { m |= 0o111; }
+    m
+}
+
+fn stat_from_info(info: &libsys::StatInfo) -> stat {
+    let mode = stat_type_bits(info.node_type) | stat_perm_bits(info.perms);
+    stat {
+        st_dev: 0,
+        st_ino: 0,
+        st_nlink: 0,
+        st_mode: mode,
+        st_uid: 0,
+        st_gid: 0,
+        __pad0: 0,
+        st_rdev: 0,
+        st_size: info.size as i64,
+        st_blksize: 0,
+        st_blocks: 0,
+        st_atim: timespec { tv_sec: info.modified_time as i64, tv_nsec: 0 },
+        st_mtim: timespec { tv_sec: info.modified_time as i64, tv_nsec: 0 },
+        st_ctim: timespec { tv_sec: info.changed_time as i64, tv_nsec: 0 },
+        __unused: [0; 3],
+    }
+}
+
+/// stat(path, *mut stat)：读节点元数据 (POSIX stat，跟软链符)。
+/// 返回 0 成功，-1 失败置 errno。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut stat) -> c_int {
+    if path.is_null() || buf.is_null() { set_errno(EINVAL); return -1; }
+    let p = match unsafe { crate::stdio::cstr_to_str(path) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return -1; }
+    };
+    match libsys::stat(p) {
+        Ok(info) => { unsafe { *buf = stat_from_info(&info); } 0 }
+        Err(e) => { set_errno(from_libsys(e)); -1 }
+    }
+}
+
+/// fstat(fd, *mut stat)：按 fd 读节点元数据。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fstat(fd: c_int, buf: *mut stat) -> c_int {
+    if buf.is_null() { set_errno(EINVAL); return -1; }
+    match libsys::fstat(fd as u64) {
+        Ok(info) => { unsafe { *buf = stat_from_info(&info); } 0 }
+        Err(e) => { set_errno(from_libsys(e)); -1 }
+    }
+}
+
+/// chmod(path, mode)：设置节点权限。
+///
+/// mode 只取 r/w/x 任一位 (单産户擦平：任意主/组/其他位即算)，
+/// system_only 不可通过 POSIX chmod 设置 (始终 false)。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chmod(path: *const c_char, mode: crate::ctypes::mode_t) -> c_int {
+    if path.is_null() { set_errno(EINVAL); return -1; }
+    let p = match unsafe { crate::stdio::cstr_to_str(path) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return -1; }
+    };
+    let perm = libsys::Permissions {
+        readable: (mode & 0o444) != 0,
+        writable: (mode & 0o222) != 0,
+        executable: (mode & 0o111) != 0,
+        system_only: false,
+    };
+    match libsys::chmod(p, perm) {
+        Ok(_) => 0,
+        Err(e) => { set_errno(from_libsys(e)); -1 }
+    }
+}
+
+/// rename(old, new)：同目录内重命名。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rename(oldpath: *const c_char, newpath: *const c_char) -> c_int {
+    if oldpath.is_null() || newpath.is_null() { set_errno(EINVAL); return -1; }
+    let old = match unsafe { crate::stdio::cstr_to_str(oldpath) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return -1; }
+    };
+    let new = match unsafe { crate::stdio::cstr_to_str(newpath) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return -1; }
+    };
+    match libsys::rename(old, new) {
+        Ok(_) => 0,
+        Err(e) => { set_errno(from_libsys(e)); -1 }
+    }
+}

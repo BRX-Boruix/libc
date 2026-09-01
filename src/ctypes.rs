@@ -48,6 +48,19 @@ pub type mode_t = u32;
 pub type ino_t = u64;
 /// `off_t`：文件偏移（x86_64 LP64 → 64 位有符号）。
 pub type off_t = i64;
+/// dev_t：设备号（x86_64 LP64 → 64 位无符号）。
+pub type dev_t = u64;
+/// nlink_t：硬链接数（x86_64 LP64 → 64 位无符号）。
+pub type nlink_t = u64;
+/// uid_t/gid_t：用户/组 ID（x86_64 → 32 位无符号）。
+pub type uid_t = u32;
+pub type gid_t = u32;
+/// blksize_t：块大小（x86_64 LP64 → 64 位有符号）。
+pub type blksize_t = i64;
+/// blkcnt_t：块数（x86_64 LP64 → 64 位有符号）。
+pub type blkcnt_t = i64;
+/// time_t：秒时间（x86_64 LP64 → 64 位有符号）。
+pub type time_t = i64;
 
 /// NULL 指针。
 pub const NULL: *mut c_void = core::ptr::null_mut();
