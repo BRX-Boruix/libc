@@ -52,6 +52,86 @@ const MIN_BLOCK: usize = HEADER + 16;
 /// 对齐要求：payload 16 字节对齐。
 const ALIGN: usize = 16;
 
+// ---------- 加固（S40） ----------
+
+/// 每个分配块在 payload 末尾预留的 8 字节金丝雀（canary）区。
+/// 分配 `size` 字节实际占 `size + CANARY_SIZE`；canary 位于 payload+size。
+/// free 时校验，损坏（越界写进 canary 区）即置 `MALLOC_CORRUPT`。
+const CANARY_SIZE: usize = 8;
+const CANARY_MAGIC: u64 = 0xDEAD_0000_BEEF_5EED;
+
+/// free 时把已释放的 `size` 字节 payload 填 0xDD（毒化），捕获 use-after-free。
+const POISON_BYTE: u8 = 0xDD;
+
+/// 全局堆损坏标志：canary 校验失败或检测到 double-free 时置位。
+/// 供测试/诊断读取；置位后分配器仍尽力保持可用（不 panic）。
+static MALLOC_CORRUPT: AtomicBool = AtomicBool::new(false);
+
+/// 读取堆损坏标志（测试/诊断用）。
+#[unsafe(no_mangle)]
+pub extern "C" fn boruix_malloc_corrupt() -> c_int {
+    if MALLOC_CORRUPT.load(Ordering::Relaxed) { 1 } else { 0 }
+}
+
+/// 计算 payload 的可写容量（block_size - payload 偏移），含末尾 canary 区。
+#[inline]
+unsafe fn payload_capacity(block: *mut u8, payload: *mut u8) -> usize {
+    unsafe {
+        let off = payload_offset(payload);
+        block_size(block).saturating_sub(off)
+    }
+}
+
+/// 用户实际可用字节数 = 容量 - canary 区。
+#[inline]
+fn user_size(cap: usize) -> usize {
+    cap.saturating_sub(CANARY_SIZE)
+}
+
+/// 写入 canary（payload + 用户区末尾，8 字节）。
+#[inline]
+unsafe fn write_canary(payload: *mut u8, cap: usize) {
+    unsafe {
+        let at = payload.add(user_size(cap)) as *mut u64;
+        *at = CANARY_MAGIC;
+    }
+}
+
+/// 校验 canary；损坏返回 false（并置 MALLOC_CORRUPT）。
+#[inline]
+unsafe fn check_canary(payload: *mut u8, cap: usize) -> bool {
+    unsafe {
+        let at = payload.add(user_size(cap)) as *const u64;
+        if *at != CANARY_MAGIC {
+            MALLOC_CORRUPT.store(true, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+}
+
+/// free 时把已释放的用户区填 0xDD（毒化）；canary 区保留。
+#[inline]
+unsafe fn poison_payload(payload: *mut u8, cap: usize) {
+    unsafe {
+        core::ptr::write_bytes(payload, POISON_BYTE, user_size(cap));
+    }
+}
+
+/// 检测 block 是否已在空闲表中（double-free 防御）。
+unsafe fn freelist_contains(block: *mut u8) -> bool {
+    unsafe {
+        let mut cur: *mut u8 = *FREELIST.get();
+        while !cur.is_null() {
+            if cur == block {
+                return true;
+            }
+            cur = block_next(cur);
+        }
+        false
+    }
+}
+
 /// 把 n 向上取整到 16 的倍数。
 #[inline]
 fn align16(n: usize) -> usize {
@@ -249,7 +329,12 @@ pub extern "C" fn malloc(size: size_t) -> *mut u8 {
     if size == 0 {
         return core::ptr::null_mut();
     }
-    let need = match size.checked_add(HEADER) {
+    // 加固：多分配 CANARY_SIZE 字节，canary 置于 payload+size（末尾）。
+    let alloc = match size.checked_add(CANARY_SIZE) {
+        Some(n) => n,
+        None => { set_errno(ENOMEM); return core::ptr::null_mut(); }
+    };
+    let need = match alloc.checked_add(HEADER) {
         Some(n) => align16(n),
         None => { set_errno(ENOMEM); return core::ptr::null_mut(); }
     };
@@ -261,7 +346,11 @@ pub extern "C" fn malloc(size: size_t) -> *mut u8 {
         return core::ptr::null_mut();
     }
     let payload = unsafe { payload_of(block) };
-    unsafe { set_payload_offset(payload, HEADER); } // 存偏移=16，供 free/realloc 反推
+    unsafe {
+        set_payload_offset(payload, HEADER); // 存偏移=16，供 free/realloc 反推
+        let cap = payload_capacity(block, payload);
+        write_canary(payload, cap);
+    }
     ALLOC_LOCK.unlock();
     payload
 }
@@ -275,6 +364,17 @@ pub extern "C" fn free(ptr: *mut u8) {
     ALLOC_LOCK.lock();
     unsafe {
         let block = block_from_payload(ptr);
+        let cap = payload_capacity(block, ptr);
+        // 金丝雀校验：检测越界写。
+        check_canary(ptr, cap);
+        // double-free 防御：已在空闲表则置损坏标志，不再重复插入。
+        if freelist_contains(block) {
+            MALLOC_CORRUPT.store(true, Ordering::Relaxed);
+            ALLOC_LOCK.unlock();
+            return;
+        }
+        // 毒化已释放 payload（use-after-free 捕获）。
+        poison_payload(ptr, cap);
         set_block_next(block, core::ptr::null_mut());
         freelist_insert(block);
     }
@@ -295,7 +395,11 @@ pub extern "C" fn realloc(ptr: *mut u8, new_size: size_t) -> *mut u8 {
         free(ptr);
         return core::ptr::null_mut();
     }
-    let new_need = match new_size.checked_add(HEADER) {
+    let new_alloc = match new_size.checked_add(CANARY_SIZE) {
+        Some(n) => n,
+        None => { set_errno(ENOMEM); return core::ptr::null_mut(); }
+    };
+    let new_need = match new_alloc.checked_add(HEADER) {
         Some(n) => align16(n).max(MIN_BLOCK),
         None => { set_errno(ENOMEM); return core::ptr::null_mut(); }
     };
@@ -304,7 +408,17 @@ pub extern "C" fn realloc(ptr: *mut u8, new_size: size_t) -> *mut u8 {
         let off = payload_offset(ptr);
         let block = ptr.sub(off);
         let old_size = block_size(block);
+        let old_cap = payload_capacity(block, ptr);
         if old_size >= new_need {
+            // 原地：canary 需重写到新容量末尾，并毒化多出的尾部。
+            let new_cap = old_cap.min(new_alloc + HEADER);
+            write_canary(ptr, new_cap);
+            let old_user = user_size(old_cap);
+            let new_user = user_size(new_cap);
+            if old_user > new_user {
+                // 毒化被裁掉的尾部（用户区末尾之后到旧 canary 之前）。
+                core::ptr::write_bytes(ptr.add(new_user), POISON_BYTE, old_user - new_user);
+            }
             ALLOC_LOCK.unlock();
             return ptr;
         }
@@ -314,11 +428,18 @@ pub extern "C" fn realloc(ptr: *mut u8, new_size: size_t) -> *mut u8 {
             return core::ptr::null_mut();
         }
         let new_payload = payload_of(new_block);
-        let copy_len = (old_size - off).min(new_size);
+        // 复制用户数据（含原 canary 前的数据；不含 canary）。
+        let copy_len = user_size(old_cap).min(new_size);
         core::ptr::copy_nonoverlapping(ptr, new_payload, copy_len);
         set_payload_offset(new_payload, HEADER);
-        set_block_next(block, core::ptr::null_mut());
-        freelist_insert(block);
+        write_canary(new_payload, payload_capacity(new_block, new_payload));
+        // 释放旧块。
+        let old_cap2 = payload_capacity(block, ptr);
+        if !freelist_contains(block) {
+            poison_payload(ptr, old_cap2);
+            set_block_next(block, core::ptr::null_mut());
+            freelist_insert(block);
+        }
         ALLOC_LOCK.unlock();
         new_payload
     }
@@ -406,6 +527,9 @@ fn aligned_alloc_impl(alignment: size_t, size: size_t) -> *mut u8 {
         let aligned = align_up(raw as usize, alignment) as *mut u8;
         // 把 payload 相对块起始的偏移写到 payload-8（与 malloc 的 offset 方案一致）。
         set_payload_offset(aligned, aligned as usize - block as usize);
+        // 加固：写入 canary。
+        let cap = payload_capacity(block, aligned);
+        write_canary(aligned, cap);
         ALLOC_LOCK.unlock();
         aligned
     }
