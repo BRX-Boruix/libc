@@ -4,6 +4,10 @@
 //! string、ctype、stdlib），在 host std 环境下做对抗性单测（S23/S30/S31）。
 //! 系统调用相关函数（malloc/printf 输出/文件 IO）由内核 shell 验证层负责
 //! 端到端验收。
+//! 端到端验收。
+//!
+//! 所有 fuzz 测试使用固定种子（FuzzRng/splitmix64），保证确定性、可复现：
+//! 同一二进制每次运行结果一致（strtod/strtof/decompose_fast/strtoll/strtol/宽字符往返）。
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -992,6 +996,132 @@ fn test_strtod_fast_fuzz_reference() {
         let fast = unsafe { stdlib::strtod(bytes.as_ptr() as *const i8, core::ptr::null_mut()) };
         let reference: f64 = s.parse().unwrap();
         assert_eq!(fast, reference, "strtod fast != reference for {s}");
+    }
+}
+
+
+
+
+// ---- item10：确定性可复现 fuzz（固定种子，跨运行可复现） ----
+
+/// 共享确定性 PRNG（splitmix64，固定种子）——保证 fuzz 每次运行结果一致。
+struct FuzzRng(u64);
+impl FuzzRng {
+    fn new(seed: u64) -> Self { FuzzRng(seed) }
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, n: u64) -> u64 { self.next() % n }
+}
+
+/// strtol/strtoll 参考解析：给定 base，解析可选的 0x/0 前缀与数字。
+/// 返回 (值, 是否溢出到 i64 边界)。base∈{0,2,8,10,16}。
+fn ref_strtoll(s: &str, base: i32) -> (i64, bool) {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') { i += 1; }
+    let mut neg = false;
+    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+        neg = bytes[i] == b'-';
+        i += 1;
+    }
+    let mut b = base as u64;
+    if b == 0 {
+        if i + 1 < bytes.len() && bytes[i] == b'0' && (bytes[i+1] == b'x' || bytes[i+1] == b'X') {
+            b = 16; i += 2;
+        } else if i < bytes.len() && bytes[i] == b'0' {
+            b = 8; i += 1;
+        } else {
+            b = 10;
+        }
+    }
+    let mut val: u64 = 0;
+    let mut overflow = false;
+    let mut any = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        let d = if c.is_ascii_digit() { (c - b'0') as u64 }
+                else if c.is_ascii_lowercase() { (c - b'a' + 10) as u64 }
+                else if c.is_ascii_uppercase() { (c - b'A' + 10) as u64 }
+                else { break };
+        if d >= b { break; }
+        any = true;
+        val = val.checked_mul(b).and_then(|v| v.checked_add(d)).unwrap_or(u64::MAX);
+        if val >= (1u64 << 63) { overflow = true; }
+        i += 1;
+    }
+    if !any { return (0, false); }
+    let limit = (1u64 << 63);
+    let mag = if overflow { limit } else { val.min(limit) };
+    if neg {
+        if mag == limit { return (i64::MIN, true); }
+        (-(mag as i64), overflow)
+    } else {
+        if overflow { (i64::MAX, true) } else { (mag as i64, false) }
+    }
+}
+
+#[test]
+fn test_strtoll_fuzz_deterministic() {
+    let mut rng = FuzzRng::new(0xACAB_5EED_2024_0100);
+    for _ in 0..2000 {
+        let base = [2i32, 8, 10, 16][rng.below(4) as usize];
+        let sign = rng.below(2) == 1;
+        let len = 1 + rng.below(18); // 1..18 位数字
+        let mut ds = String::new();
+        if sign { ds.push('-'); }
+        for _ in 0..len {
+            let max = match base { 2 => 1, 8 => 7, 10 => 9, _ => 15 };
+            let d = rng.below((max + 1) as u64);
+            ds.push(if d < 10 { (b'0' + d as u8) as char } else { (b'a' + (d - 10) as u8) as char });
+        }
+        if ds.trim_start_matches('0').is_empty() { continue; }
+        let null = format!("{}\0", ds);
+        let got = unsafe { stdlib::strtoll(null.as_ptr() as *const i8, core::ptr::null_mut(), base) };
+        let (want, _) = ref_strtoll(&ds, base);
+        assert_eq!(got, want, "strtoll base={base} input={ds}");
+    }
+}
+
+#[test]
+fn test_strtol_fuzz_deterministic() {
+    let mut rng = FuzzRng::new(0x5EED_0B10_2024_0200);
+    for _ in 0..1500 {
+        let base = [10i32, 0][rng.below(2) as usize];
+        let sign = rng.below(2) == 1;
+        let len = 1 + rng.below(12);
+        let mut ds = String::new();
+        if sign { ds.push('-'); }
+        for _ in 0..len { ds.push((b'0' + rng.below(10) as u8) as char); }
+        let null = format!("{}\0", ds);
+        let got = unsafe { stdlib::strtol(null.as_ptr() as *const i8, core::ptr::null_mut(), base) };
+        let (want, _) = ref_strtoll(&ds, base);
+        assert_eq!(got, want, "strtol base={base} input={ds}");
+    }
+}
+
+#[test]
+fn test_wchar_roundtrip_fuzz_deterministic() {
+    let mut rng = FuzzRng::new(0x77C4_5255_4E44_0300);
+    for _ in 0..500 {
+        let len = 1 + rng.below(20);
+        let mut bytes = Vec::new();
+        for _ in 0..len {
+            bytes.push((0x20 + rng.below(0x5E)) as u8);
+        }
+        bytes.push(0);
+        let mut w = vec![0i32; (len + 4) as usize];
+        let nw = unsafe { wchar::mbstowcs(w.as_mut_ptr(), bytes.as_ptr() as *const i8, w.len()) };
+        assert_eq!(nw, len as usize, "mbstowcs count");
+        let mut mb = vec![0i8; (len + 4) as usize];
+        let nm = unsafe { wchar::wcstombs(mb.as_mut_ptr(), w.as_ptr(), mb.len()) };
+        assert_eq!(nm, len as usize, "wcstombs count");
+        let ok = (0..len).all(|i| mb[i as usize] as u8 == bytes[i as usize]);
+        assert!(ok, "wchar roundtrip mismatch");
     }
 }
 

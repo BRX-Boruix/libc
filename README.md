@@ -82,7 +82,7 @@ unsafe {
 ```sh
 cargo test --manifest-path libc/test_harness/Cargo.toml
 ```
-42 个用例（含 round-half-even、负零、大数、指数、全范围 dtoa、qsort/bsearch、
+64 个用例（含 round-half-even、负零、大数、指数、全范围 dtoa、qsort/bsearch、
 strtod 正确舍入（含 2.2250738585072011e-308 次正规边界、min/max 次正规、溢出）、strtol 溢出/进制探测等对抗性边界）。
 
 ## 算法说明
