@@ -31,6 +31,10 @@ char *strpbrk(const char *s, const char *accept);
 char *strncat(char *dst, const char *src, size_t n);
 char *strtok(char *s, const char *delim);    /* 单线程（内部静态） */
 char *strtok_r(char *s, const char *delim, char **saveptr); /* 线程安全 */
+int strcasecmp(const char *a, const char *b);
+int strncasecmp(const char *a, const char *b, size_t n);
+void *memmem(const void *haystack, size_t hl, const void *needle, size_t nl);
+char *strsep(char **strp, const char *delim);
 
 #ifdef __cplusplus
 }

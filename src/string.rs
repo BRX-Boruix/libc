@@ -479,3 +479,102 @@ pub unsafe extern "C" fn strtok(s: *mut c_char, delim: *const c_char) -> *mut c_
         r
     }
 }
+
+
+/// ASCII 小写（case-insensitive 比较用；C 语义：非 ASCII 不转换）。
+#[inline]
+fn ascii_lower(b: u8) -> u8 {
+    if b.is_ascii_uppercase() { b + (b'a' - b'A') } else { b }
+}
+
+/// `strcasecmp(a, b)`：ASCII 大小写不敏感字符串比较。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int {
+    unsafe {
+        let mut i = 0usize;
+        loop {
+            let ca = ascii_lower(*a.add(i) as u8) as u8 as i8;
+            let cb = ascii_lower(*b.add(i) as u8) as u8 as i8;
+            if ca != cb {
+                return if (ca as u8) < (cb as u8) { -1 } else { 1 };
+            }
+            if ca == 0 {
+                return 0;
+            }
+            i += 1;
+        }
+    }
+}
+
+/// `strncasecmp(a, b, n)`：受限 ASCII 大小写不敏感比较。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strncasecmp(a: *const c_char, b: *const c_char, n: size_t) -> c_int {
+    unsafe {
+        let mut i = 0usize;
+        while i < n {
+            let ca = ascii_lower(*a.add(i) as u8) as u8 as i8;
+            let cb = ascii_lower(*b.add(i) as u8) as u8 as i8;
+            if ca != cb {
+                return if (ca as u8) < (cb as u8) { -1 } else { 1 };
+            }
+            if ca == 0 {
+                return 0;
+            }
+            i += 1;
+        }
+        0
+    }
+}
+
+/// `memmem(haystack, hl, needle, nl)`：在内存块中查找子串（返回首地址）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memmem(
+    haystack: *const u8,
+    hl: size_t,
+    needle: *const u8,
+    nl: size_t,
+) -> *mut u8 {
+    unsafe {
+        if nl == 0 {
+            return haystack as *mut u8;
+        }
+        if hl < nl {
+            return core::ptr::null_mut();
+        }
+        let h = core::slice::from_raw_parts(haystack, hl);
+        let n = core::slice::from_raw_parts(needle, nl);
+        // 朴素查找（naive scan）。
+        for i in 0..=(hl - nl) {
+            if h[i..i + nl] == *n {
+                return haystack.add(i) as *mut u8;
+            }
+        }
+        core::ptr::null_mut()
+    }
+}
+
+/// `strsep(strp, delim)`：按分隔符切分字符串（POSIX）。
+/// 返回当前 token 起始；*strp 前进到下一个 token 或置 NULL。token 末尾的分隔符
+/// 被改写为 NUL。与 strtok 不同：连续分隔符返回空 token，且不跳过前导分隔符。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strsep(strp: *mut *mut c_char, delim: *const c_char) -> *mut c_char {
+    unsafe {
+        if strp.is_null() || (*strp).is_null() {
+            return core::ptr::null_mut();
+        }
+        let mut p = *strp;
+        // 找到分隔符位置。
+        let token_start = p;
+        while *p != 0 {
+            if strchr(delim as *const c_char, *p as c_int) != core::ptr::null_mut() {
+                *p = 0;
+                *strp = p.add(1);
+                return token_start;
+            }
+            p = p.add(1);
+        }
+        *strp = core::ptr::null_mut();
+        token_start
+    }
+}
+
