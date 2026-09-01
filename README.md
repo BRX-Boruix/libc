@@ -18,7 +18,7 @@ kernel(syscall)  ←  libsys(薄封装, 提供 _start/user_main)  ←  libc(本 
 
 | 模块 | 函数 | 真实数据链路（S06） |
 |---|---|---|
-| \`malloc\` | malloc / free / realloc / calloc / malloc_usable_size / posix_memalign / aligned_alloc | 经 libsys \`brk\` 扩展堆，自有空闲链表分配器；posix_memalign 支持任意 2 的幂对齐 |
+| `malloc` | malloc / free / realloc / calloc / malloc_usable_size / posix_memalign / aligned_alloc | 经 libsys `brk` 扩展堆，自有空闲链表分配器；posix_memalign 支持任意 2 的幂对齐；加固：canary 越界守卫、free 0xDD 毒化、double-free 检测 |
 | \`string\` | memcpy/memmove/memset/memcmp/memchr/strlen/strnlen/strcmp/strncmp/strcpy/strncpy/strcat/strncat/strchr/strrchr/strstr/strdup/strspn/strcspn/strpbrk/strtok/strtok_r | 纯逻辑，可移植（host 可单测）；strtok_r 线程安全（saveptr） |
 | \`ctype\` | isalpha/isalnum/isupper/.../tolower/toupper | 纯逻辑 |
 | \`stdio\` | printf/vprintf/fprintf/vfprintf/sprintf/snprintf/vsnprintf/puts/putchar/getchar/fscanf + fopen/fclose/fread/fwrite/fflush/fgetc/fputc/fgets/fputs/feof/ferror | printf 写 fd 1；FILE 流经内核 VFS |
@@ -37,7 +37,7 @@ kernel(syscall)  ←  libsys(薄封装, 提供 _start/user_main)  ←  libc(本 
 
 - **错误处理（ADR-010）**：所有可能失败的调用经 \`__errno_location()\` 写全局 errno 并返回
   -1/NULL；errno 值与内核 ADR-010 对齐（EINVAL=22, ENOENT=2, ENOMEM=12, ERANGE=34 等）。
-- **malloc**：16 字节块头，payload 16 字节对齐；首匹配 + 分裂 + 地址序合并；自旋锁保护；
+- **malloc**：16 字节块头，payload 16 字节对齐；首匹配 + 分裂 + 地址序合并；自旋锁保护；；加固：canary 越界守卫、free 0xDD 毒化、double-free 检测
   堆经 \`brk\` 按 64KB 增长。与 libsys 的 Rust 全局分配器（buddy）相互独立、不冲突。
 - **printf 浮点**：f64 分解为 \`d0.d1d2... × 10^dec_exp\`（**大整数精确法**，
   float_bigint.rs，全值域精确），round-half-even 舍入，inf/-inf/nan 显式输出。
