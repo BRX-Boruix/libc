@@ -52,6 +52,7 @@ pub mod stdlib;
 pub mod string;
 pub mod time;
 pub mod unistd;
+pub mod wchar;
 
 /// 初始化 libc（标准流等）。幂等，可安全多次调用。
 #[unsafe(no_mangle)]

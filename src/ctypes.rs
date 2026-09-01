@@ -40,6 +40,8 @@ pub type c_float = f32;
 pub type c_double = f64;
 /// `c_void`：`void`。
 pub type c_void = core::ffi::c_void;
+/// `wchar_t`：宽字符（x86_64 LP64 → 32 位有符号，与 `%lc/%ls` 目标一致）。
+pub type wchar_t = i32;
 
 /// NULL 指针。
 pub const NULL: *mut c_void = core::ptr::null_mut();

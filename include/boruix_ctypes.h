@@ -16,6 +16,7 @@ typedef unsigned long c_ulong;
 typedef long long c_longlong;
 typedef unsigned long long c_ulonglong;
 typedef signed char c_char;
+typedef int wchar_t; /* x86_64 LP64：32 位宽字符 */
 typedef unsigned c_uint;
 
 #define NULL ((void *)0)

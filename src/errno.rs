@@ -84,6 +84,8 @@ pub const ENOTEMPTY: i32 = 39;
 pub const ENOTDIR: i32 = 20;
 /// 是目录 EISDIR。
 pub const EISDIR: i32 = 21;
+/// `EILSEQ`：非法字节序列（宽字符转换失败）。
+pub const EILSEQ: i32 = 84;
 
 /// 把 libsys 的 `Error` 映射为 C errno 数值。
 ///

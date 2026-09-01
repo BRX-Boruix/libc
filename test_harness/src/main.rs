@@ -38,7 +38,10 @@ mod stdlib;
 mod errno {
     pub fn set_errno(_e: i32) {}
     pub const ERANGE: i32 = 34;
+    pub const EILSEQ: i32 = 84;
 }
+#[path = "../../src/wchar.rs"]
+mod wchar;
 
 // stdlib 的 strtod/strtof 依赖的 stdio 辅助（host 桩 + 真实实现）。
 mod stdio {
@@ -681,5 +684,64 @@ fn test_strtof_correct_rounding_fuzz() {
         assert_strtof_roundtrip(&ds);
     }
 }
+
+// ---- 宽字符（wchar）测试 ----
+
+#[test]
+fn test_wcslen() {
+    let s: [i32; 4] = [b'a' as i32, b'b' as i32, b'c' as i32, 0];
+    assert_eq!(unsafe { wchar::wcslen(s.as_ptr()) }, 3);
+    let e: [i32; 1] = [0];
+    assert_eq!(unsafe { wchar::wcslen(e.as_ptr()) }, 0);
+}
+
+#[test]
+fn test_wcscmp() {
+    let a: [i32; 4] = [b'a' as i32, b'b' as i32, b'c' as i32, 0];
+    let b1: [i32; 4] = [b'a' as i32, b'b' as i32, b'c' as i32, 0];
+    let b2: [i32; 4] = [b'a' as i32, b'b' as i32, b'd' as i32, 0];
+    let b3: [i32; 3] = [b'a' as i32, b'b' as i32, 0];
+    assert_eq!(unsafe { wchar::wcscmp(a.as_ptr(), b1.as_ptr()) }, 0);
+    assert!(unsafe { wchar::wcscmp(a.as_ptr(), b2.as_ptr()) } < 0);
+    assert!(unsafe { wchar::wcscmp(a.as_ptr(), b3.as_ptr()) } > 0);
+}
+
+#[test]
+fn test_wcscpy_cat() {
+    let mut dst: [i32; 8] = [0; 8];
+    let src: [i32; 4] = [b'h' as i32, b'i' as i32, 0, 0];
+    let r = unsafe { wchar::wcscpy(dst.as_mut_ptr(), src.as_ptr()) };
+    assert_eq!(r as usize, dst.as_mut_ptr() as usize);
+    assert_eq!(unsafe { wchar::wcslen(dst.as_ptr()) }, 2);
+    let app: [i32; 3] = [b'!' as i32, 0, 0];
+    unsafe { wchar::wcscat(dst.as_mut_ptr(), app.as_ptr()); }
+    assert_eq!(unsafe { wchar::wcslen(dst.as_ptr()) }, 3);
+    assert_eq!(dst[0], b'h' as i32);
+    assert_eq!(dst[1], b'i' as i32);
+    assert_eq!(dst[2], b'!' as i32);
+}
+
+#[test]
+fn test_mbstowcs_roundtrip() {
+    let s: [i8; 4] = [b'a' as i8, b'b' as i8, b'c' as i8, 0];
+    let mut w: [i32; 8] = [0; 8];
+    let n = unsafe { wchar::mbstowcs(w.as_mut_ptr(), s.as_ptr(), 8) };
+    assert_eq!(n, 3);
+    assert_eq!(w[0], b'a' as i32);
+    assert_eq!(w[2], b'c' as i32);
+    let mut mb: [i8; 8] = [0; 8];
+    let m = unsafe { wchar::wcstombs(mb.as_mut_ptr(), w.as_ptr(), 8) };
+    assert_eq!(m, 3);
+    assert_eq!(mb[0], b'a' as i8);
+    assert_eq!(mb[2], b'c' as i8);
+}
+
+#[test]
+fn test_wcrtomb_eilseq() {
+    let mut mb: [i8; 2] = [0; 2];
+    let r = unsafe { wchar::wcrtomb(mb.as_mut_ptr(), 0x1FFFF, core::ptr::null_mut()) };
+    assert_eq!(r, usize::MAX);
+}
+
 
 

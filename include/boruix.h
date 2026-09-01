@@ -10,5 +10,6 @@
 #include "stdio.h"
 #include "unistd.h"
 #include "time.h"
+#include "wchar.h"
 
 #endif /* _BORUIX_H */
