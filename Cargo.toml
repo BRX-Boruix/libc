@@ -1,0 +1,24 @@
+[package]
+name = "libc"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "BORUIX 用户态 C 标准库（Rust 实现 + C ABI，构建于 libsys 之上）"
+
+# 供 no_std bin crate 作为 Rust 依赖链接（rlib），同时产出 C 静态库（staticlib）
+# 以便未来原生 C 工具链 / 其他语言经 C ABI 链接（ADR-001：libc = Rust 实现 + C ABI）。
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+libsys = { path = "../libsys" }
+spin = "0.9"
+
+# 用户态裸机库：无 unwinding 运行时。unwind 相关函数由 no_std 下层与
+# libsys 提供；libc 自身不引入任何 unwinding 依赖（S35：零外部依赖引入）。
+[profile.dev]
+panic = "abort"
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
