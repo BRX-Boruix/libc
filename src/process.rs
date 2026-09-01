@@ -85,12 +85,15 @@ pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
     }
 }
 
-/// \`waitpid(pid, status, options)\`：等待子进程。
+/// \`waitpid(pid, status, options)\`：等待子进程退出。
 ///
-/// 内核 libsys 目前仅支持 \`waitpid_any()\`（等任意子进程）。本实现将
-/// 非 0 的 pid 如实映射为"等任意子"（内核无精确匹配原语），并在 status 写入
-/// 退出码（高 8 位，POSIX WEXITSTATUS 语义）。options 非 0（WNOHANG 等）暂不
-/// 支持，如实返回 -1 置 ENOTSUP。返回 pid 不可得，如实返回 -1（status 已填）。
+/// 返回被收尸子进程的 **pid**（POSIX 语义；失败返回 -1 并置 errno）。退出码
+/// 写入 \`*status\` 高 8 位（WEXITSTATUS 语义）。
+///
+/// - \`pid\`：内核 libsys 仅支持等任意子进程（\`waitpid_any\`）。\`pid>0\`
+///   精确匹配内核无此原语，\`pid==0\`（同进程组）本系统无进程组概念——两者
+///   均如实映射为"等任意子"（与内核能力一致，S09 不伪装精确匹配）。
+/// - \`options\` 非 0（WNOHANG/WUNTRACED 等）暂不支持，如实返回 -1 置 ENOTSUP。
 #[unsafe(no_mangle)]
 pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
     let _ = pid;
@@ -99,13 +102,13 @@ pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_i
         return -1;
     }
     match libsys::waitpid_any() {
-        Ok(code) => {
+        Ok(wr) => {
             if !status.is_null() {
                 unsafe {
-                    *status = ((code & 0xFF) as c_int) << 8;
+                    *status = ((wr.code & 0xFF) as c_int) << 8;
                 }
             }
-            -1
+            wr.pid as c_int
         }
         Err(e) => {
             set_errno(from_libsys(e));

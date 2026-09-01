@@ -103,7 +103,7 @@ strtod 正确舍入（含 2.2250738585072011e-308 次正规边界、min/max 次�
 3. **getpid**：内核暂无 SYS_TASK_GETPID，实现经解析 \`/processes/list\` 找 Running 状态进程
    启发式（单核顺序模型下成立）。\`docs/adr/033-process-identity.md\` 有完整设计。
 4. **lseek(SEEK_CUR/SEEK_END)**：内核不暴露当前位置/末尾，如实返回 ENOTSUP（SEEK_SET 可用）。
-5. **waitpid**：内核 \`waitpid_any\` 不返回 pid，waitpid 暂返回 -1（状态经 errno 表达）。
+5. **waitpid**：返回被收尸子进程的真实 pid（POSIX 语义）；退出码写入 \`*status\` 高 8 位。内核 libsys 仅支持等任意子进程（\`pid>0\` 精确匹配、\`WNOHANG\` 等 options 暂不支持，如实返回 -1 置 ENOTSUP/ENOENT）。
 6. **FILE 流**：默认无缓冲直写（本内核页缓存写即落盘，缓冲期收益为零，S32 无优化无数据）。
 
 ## 符号冲突说明
