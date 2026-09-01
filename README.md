@@ -26,6 +26,7 @@ kernel(syscall)  ←  libsys(薄封装, 提供 _start/user_main)  ←  libc(本 
 | \`float\` | decompose + emit_fixed/emit_exp/emit_general（\`%f/%e/%g\`） | 纯逻辑，host 单测 |
 | \`stdlib\` | abs/labs/llabs/atoi/atol/atoll/strtol/strtoul/strtoll/strtoull/strtod/strtof/strtold/rand/srand/div/ldiv/qsort/bsearch | 纯逻辑；strtod 严格正确舍入（大整数精确法），strtof 亦严格正确舍入（直接 f32 精确路径） |
 | \`random\` | xorshift64* PRNG | 未播种时经 libsys 时间自播种 |
+| `wchar` | wcslen/wcscmp/wcscpy/wcscat/wcschr/mbrtowc/wcrtomb/mbsrtowcs/wcsrtombs/mbstowcs/wcstombs | 宽字符（wchar_t=i32，逐字节扩展编码，无 locale） |
 | \`unistd\` | open/close/read/write/lseek/unlink/chdir/getcwd/isatty | 经 libsys io 域 |
 | \`process\` | exit/_exit/getpid/kill/waitpid/yield_sys | 经 libsys process 域 |
 | \`time\` | time/clock/sleep/usleep/nanosleep | 经 libsys 墙钟与 sleep |
