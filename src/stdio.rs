@@ -570,6 +570,31 @@ impl FmtSink for MemSink<'_> {
 // ---------- printf 核心（经 VaList 读取可变参数） ----------
 
 use core::ffi::VaList;
+/// 从 va_list 的 **GP 寄存器区** 读取下一个变长实参，返回其 u64 位型。
+///
+/// 本目标 `x86_64-unknown-none` 的 `c_variadic`（nightly 特性）在**调用侧**的代码生成
+/// 存在 ABI 缺陷：变长 `double` 实参被放进通用寄存器（GPR）而非 XMM，且 `%al=0`（声明
+/// 未用向量寄存器）。因此标准的 `ap.next_arg::<f64>()`（走 `fp_offset`/XMM 槽）读到的是
+/// 从未被 spill 的垃圾值。实测（QEMU 真机）确认调用方把**全部**变长实参（整型/指针/浮点）
+/// 按序放入 GPR，故统一经 `gp_offset`/`reg_save_area` 读取可正确还原（整型/指针本就走此路径；
+/// 浮点改走此路径即修复）。这是对编译器缺陷的显式规避（详见 shell/README 已知限制章节）。
+///
+/// 调用后 `gp_offset` 前进 8（每个变长实参占一个 8 字节 GP 槽）。
+unsafe fn next_float_arg_gp(ap: &mut VaList) -> u64 {
+    #[repr(C)]
+    struct VL {
+        gp_offset: i32,
+        fp_offset: i32,
+        overflow_arg_area: *const u8,
+        reg_save_area: *const u8,
+    }
+    let vl: *mut VL = unsafe { core::mem::transmute(ap as *mut VaList as *mut VL) };
+    let gp = unsafe { (*vl).gp_offset } as usize;
+    let area = unsafe { (*vl).reg_save_area };
+    let v = unsafe { core::ptr::read(area.add(gp) as *const u64) };
+    unsafe { (*vl).gp_offset += 8 };
+    v
+}
 
 /// 从一个 VaList 读取 width/precision 的 \`*\` 占位。
 fn resolve_star(spec: &Spec, ap: &mut VaList) -> (i64, i64) {
@@ -640,7 +665,7 @@ fn render_spec(
             emit_int(&s, v, false, sink)
         }
         Conv::Float | Conv::Exp | Conv::General => {
-            let v = unsafe { ap.next_arg::<f64>() };
+            let v = f64::from_bits(unsafe { next_float_arg_gp(ap) });
             let precision = if s.prec >= 0 { s.prec as usize } else { 6 };
             let mut d = crate::float::decompose(v);
             match s.conv {
@@ -650,7 +675,7 @@ fn render_spec(
             }
         }
         Conv::HexFloat => {
-            let v = unsafe { ap.next_arg::<f64>() };
+            let v = f64::from_bits(unsafe { next_float_arg_gp(ap) });
             crate::float::emit_hexfloat(&s, v, sink)
         }
     }
@@ -1549,5 +1574,4 @@ pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c
         assigned
     }
 }
-
 
