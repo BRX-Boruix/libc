@@ -51,6 +51,8 @@ pub struct FILE {
     pub buf_len: usize,
     pub buf_pos: usize,
     pub closed: bool,
+    /// 1 字节 pushback 槽（ungetc / fscanf 回退）。-1 表示空。
+    pub pushback: i32,
 }
 
 /// 全局锁：保护标准流初始化与输出（单进程模型下防重入）。
@@ -76,15 +78,15 @@ pub fn stdio_init() {
     unsafe {
         static STREAM_STDIN: SyncStream = SyncStream::new(FILE {
             fd: 0, mode: FmMode::Read, buf_mode: FmBufMode::None, eof: false, error: false,
-            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false,
+            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false, pushback: -1,
         });
         static STREAM_STDOUT: SyncStream = SyncStream::new(FILE {
             fd: 1, mode: FmMode::Write, buf_mode: FmBufMode::None, eof: false, error: false,
-            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false,
+            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false, pushback: -1,
         });
         static STREAM_STDERR: SyncStream = SyncStream::new(FILE {
             fd: 2, mode: FmMode::Write, buf_mode: FmBufMode::None, eof: false, error: false,
-            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false,
+            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false, pushback: -1,
         });
         if stdin.is_null() {
             stdin = STREAM_STDIN.get();
@@ -141,6 +143,7 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
                 core::ptr::write(fp, FILE {
                     fd, mode: fm, buf_mode: FmBufMode::None, eof: false, error: false,
                     buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false,
+                    pushback: -1,
                 });
             }
             fp
@@ -249,6 +252,12 @@ pub unsafe extern "C" fn fgetc(fp: *mut FILE) -> c_int {
             set_errno(EINVAL);
             return EOF;
         }
+        // pushback 槽优先。
+        if f.pushback >= 0 {
+            let c = f.pushback;
+            f.pushback = -1;
+            return c as c_int;
+        }
         let mut b = [0u8; 1];
         match libsys::read(f.fd, &mut b) {
             Ok(0) => { f.eof = true; EOF }
@@ -259,6 +268,28 @@ pub unsafe extern "C" fn fgetc(fp: *mut FILE) -> c_int {
                 EOF
             }
         }
+    }
+}
+
+/// `ungetc(c, fp)`：把字符 c 压回流（1 字节 pushback 槽）。
+/// 成功返回 c，失败（流不可读 / 槽已满 / EOF 参数）返回 EOF。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ungetc(c: c_int, fp: *mut FILE) -> c_int {
+    unsafe {
+        let f = &mut *fp;
+        if f.mode != FmMode::Read {
+            set_errno(EINVAL);
+            return EOF;
+        }
+        if c == EOF {
+            return EOF;
+        }
+        if f.pushback >= 0 {
+            return EOF; // 槽已满（仅支持 1 字节 pushback）。
+        }
+        f.pushback = c & 0xFF;
+        f.eof = false; // 压回后清除 EOF 标志。
+        c & 0xFF
     }
 }
 
@@ -302,6 +333,15 @@ pub unsafe extern "C" fn fgets(s: *mut c_char, n: c_int, fp: *mut FILE) -> *mut 
         }
         let mut i = 0usize;
         while i < max {
+            // pushback 槽优先。
+            if f.pushback >= 0 {
+                let c = f.pushback;
+                f.pushback = -1;
+                *s.add(i) = c as c_char;
+                i += 1;
+                if c == b'\n' as i32 { break; }
+                continue;
+            }
             let mut b = [0u8; 1];
             match libsys::read(f.fd, &mut b) {
                 Ok(0) => {
@@ -332,6 +372,87 @@ pub unsafe extern "C" fn fgets(s: *mut c_char, n: c_int, fp: *mut FILE) -> *mut 
         s
     }
 }
+
+
+/// `getdelim(lineptr, n, delim, fp)`：按分隔符读取一行（自动扩容）。
+/// 返回读取的字符数（不含分隔符），EOF/错误返回 -1。*lineptr 须指向可释放缓冲区或 NULL。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getdelim(
+    lineptr: *mut *mut c_char,
+    n: *mut size_t,
+    delim: c_int,
+    fp: *mut FILE,
+) -> isize {
+    unsafe {
+        if lineptr.is_null() || n.is_null() || fp.is_null() {
+            set_errno(EINVAL);
+            return -1;
+        }
+        let f = &mut *fp;
+        if f.mode != FmMode::Read {
+            set_errno(EINVAL);
+            return -1;
+        }
+        if (*lineptr).is_null() {
+            let cap: size_t = 128;
+            let buf = crate::malloc::malloc(cap);
+            if buf.is_null() {
+                set_errno(crate::errno::ENOMEM);
+                return -1;
+            }
+            *lineptr = buf as *mut c_char;
+            *n = cap;
+        }
+        let mut ptr = *lineptr;
+        let mut cap = *n;
+        let mut len: size_t = 0;
+        let dl = (delim & 0xFF) as u8;
+        let mut total: isize = 0;
+        loop {
+            let c = fscan_getc(f);
+            if c < 0 {
+                break;
+            }
+            if len + 1 >= cap {
+                let newcap = cap * 2;
+                let nb = crate::malloc::realloc(ptr as *mut u8, newcap);
+                if nb.is_null() {
+                    set_errno(crate::errno::ENOMEM);
+                    return -1;
+                }
+                ptr = nb as *mut c_char;
+                *lineptr = ptr;
+                *n = newcap;
+                cap = newcap;
+            }
+            *ptr.add(len) = c as c_char;
+            len += 1;
+            total += 1;
+            if c as u8 == dl {
+                break;
+            }
+        }
+        if total == 0 {
+            if f.eof || f.error {
+                return -1;
+            }
+            return -1;
+        }
+        *ptr.add(len) = 0;
+        total
+    }
+}
+
+/// `getline(lineptr, n, fp)`：按换行读取一行（等价 getdelim(delim='\n')）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getline(
+    lineptr: *mut *mut c_char,
+    n: *mut size_t,
+    fp: *mut FILE,
+) -> isize {
+    unsafe { getdelim(lineptr, n, b'\n' as c_int, fp) }
+}
+
 
 /// \`fputs(s, fp)\`：写字符串到 fp（不含 NUL）。成功返回非负，失败 EOF。
 #[unsafe(no_mangle)]
@@ -793,12 +914,30 @@ pub unsafe extern "C" fn getchar() -> c_int {
 
 /// 内部：从 FILE 读一个字节；EOF 返回 -1。
 unsafe fn fscan_getc(f: &mut FILE) -> i32 {
+    // 优先读回 pushback 槽。
+    if f.pushback >= 0 {
+        let c = f.pushback;
+        f.pushback = -1;
+        return c;
+    }
     let mut b = [0u8; 1];
     match libsys::read(f.fd, &mut b) {
         Ok(0) => { f.eof = true; -1 }
         Ok(_) => b[0] as i32,
         Err(e) => { set_errno(from_libsys(e)); f.error = true; -1 }
     }
+}
+
+/// 把一个字符压回流（1 字节 pushback 槽；若已满则忽略，返回 false）。
+unsafe fn fscan_ungetc(f: &mut FILE, c: i32) -> bool {
+    if c < 0 {
+        return false;
+    }
+    if f.pushback >= 0 {
+        return false; // 槽已满，不支持多字节 pushback。
+    }
+    f.pushback = c;
+    true
 }
 
 fn fscan_isspace(c: i32) -> bool {
@@ -882,9 +1021,9 @@ pub fn f64_pow10(k: i32) -> f64 {
 /// 长度修饰符 \`hh h l ll z t L j\`，可选宽度（如 \`%5d\`）与抑制赋值
 /// （\`%*d\`）。整数目标指针宽度随长度修饰符变化；实数 \`%f→float*\`、
 /// \`%lf→double*\`、\`%Lf→long double*\`（本目标 long double≈f64，如实）。
-/// **已知限制（S09/S19，无 pushback 流）**：token 读到首个不匹配字符即停止，该
-/// 字符已消费、无法放回；实数有效数字超 19 位截断（误差 <= 1 ulp）；\`%[\` 仅支持
-/// 单字节 char\`*\`。\`%lc/%ls\`（l 修饰宽字符）目标为 wchar_t*（x86_64 上 4 字节），
+/// **pushback（S19）**：FILE 带 1 字节 pushback 槽（ungetc），fscanf 读到不匹配
+/// 字符（非本转换数字/集合外/超宽/实数终止符）时压回供后续转换复用，避免字符丢失；
+/// 多字节 pushback 仅支持 1 槽。%lc/%ls（l 修饰宽字符）目标为 wchar_t*（x86_64 上 4 字节），
 /// 每字节扩展为宽字符。返回成功赋值项数；遇 EOF/错误返回 EOF。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c_int {
@@ -1069,6 +1208,7 @@ pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c
                         let in_set = set_members.contains(&(cur as u8));
                         let keep = if negate { !in_set } else { in_set };
                         if !keep {
+                            fscan_ungetc(f, cur); // 回退不匹配字符。
                             break;
                         }
                         consumed += 1;
@@ -1136,7 +1276,10 @@ pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c
                                     any = true;
                                     nread += 1;
                                 }
-                                None => break,
+                                None => {
+                                    if cur >= 0 { fscan_ungetc(f, cur); } // 回退非数字。
+                                    break;
+                                }
                             }
                             if nread >= w {
                                 break;
@@ -1178,7 +1321,10 @@ pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c
                                     any = true;
                                     nread += 1;
                                 }
-                                None => break,
+                                None => {
+                                    if cur >= 0 { fscan_ungetc(f, cur); } // 回退非本基数数字。
+                                    break;
+                                }
                             }
                             if nread >= w {
                                 break;
@@ -1210,10 +1356,15 @@ pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c
                         let mut k = 0usize;
                         let mut cur = first;
                         loop {
-                            if cur < 0 || fscan_isspace(cur) {
+                            if cur < 0 {
+                                break;
+                            }
+                            if fscan_isspace(cur) {
+                                fscan_ungetc(f, cur); // 回退结束 %s 的空白字符。
                                 break;
                             }
                             if k >= w {
+                                fscan_ungetc(f, cur); // 宽度用尽，回退超宽字符。
                                 break;
                             }
                             if !target.is_null() {
@@ -1322,6 +1473,15 @@ pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c
                             }
                             if eany {
                                 exp10 = if eneg { -ed } else { ed };
+                            }
+                            // 指数部分结束，回退非数字终止字符。
+                            if cur >= 0 {
+                                fscan_ungetc(f, cur);
+                            }
+                        } else {
+                            // 无指数：回退终止 mantissa 的非数字字符。
+                            if cur >= 0 {
+                                fscan_ungetc(f, cur);
                             }
                         }
                         let mut value: f64 = mant as f64;
