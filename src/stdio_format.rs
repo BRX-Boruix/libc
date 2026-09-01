@@ -18,6 +18,10 @@ pub trait FmtSink {
     fn write_byte(&mut self, b: u8) -> Result<(), ()> {
         self.write(core::slice::from_ref(&b))
     }
+    /// 已写入的字符数（`%n` 用它写计数）。
+    fn count(&self) -> usize {
+        0
+    }
 }
 
 /// 把输出写到一个 \`&mut Vec<u8>\` 的适配（sprintf/snprintf 用，可单测）。
@@ -26,6 +30,9 @@ impl FmtSink for VecSink<'_> {
     fn write(&mut self, bytes: &[u8]) -> Result<(), ()> {
         self.0.extend_from_slice(bytes);
         Ok(())
+    }
+    fn count(&self) -> usize {
+        self.0.len()
     }
 }
 

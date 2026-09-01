@@ -563,6 +563,9 @@ impl FmtSink for MemSink<'_> {
         }
         Ok(())
     }
+    fn count(&self) -> usize {
+        self.pos
+    }
 }
 // ---------- printf 核心（经 VaList 读取可变参数） ----------
 
@@ -676,14 +679,12 @@ fn vformat_to_sink(
     sink: &mut dyn FmtSink,
 ) -> Result<ssize_t, ()> {
     let fmt_bytes = unsafe { cstr_to_bytes(fmt) };
-    let mut emitted: usize = 0;
     parse_and_format(&fmt_bytes, sink, |spec, sink| {
-        let before = emitted;
+        let before = sink.count();
         render_spec(spec, before, ap, sink)?;
-        emitted += 1;
         Ok(())
     })?;
-    Ok(emitted as ssize_t)
+    Ok(sink.count() as ssize_t)
 }
 
 /// 核心：格式化到内存缓冲（sprintf/snprintf），返回应写字节数。
@@ -697,11 +698,9 @@ fn vformat_mem(
         // 只统计长度（snprintf cap=0 合法）。
         let fmt_bytes = unsafe { cstr_to_bytes(fmt) };
         let mut counter = CounterSink { n: 0 };
-        let mut emitted = 0usize;
         parse_and_format(&fmt_bytes, &mut counter, |spec, sink| {
-            let before = emitted;
+            let before = sink.count();
             render_spec(spec, before, ap, sink)?;
-            emitted += 1;
             Ok(())
         })?;
         return Ok(counter.n as ssize_t);
@@ -712,11 +711,9 @@ fn vformat_mem(
         truncated: false,
     };
     let fmt_bytes = unsafe { cstr_to_bytes(fmt) };
-    let mut emitted = 0usize;
     parse_and_format(&fmt_bytes, &mut mem, |spec, sink| {
-        let before = emitted;
+        let before = sink.count();
         render_spec(spec, before, ap, sink)?;
-        emitted += 1;
         Ok(())
     })?;
     // NUL 终止。
@@ -731,6 +728,7 @@ struct CounterSink { n: usize }
 impl FmtSink for CounterSink {
     fn write(&mut self, bytes: &[u8]) -> Result<(), ()> { self.n += bytes.len(); Ok(()) }
     fn write_byte(&mut self, _b: u8) -> Result<(), ()> { self.n += 1; Ok(()) }
+    fn count(&self) -> usize { self.n }
 }
 
 /// 输出到 fd 的 sink。
@@ -758,6 +756,7 @@ impl FmtSink for FdSink {
     fn write_byte(&mut self, b: u8) -> Result<(), ()> {
         self.write(core::slice::from_ref(&b))
     }
+    fn count(&self) -> usize { self.wrote as usize }
 }
 impl FdSink {
     fn flush(&mut self, bytes: &[u8]) {
@@ -1141,8 +1140,10 @@ pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c
                         ap.next_arg::<usize>() as *mut u8
                     };
                     let target32 = target8 as *mut i32;
+                    // %c/%lc 无显式宽度时默认读 1 个字符（C 语义）。
+                    let cw = if width == 0 { 1 } else { w };
                     let mut k = 0usize;
-                    while k < w {
+                    while k < cw {
                         let ch = fscan_getc(f);
                         if ch < 0 {
                             break;
@@ -1526,7 +1527,14 @@ pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c
                 }
             } else if fscan_isspace(c as i32) {
                 // 格式串空白：匹配任意输入空白（含 0 个）。
-                while fscan_isspace(fscan_getc(f)) {}
+                // 读完空白后须回退首个非空白字符，否则该字符被吞掉导致后续转换错位。
+                let mut sc = fscan_getc(f);
+                while sc >= 0 && fscan_isspace(sc) {
+                    sc = fscan_getc(f);
+                }
+                if sc >= 0 {
+                    fscan_ungetc(f, sc);
+                }
                 i += 1;
             } else {
                 // 字面量：读一个字符须相等。

@@ -111,10 +111,17 @@ unsafe fn check_canary(payload: *mut u8, cap: usize) -> bool {
 }
 
 /// free 时把已释放的用户区填 0xDD（毒化）；canary 区保留。
+/// 用 volatile 写：LLVM 会因"毒化仅经越界读/复用可观察"而将其当作死存储消除，
+/// volatile 保证 0xDD 始终实际写入（S40 加固可观测、可验收）。
 #[inline]
 unsafe fn poison_payload(payload: *mut u8, cap: usize) {
     unsafe {
-        core::ptr::write_bytes(payload, POISON_BYTE, user_size(cap));
+        let n = user_size(cap);
+        let mut i = 0usize;
+        while i < n {
+            core::ptr::write_volatile(payload.add(i), POISON_BYTE);
+            i += 1;
+        }
     }
 }
 
