@@ -3,7 +3,7 @@
 //! 每个线程在共享地址空间持一个独立 mmap 的 `Tcb`，errno 槽位于 **offset 0**；线程引导把
 //! x86-64 `IA32_FS_BASE`（MSR 0xC0000100）设为该 `Tcb` 地址。**RDMSR/WRMSR 是 CPL0 特权指令，
 //! 用户态直用会 #GP**，故写侧经内核 `set_fs_base` syscall（threads.md T2-1，kernel 于 CPL0 内
-//! wrmsr），读侧用 `fs:[0]` 段相对寻址（CPU 隐式用 FS base，免 MSR、免 CR4.FSGSBASE）。
+//! wrmsr），读侧用 `rdfsbase`（FSGSBASE 指令，内核已置 CR4.FSGSBASE=1，见 kernel c699d99）。
 //! 内核调度器对每线程保存/恢复 FS base（kernel 4f0b724，threads.md T2-0），保证线程切换后
 //! FS base 恒指向当前线程 Tcb。
 //!
@@ -24,12 +24,19 @@ pub struct Tcb {
     pub tgid: u64,
     /// 自指针（可选自校验）。
     pub this: u64,
+    // ---- T2-2 库管理 TLS 区（bump arena，仅本线程读写，无锁）----
+    /// 本线程 TLS arena 基址（线程私有 mmap 区，可与本 Tcb 异址）。
+    pub tls_base: u64,
+    /// 下一次分配地址（bump 游标；arena 内单调前进；单写者本线程）。
+    pub tls_cursor: u64,
+    /// arena 结束地址（排他上界）；cursor + size > end 则拒绝（S09 越界拒接）。
+    pub tls_end: u64,
 }
 
 impl Tcb {
-    /// 全零 Tcb（errno=0，id 待填）。
+    /// 全零 Tcb（errno=0，id 与 TLS arena 待填）。
     pub const fn zeroed() -> Self {
-        Self { errno: 0, _pad: 0, tid: 0, tgid: 0, this: 0 }
+        Self { errno: 0, _pad: 0, tid: 0, tgid: 0, this: 0, tls_base: 0, tls_cursor: 0, tls_end: 0 }
     }
 }
 
@@ -70,4 +77,40 @@ pub fn install_tcb(tcb: &mut Tcb, tid: u64, tgid: u64) {
 pub fn current_errno_ptr_or_null() -> *mut i32 {
     let base = read_fs_base();
     if base != 0 { base as *mut i32 } else { core::ptr::null_mut() }
+}
+
+// ---- T2-2 库管理 TLS 区（threads.md T2-2，S09：库管理仿真，非编译器 `__thread`）----
+
+/// 把 `tcb` 的 TLS arena 装配为 `[base, base+len)`、游标清零。通常由组长/引导在派生前对该线程的
+/// `Tcb` 调用（`tcb` 是其线程私有 mmap 的每线程控制块地址），使该线程装配 FS base 后即可
+/// `tls_allocate`。`len` 为 arena 字节数。
+#[inline]
+pub fn tls_setup(tcb: *mut Tcb, base: u64, len: u64) {
+    unsafe {
+        (*tcb).tls_base = base;
+        (*tcb).tls_cursor = base;
+        (*tcb).tls_end = base.wrapping_add(len);
+    }
+}
+
+/// 当前线程 TLS bump 分配 `size` 字节、按 `align` 对齐，返回 arena 内指针；不足/未装配 FS base
+/// 或 arena → `None`。只在本线程的 arena（经 FS base→其 `Tcb.tls_*`）分配，故同调用在多个线程
+/// 各得各自私有块，互不干扰（threads.md T2-2 每线程 TLS 独立）。生命周期 = 线程（无 per-slot free，
+/// S09 声明；线程退出 arena mmap 随进程/线程释放）。对齐须为 2 幂。
+#[inline]
+pub fn tls_allocate(size: usize, align: usize) -> Option<*mut u8> {
+    let base = read_fs_base();
+    if base == 0 { return None; } // 未装配 Tcb/FS base
+    debug_assert!(align.is_power_of_two());
+    let tcb = base as *mut Tcb;
+    // arena 装配检查：base/end 一致才视为就绪（cursor 在 [base,end)）。
+    let (ab, cur, end) = unsafe { ((*tcb).tls_base, (*tcb).tls_cursor, (*tcb).tls_end) };
+    if end <= ab || cur < ab || cur >= end { return None; }
+    let align = align.max(1);
+    let mask = (align as u64).wrapping_sub(1);
+    let aligned = (cur.wrapping_add(mask)) & !mask;
+    let need = size as u64;
+    if aligned.checked_add(need).map_or(true, |a| a > end) { return None; } // S09 越界拒接
+    unsafe { (*tcb).tls_cursor = aligned.wrapping_add(need); }
+    Some(aligned as *mut u8)
 }
