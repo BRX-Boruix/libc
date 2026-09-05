@@ -3,20 +3,22 @@
 //! C 标准要求 `errno` 是一个线程相关的可写整型，程序出错后读取以获知具体
 //! 错误。
 //!
-//! ## 进程局部性（B5，S09 如实声明）
+//! ## 进程局部性 + 线程局部性（threads.md T2-1，ADR-035 D6，S09 如实声明）
 //!
-//! 本内核采用**进程隔离内存**（每个用户进程有独立地址空间），故每个进程的
-//! `ERRNO` 静态量天然**进程局部**——A 进程写 errno 不影响 B 进程。内核当前为
-//! **单进程无线程**模型（ADR-003 纯 spawn，无线程），进程内也只有一个执行流，
-//! 因此用单个全局原子整型即可正确表达语义。
+//! BORUIX 采用**进程隔离内存**（每进程独立地址空间），故进程级静态天然进程局部。
+//! 同进程内多线程（threads.md T1 已完成：同组共享地址空间的独立调度单元）会共享本进程
+//! 地址空间，须让 errno **线程局部**才符合 C 语义。落地（见
+//! `docs/DESIGN-T2-TLS-errno-threadlocal.md`，kernel 4f0b724 T2-0）：
 //!
-//! ## 未来线程化的缺口
-//!
-//! 若未来内核支持**进程内多线程**（pthread），进程内多个线程会共享同一地址
-//! 空间、共享此 `ERRNO` 静态量，届时 errno 将变为线程共享而非线程局部，违反
-//! C 语义。该情况下须把 `ERRNO` 改为**线程局部存储（TLS）**：经
-//! `__errno_location()` 返回每线程的地址。当前实现已在 `__errno_location`
-//! 处预留了"按指针读写"的接口形态，便于未来切换到 TLS 而无需改动调用方。
+//! - 每线程持一个用户态 `Tcb`（`crate::thread::Tcb`，独立 mmap，errno 槽在 **offset 0**）；
+//!   线程引导把 `IA32_FS_BASE`（CPL3 可写）设为该 `Tcb` 地址；内核调度器对每线程
+//!   保存/恢复 FS base（T2-0），保证切换后 FS base 恒指向当前线程 `Tcb`。
+//! - `__errno_location()`/`errno()`/`set_errno()` 经 `rdmsr` 读当前线程 FS base：非零 → 其指向
+//!   的 `Tcb.errno`（每线程独立）；零（本线程未装配 `Tcb`）→ 退回进程级 `FALLBACK_ERRNO` 槽
+//!   ——对确实未装配线程化的进程（单执行上下文）语义正确。
+//! - **诚实边界**：errno 是线程局部的充分条件是"该线程已装配 FS base→其 `Tcb`"。一个进程内
+//!   凡未装配的线程（如旧式未经 libc 线程引导派生的裸线程）共享 `FALLBACK_ERRNO`。
+//!   库层只在装配了 FS base 的线程上保证严格 per-thread（配合 `crate::thread::install_tcb` 使用）。
 //!
 //! 约定（S09 宁缺毋假）：
 //! - 库函数失败时**显式设置** errno（由 `set_errno` 记录）；成功不保证
@@ -25,29 +27,39 @@
 //! 错误码数值与内核 `klib::error::Error::to_errno` 对齐（ADR-010）：
 //! 见 libsys `error.rs` 的 `Error::to_errno` 映射。
 
-use core::sync::atomic::{AtomicI32, Ordering};
+/// 进程级兜底 errno 槽：仅当当前线程 FS base == 0（未装配 `Tcb`，即单执行上下文或
+/// 未经 libc 线程引导派生的裸线程）时使用。见模块文档诚实边界。
+static FALLBACK_ERRNO: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
-/// 全局 errno 值（当前单进程模型下即"当前线程"的 errno）。
-static ERRNO: AtomicI32 = AtomicI32::new(0);
-
-/// 设置 errno 为 `e`。
+/// 返回当前线程 errno 槽的可写指针：FS base 非零（本线程已装配 `Tcb`）→ `Tcb.errno`
+/// （offset 0，即 Tcb 基址）；零 → 进程级兜底槽。槽在存活期地址稳定。
 #[inline]
-pub fn set_errno(e: i32) {
-    ERRNO.store(e, Ordering::Relaxed);
+fn current_errno_ptr() -> *mut i32 {
+    let slot = crate::thread::current_errno_ptr_or_null();
+    if slot.is_null() {
+        unsafe { &mut *(core::ptr::addr_of!(FALLBACK_ERRNO) as *mut core::sync::atomic::AtomicI32 as *mut i32) }
+    } else {
+        slot
+    }
 }
 
-/// 读取当前 errno 值。
+/// 设置当前线程 errno 为 `e`。
+#[inline]
+pub fn set_errno(e: i32) {
+    unsafe { *current_errno_ptr() = e; }
+}
+
+/// 读取当前线程 errno 值。
 #[inline]
 pub fn errno() -> i32 {
-    ERRNO.load(Ordering::Relaxed)
+    unsafe { *current_errno_ptr() }
 }
 
 /// 供按指针读写 errno 的代码使用（`errno` 宏 / `strerror` 内部）。
-/// 单进程模型下返回全局 ERRNO 的地址；返回的指针在进程生命周期内稳定。
+/// 返回当前线程 errno 槽地址（per-thread `Tcb.errno` 或进程兜底槽）。
 #[unsafe(no_mangle)]
 pub extern "C" fn __errno_location() -> *mut i32 {
-    // ERRNO 为 'static AtomicI32，按 C 约定单线程读写其内部值。
-    unsafe { &mut *(core::ptr::addr_of!(ERRNO) as *mut AtomicI32 as *mut i32) }
+    current_errno_ptr()
 }
 
 // ---------- 错误码常量（S13：与 libsys::Error::to_errno 对齐） ----------

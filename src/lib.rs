@@ -54,6 +54,7 @@ pub mod stdio;
 pub mod stdio_format;
 pub mod stdlib;
 pub mod string;
+pub mod thread;
 pub mod time;
 pub mod unistd;
 pub mod wchar;
