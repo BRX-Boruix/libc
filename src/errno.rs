@@ -98,6 +98,24 @@ pub const ENOTDIR: i32 = 20;
 pub const EISDIR: i32 = 21;
 /// `EILSEQ`：非法字节序列（宽字符转换失败）。
 pub const EILSEQ: i32 = 84;
+/// 可执行格式非法 ENOEXEC。
+pub const ENOEXEC: i32 = 8;
+/// 权限不足 EACCES。
+pub const EACCES: i32 = 13;
+/// 地址非法 EFAULT。
+pub const EFAULT: i32 = 14;
+/// 名称过长 ENAMETOOLONG。
+pub const ENAMETOOLONG: i32 = 36;
+/// 符号链接层数过多 ELOOP。
+pub const ELOOP: i32 = 40;
+/// 非法 seek ESPIPE。
+pub const ESPIPE: i32 = 29;
+/// 只读文件系统 EROFS。
+pub const EROFS: i32 = 30;
+/// 资源忙 EBUSY。
+pub const EBUSY: i32 = 16;
+/// 文件系统结构损坏 EUCLEAN。
+pub const EUCLEAN: i32 = 117;
 
 /// 把 libsys 的 `Error` 映射为 C errno 数值。
 ///
@@ -115,6 +133,19 @@ pub fn from_libsys(e: libsys::Error) -> i32 {
         libsys::Error::WouldBlock => EAGAIN,
         libsys::Error::NoSpace => ENOSPC,
         libsys::Error::Io => EIO,
+        libsys::Error::NotDirectory => ENOTDIR,
+        libsys::Error::IsDirectory => EISDIR,
+        libsys::Error::PermissionDenied => EACCES,
+        libsys::Error::BadAddress => EFAULT,
+        libsys::Error::NotEmpty => ENOTEMPTY,
+        libsys::Error::NameTooLong => ENAMETOOLONG,
+        libsys::Error::ArgListTooLong => E2BIG,
+        libsys::Error::TooManySymlinks => ELOOP,
+        libsys::Error::IllegalSeek => ESPIPE,
+        libsys::Error::ExecFormat => ENOEXEC,
+        libsys::Error::ReadOnly => EROFS,
+        libsys::Error::Corrupt => EUCLEAN,
+        libsys::Error::Busy => EBUSY,
         libsys::Error::Unknown(n) => n,
     }
 }
