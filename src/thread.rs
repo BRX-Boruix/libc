@@ -40,11 +40,54 @@ impl Tcb {
     }
 }
 
-/// 读当前线程 FS 段基址：`rdfsbase`（FSGSBASE 指令，需内核已置 CR4.FSGSBASE=1，见 kernel
-/// `cpu::enable_fsgsbase`）。不读 MSR（RDMSR 是 CPL0 特权指令，用户态会 #GP）。
-/// 未装配（引导未设 FS base=0）时返回 0。
+/// CPU 是否支持 `FSGSBASE`（CPUID.07H:EBX[0]）——**每次调用都重新探测**（CPUID 廉价，
+/// 且避免引入需初始化的全局状态）。
+///
+/// **为何必须先探测（A2-5 实现期实测发现，S39 如实记录）**：`rdfsbase` 属 FSGSBASE 扩展，
+/// 无此扩展的 CPU 上执行会 `#UD`。但实测到的失败模式**远比"崩溃"更危险**——
+/// 在 `-cpu qemu64`（QEMU 默认，无 FSGSBASE）下，`rdfsbase` 之后本进程**所有**
+/// `write(STDOUT, …)` **静默失效**，而程序逻辑照常继续（退出码正常返回）。
+/// 表现为"日志从这里断掉、程序却跑完了"，定位代价极高。
+///
+/// 关键点：`errno` 是**每个 syscall 之后都可能被写**的基础设施，若它踩到该路径，
+/// 则任何用户程序在任何一处设 errno 都可能悄悄关闭自己的输出。故这里必须
+/// **先经 CPUID 确认支持**，再决定是否执行 `rdfsbase`——绝不在不确定时执行。
+#[inline]
+fn fsgsbase_supported() -> bool {
+    // CPUID 是用户态可执行的非特权指令；leaf 7 subleaf 0 的 EBX[0] = FSGSBASE。
+    // 先取最大 leaf（CPUID.0H:EAX），不足 7 则必定不支持。
+    let max_leaf: u32;
+    unsafe {
+        core::arch::asm!("push rbx", "cpuid", "pop rbx",
+            in("eax") 0u32, lateout("eax") max_leaf, lateout("ecx") _, lateout("edx") _,
+            options(nostack, preserves_flags));
+    }
+    if max_leaf < 7 {
+        return false;
+    }
+    // rbx 被 LLVM 保留，不能直接作操作数：显式在汇编内保存/恢复，
+    // 并把 ebx 的值经 rbx 中转出来后写入一个通用寄存器（ecx 已无用，借它承载）。
+    let ecx_out: u32;
+    unsafe {
+        core::arch::asm!("push rbx", "cpuid", "mov ecx, ebx", "pop rbx",
+            in("eax") 7u32, in("ecx") 0u32,
+            lateout("eax") _, lateout("ecx") ecx_out, lateout("edx") _,
+            options(nostack));
+    }
+    (ecx_out & 1) != 0
+}
+
+/// 读当前线程 FS 段基址：`rdfsbase`（FSGSBASE 指令，需 CPU 支持该扩展**且**内核已置
+/// CR4.FSGSBASE=1，见 kernel `cpu::enable_fsgsbase`）。不读 MSR（RDMSR 是 CPL0 特权指令，
+/// 用户态会 #GP）。
+///
+/// **不支持 FSGSBASE 时直接返回 0，绝不执行 `rdfsbase`**——0 使调用方如实回落到
+/// 进程级兜底 errno 槽（见 `crate::errno`），语义正确且无副作用。
 #[inline]
 pub fn read_fs_base() -> u64 {
+    if !fsgsbase_supported() {
+        return 0;
+    }
     let mut base: u64;
     unsafe {
         core::arch::asm!("rdfsbase {b}", b = out(reg) base, options(nostack, preserves_flags));
