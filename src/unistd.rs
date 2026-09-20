@@ -368,12 +368,13 @@ pub fn stat_type_bits(node_type: u32) -> u32 {
     }
 }
 
+/// wire classic 位 → POSIX mode 三段还原（A1-7：三段忠实，非任一位抹平）。
+///
+/// wire = classic 9 位直通（ADR-040 §2.5 裁决；旧 ≤0o7 披露位输入已由内核
+/// `from_wire` 等值三段扩展，到这里恒为 classic 9 位形态）。owner/group/
+/// other 逐段拼回 POSIX mode；门禁 bit9 非 mode 语义位，此函数不消费。
 pub fn stat_perm_bits(perms: u32) -> u32 {
-    let mut m = 0u32;
-    if perms & (1 << 0) != 0 { m |= 0o444; }
-    if perms & (1 << 1) != 0 { m |= 0o222; }
-    if perms & (1 << 2) != 0 { m |= 0o111; }
-    m
+    perms & 0o777
 }
 
 fn stat_from_info(info: &libsys::StatInfo) -> stat {
@@ -383,8 +384,10 @@ fn stat_from_info(info: &libsys::StatInfo) -> stat {
         st_ino: 0,
         st_nlink: 0,
         st_mode: mode,
-        st_uid: 0,
-        st_gid: 0,
+        // A1-7 归真（PRE-11「三层各自伪造」消解）：属主自 StatInfo 真值
+        // 投影（A1-4 起内核 stat 通道如实报告节点属主），不再硬编码 0。
+        st_uid: info.owner_uid,
+        st_gid: info.owner_gid,
         __pad0: 0,
         st_rdev: 0,
         st_size: info.size as i64,
@@ -422,10 +425,11 @@ pub unsafe extern "C" fn fstat(fd: c_int, buf: *mut stat) -> c_int {
     }
 }
 
-/// chmod(path, mode)：设置节点权限。
+/// chmod(path, mode)：设置节点权限（A1-7 归真：classic 9 位**三段忠实**
+/// 透传——owner/group/other 各段独立编码，不再任一位抹平；PRE-3 消解）。
 ///
-/// mode 只取 r/w/x 任一位 (单産户擦平：任意主/组/其他位即算)，
-/// system_only 不可通过 POSIX chmod 设置 (始终 false)。
+/// 系统门禁（bit9）不是 POSIX mode 语义位：POSIX chmod **不携带**门禁
+/// 语义（门禁唯一写入门径仍是内核侧 set_permissions）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chmod(path: *const c_char, mode: crate::ctypes::mode_t) -> c_int {
     if path.is_null() { set_errno(EINVAL); return -1; }
@@ -433,13 +437,25 @@ pub unsafe extern "C" fn chmod(path: *const c_char, mode: crate::ctypes::mode_t)
         Some(s) => s,
         None => { set_errno(EINVAL); return -1; }
     };
-    let perm = libsys::Permissions {
-        readable: (mode & 0o444) != 0,
-        writable: (mode & 0o222) != 0,
-        executable: (mode & 0o111) != 0,
-        system_only: false,
+    // classic 9 位直通（丢弃调用方可能误传的高位，如实按 POSIX 语义取 0o777 段）。
+    match libsys::chmod(p, mode & 0o777) {
+        Ok(_) => 0,
+        Err(e) => { set_errno(from_libsys(e)); -1 }
+    }
+}
+
+/// chown(path, uid, gid)：易主（A1-7 落位，ADR-014 0x43 a4=2）。
+///
+/// 内核强制面：属主或 `CAP_OWNER`；**易他主**（新属主 ≠ 调用者）需
+/// `CAP_SYSTEM`（POSIX chown 限制面，防权限赠予）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chown(path: *const c_char, uid: crate::ctypes::uid_t, gid: crate::ctypes::gid_t) -> c_int {
+    if path.is_null() { set_errno(EINVAL); return -1; }
+    let p = match unsafe { crate::stdio::cstr_to_str(path) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return -1; }
     };
-    match libsys::chmod(p, perm) {
+    match libsys::chown(p, uid, gid) {
         Ok(_) => 0,
         Err(e) => { set_errno(from_libsys(e)); -1 }
     }
@@ -460,5 +476,51 @@ pub unsafe extern "C" fn rename(oldpath: *const c_char, newpath: *const c_char) 
     match libsys::rename(old, new) {
         Ok(_) => 0,
         Err(e) => { set_errno(from_libsys(e)); -1 }
+    }
+}
+
+// A1-7 / §3.2 #11：libc 归真宿主单测（纯逻辑层，无 syscall 面）。
+// PRE-11「三层各自伪造」的回归锚：stat_perm_bits 三段忠实还原、
+// stat_from_info 真属主投影（不再硬编码 0）。
+#[cfg(test)]
+mod a7_owner_truth_tests {
+    use super::{stat_from_info, stat_perm_bits, stat};
+    use libsys::StatInfo;
+
+    #[test]
+    fn stat_perm_bits_restores_three_segments() {
+        // 三段忠实：任意 classic 组合无损还原（不再任一位抹平）。
+        assert_eq!(stat_perm_bits(0o644), 0o644);
+        assert_eq!(stat_perm_bits(0o700), 0o700);
+        assert_eq!(stat_perm_bits(0o077), 0o077);
+        assert_eq!(stat_perm_bits(0o755), 0o755);
+        assert_eq!(stat_perm_bits(0o111), 0o111);
+        assert_eq!(stat_perm_bits(0o000), 0o000);
+        // 门禁 bit9 非 mode 语义位：如实不进 POSIX mode。
+        assert_eq!(stat_perm_bits(0o644 | (1 << 9)), 0o644);
+    }
+
+    #[test]
+    fn stat_from_info_projects_real_owner() {
+        let info = StatInfo {
+            node_type: StatInfo::TYPE_FILE,
+            size: 42,
+            perms: 0o640,
+            created_time: 0,
+            modified_time: 100,
+            changed_time: 200,
+            owner_uid: 1000,
+            owner_gid: 50,
+        };
+        let st: stat = stat_from_info(&info);
+        assert_eq!(st.st_mode & 0o777, 0o640, "three-segment mode restore");
+        assert_eq!(st.st_uid, 1000, "real owner uid (was hardcoded 0)");
+        assert_eq!(st.st_gid, 50, "real owner gid (was hardcoded 0)");
+        assert_eq!(st.st_size, 42);
+        // zero-owner 对照：0 是真值投影（数据源变更），非旧硬编码残留。
+        let zero = StatInfo { owner_uid: 0, owner_gid: 0, ..info };
+        let st2: stat = stat_from_info(&zero);
+        assert_eq!(st2.st_uid, 0);
+        assert_eq!(st2.st_gid, 0);
     }
 }
