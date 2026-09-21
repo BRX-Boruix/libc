@@ -50,6 +50,7 @@ pub mod malloc;
 pub mod process;
 pub mod pwd;
 pub mod random;
+pub mod sha256;
 pub mod signal;
 pub mod stdio;
 pub mod stdio_format;
