@@ -367,3 +367,301 @@ mod a2_5_tests {
         assert_eq!(home_dir_of("alice"), "/users/alice");
     }
 }
+
+// ---------------------------------------------------------------------------
+// A2-4：组账户（`grp.h` 对应物）——与账户同层的**纯用户态**读表映射。
+// ---------------------------------------------------------------------------
+
+/// POSIX `struct group`（字段顺序遵循 POSIX；本实现填充前两项，其余为 NULL）。
+#[repr(C)]
+pub struct group {
+    /// 组名。
+    pub gr_name: *mut c_char,
+    /// 组 id。
+    pub gr_gid: u32,
+    /// 成员名列表（**本实现恒为 NULL**：解析 `/config/groups.json` 的 `members` 需
+    /// 变长字符串数组，当前未提供该转换；如实置 NULL 而非编造空列表——调用方
+    /// 应以 `getgrouplist`（见下）获取某用户的组，而非读 `gr_mem`）。
+    pub gr_mem: *mut *mut c_char,
+}
+
+/// 一条组记录（`/config/groups.json` 的 `groups[]` 元素）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupRecord {
+    /// 组名（非空、不含 `/`，由解析器保证）。
+    pub name: String,
+    /// 组 id。
+    pub gid: u32,
+    /// 成员账户名列表（**保持声明顺序**；与组 id 无隐式关系）。
+    pub members: Vec<String>,
+}
+
+/// 组表路径（单点定义；`userd` 消费同一路径，改则同改）。
+pub const GROUPS_PATH: &str = "/config/groups.json";
+
+/// 解析 `/config/groups.json` 字节流为组列表。
+///
+/// schema：`{"groups":[{"name":"dev","gid":2000,"members":["alice","bob"]}, ...]}`。
+/// 未知字段跳过；名字非空、非路径成分、gid 可解析才收录；**畸形条目如实跳过**
+/// （非 UTF-8 / JSON 非法 / 缺 name 或 gid），不 panic、不补默认值（S09）。
+///
+/// `members` 缺失或元素非字符串 → 该组仍收录，但成员列表如实为空（组本身合法）；
+/// 非字符串成员**跳过并保持其余**，不因一个坏元素丢掉整组。
+pub fn parse_groups(bytes: &[u8]) -> Vec<GroupRecord> {
+    let mut out = Vec::new();
+    let Ok(text) = core::str::from_utf8(bytes) else {
+        return out;
+    };
+    let mut p = libsys::json::JsonParser::new(text);
+    let Ok(parsed) = p.parse() else {
+        return out;
+    };
+    if let libsys::json::JsonValue::Object(fields) = parsed {
+        for (k, v) in fields {
+            if k != "groups" {
+                continue;
+            }
+            if let libsys::json::JsonValue::Array(items) = v {
+                for it in items {
+                    if let libsys::json::JsonValue::Object(obj) = it {
+                        let mut name = String::new();
+                        let mut gid: Option<u32> = None;
+                        let mut members: Vec<String> = Vec::new();
+                        for (fk, fv) in obj {
+                            match fk.as_str() {
+                                "name" => {
+                                    if let libsys::json::JsonValue::String(s) = fv {
+                                        name = s;
+                                    }
+                                }
+                                "gid" => {
+                                    if let libsys::json::JsonValue::Number(n) = fv {
+                                        gid = n.parse::<u32>().ok();
+                                    }
+                                }
+                                "members" => {
+                                    if let libsys::json::JsonValue::Array(ms) = fv {
+                                        for m in ms {
+                                            if let libsys::json::JsonValue::String(ms_) = m {
+                                                // 成员名合法性同账户名：非空、非路径成分。
+                                                let bad = ms_.is_empty()
+                                                    || ms_ == "."
+                                                    || ms_ == ".."
+                                                    || ms_.contains('/');
+                                                if !bad {
+                                                    members.push(ms_);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        let bad = name.is_empty()
+                            || name == "."
+                            || name == ".."
+                            || name.contains('/');
+                        if let (false, Some(gid)) = (bad, gid) {
+                            out.push(GroupRecord { name, gid, members });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 解析后的组表缓存。`None` = 尚未加载。
+static GCACHE: Mutex<Option<Vec<GroupRecord>>> = Mutex::new(None);
+
+/// 组名静态存储（`getgrnam`/`getgrgid` 返回值，POSIX 约定不得释放）。
+struct StaticGroup {
+    name: [u8; 256],
+    gr: group,
+}
+unsafe impl Send for StaticGroup {}
+static GENTRY: Mutex<StaticGroup> = Mutex::new(StaticGroup {
+    name: [0; 256],
+    gr: group { gr_name: ptr::null_mut(), gr_gid: 0, gr_mem: ptr::null_mut() },
+});
+
+/// 加载组表（惰性）。**锁纪律同 [`load`]**：临界区只含内存操作，I/O 在锁外。
+pub fn load_groups() -> Vec<GroupRecord> {
+    {
+        let guard = GCACHE.lock();
+        if let Some(list) = guard.as_ref() {
+            return list.clone();
+        }
+    }
+    let list = match libsys::read_to_end(GROUPS_PATH) {
+        Ok(bytes) => parse_groups(&bytes),
+        Err(_) => Vec::new(),
+    };
+    {
+        let mut guard = GCACHE.lock();
+        if guard.is_none() {
+            *guard = Some(list.clone());
+        } else if let Some(existing) = guard.as_ref() {
+            return existing.clone();
+        }
+    }
+    list
+}
+
+/// 把组记录投影进静态存储，返回 `struct group *`；名字过长如实返回 NULL（不截断）。
+fn fill_group(rec: &GroupRecord) -> *mut group {
+    let mut e = GENTRY.lock();
+    let nb = rec.name.as_bytes();
+    if nb.len() >= e.name.len() {
+        return ptr::null_mut();
+    }
+    e.name = [0; 256];
+    e.name[..nb.len()].copy_from_slice(nb);
+    let np = e.name.as_mut_ptr() as *mut c_char;
+    e.gr.gr_name = np;
+    e.gr.gr_gid = rec.gid;
+    e.gr.gr_mem = ptr::null_mut();
+    let p: *mut group = &mut e.gr;
+    p
+}
+
+/// `getgrnam(name)`：按组名查组。
+///
+/// 返回指向静态 `struct group` 的指针；组表不可读 → NULL + `EIO`，查不到 → NULL +
+/// `ENOENT`。**绝不**返回伪造组（S09）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrnam(name: *const c_char) -> *mut group {
+    if name.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return ptr::null_mut();
+    }
+    let mut len = 0usize;
+    while *name.add(len) != 0 {
+        len += 1;
+        if len > 255 {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return ptr::null_mut();
+        }
+    }
+    let Ok(want) = core::str::from_utf8(core::slice::from_raw_parts(name as *const u8, len)) else {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return ptr::null_mut();
+    };
+    let list = load_groups();
+    if list.is_empty() {
+        crate::errno::set_errno(crate::errno::EIO);
+        return ptr::null_mut();
+    }
+    match list.iter().find(|g| g.name == want) {
+        Some(rec) => fill_group(rec),
+        None => {
+            crate::errno::set_errno(crate::errno::ENOENT);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `getgrgid(gid)`：按组 id 查组。语义同 `getgrnam`。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrgid(gid: u32) -> *mut group {
+    let list = load_groups();
+    if list.is_empty() {
+        crate::errno::set_errno(crate::errno::EIO);
+        return ptr::null_mut();
+    }
+    match list.iter().find(|g| g.gid == gid) {
+        Some(rec) => fill_group(rec),
+        None => {
+            crate::errno::set_errno(crate::errno::ENOENT);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `endgrent()`：释放组表缓存（下次调用重新读表）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn endgrent() {
+    *GCACHE.lock() = None;
+}
+
+/// 查询账户 `user` 的**全部**组 id：主组（取自账户表）打头，随后是其所属的补充组
+/// （按组表声明顺序）。返回实际写入条数；缓冲不足时返回所需条数（> `cap`）——
+/// **不截断、不写入半个列表**（POSIX `getgrouplist` 语义，S09）。
+///
+/// **为何需要它**：`struct group.gr_mem` 在本实现恒为 NULL（见字段说明），故调用方
+/// 需按"用户 → 组集合"方向查询。这也是 A2-7 登录后经 `groups_set` 装配身份的
+/// 数据来源。
+pub fn getgrouplist(user: &str, primary_gid: u32, out: &mut [u32]) -> usize {
+    let mut n = 0usize;
+    let mut push = |gid: u32, out: &mut [u32], n: &mut usize| {
+        // 去重：同一 gid 只出现一次（主组也参与去重）。
+        if out[..*n].contains(&gid) {
+            return;
+        }
+        if *n < out.len() {
+            out[*n] = gid;
+        }
+        *n += 1;
+    };
+    push(primary_gid, out, &mut n);
+    for rec in load_groups() {
+        if rec.members.iter().any(|m| m == user) {
+            push(rec.gid, out, &mut n);
+        }
+    }
+    n
+}
+
+// A2-4：组表解析的纯逻辑层单测。
+#[cfg(test)]
+mod a2_4_tests {
+    use super::*;
+
+    #[test]
+    fn parses_well_formed_group_table() {
+        let json = br#"{"groups":[{"name":"dev","gid":2000,"members":["alice","bob"]},
+                       {"name":"ops","gid":2001,"members":["carol"]}]}"#;
+        let g = parse_groups(json);
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0].name, "dev");
+        assert_eq!(g[0].gid, 2000);
+        assert_eq!(g[0].members.len(), 2);
+        assert_eq!(g[1].gid, 2001);
+    }
+
+    #[test]
+    fn group_without_gid_is_rejected() {
+        let json = br#"{"groups":[{"name":"ghost"},{"name":"real","gid":7}]}"#;
+        let g = parse_groups(json);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].name, "real");
+    }
+
+    #[test]
+    fn missing_or_bad_members_do_not_drop_the_group() {
+        // 组本身合法即收录；坏成员只是**不进入**成员列表，不牵连整组。
+        let json = br#"{"groups":[{"name":"a","gid":1},
+                       {"name":"b","gid":2,"members":["ok","a/b","", 7]}]}"#;
+        let g = parse_groups(json);
+        assert_eq!(g.len(), 2);
+        assert!(g[0].members.is_empty());
+        assert_eq!(g[1].members, alloc::vec![String::from("ok")]);
+    }
+
+    #[test]
+    fn malformed_group_json_yields_empty_not_fabricated() {
+        assert!(parse_groups(b"{not json").is_empty());
+        assert!(parse_groups(b"").is_empty());
+        assert!(parse_groups(&[0xff]).is_empty());
+    }
+
+    #[test]
+    fn getgrouplist_reports_required_count_without_truncating() {
+        // 缓冲为 0 时必须如实返回**所需条数**（POSIX 语义），而不是写越界或返回 0。
+        let mut empty: [u32; 0] = [];
+        let need = getgrouplist("nobody-not-in-any-group", 5555, &mut empty);
+        assert_eq!(need, 1, "only the primary group is reported when no group lists the user");
+    }
+}
