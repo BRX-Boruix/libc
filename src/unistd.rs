@@ -189,13 +189,35 @@ pub extern "C" fn getcwd(buf: *mut c_char, size: size_t) -> *mut c_char {
     }
 }
 
-/// \`isatty(fd)\`：fd 是否终端。本实现如实：stdin/out/err 视为终端。
+/// `isatty(fd)`：fd 是否终端。
+///
+/// **J-TOKEN-A ≡ T-ISATTY（ADR-044 §1.2）**：真值取自**节点自述**
+/// （`INode::is_terminal()` → `StatInfo::is_terminal`），不再按 fd 号猜测。
+///
+/// **修复的缺陷**：旧实现 `match fd { 0|1|2 => 1, _ => 0 }` 注释自称
+/// 「本实现如实」，实际「如实」的是"fd 号是不是 0/1/2"而非"这个 fd 是不是
+/// 终端"——stdout 被重定向到普通文件或管道后**仍是 fd 1**，却依旧返回 1。
+/// 那是硬编码猜测而非真值查询（违反 ADR-027 诚实契约与 S09/S10/S11）。
+///
+/// **失败语义**：fd 不存在即非终端 → 返回 0 并置 `EBADF`（POSIX 语义），
+/// **不伪造终端**。安全侧：宁可如实说"不是终端"。
 #[unsafe(no_mangle)]
 pub extern "C" fn isatty(fd: c_int) -> c_int {
-    match fd {
-        0 | 1 | 2 => 1,
-        _ => 0,
+    match libsys::fstat(fd as u64) {
+        Ok(info) => isatty_from_info(&info),
+        Err(e) => {
+            set_errno(from_libsys(e));
+            0
+        }
     }
+}
+
+/// `StatInfo` 真值 → `isatty` 返回值（**纯函数，宿主可测**）。
+///
+/// 与 `stat_from_info`/`stat_perm_bits` 同款分层：字节级 ABI 结构 → 语义
+/// 值的转换单独成函数，从而可脱离内核/syscall 面直接断言（S23）。
+pub(crate) fn isatty_from_info(info: &libsys::StatInfo) -> c_int {
+    if info.is_terminal != 0 { 1 } else { 0 }
 }
 
 /// `mkdir(path, mode)`：创建目录。
@@ -484,9 +506,44 @@ pub unsafe extern "C" fn rename(oldpath: *const c_char, newpath: *const c_char) 
 // stat_from_info 真属主投影（不再硬编码 0）。
 #[cfg(test)]
 mod a7_owner_truth_tests {
-    use super::{stat_from_info, stat_perm_bits, stat};
+    use super::{stat_from_info, stat_perm_bits, stat, isatty_from_info};
     use libsys::StatInfo;
 
+
+    /// **J-TOKEN-A ≡ T-ISATTY**（ADR-044 §1.2）：`isatty` 必须走**节点真值**
+    /// （`StatInfo::is_terminal`），不得按 fd 号硬编码猜测。
+    ///
+    /// 此测锁定实现**读的是哪个字段**：同样的 fd 号、不同的真值 → 不同的
+    /// 答案。硬编码 `fd ∈ {0,1,2} → 1` 无法通过本测。
+    #[test]
+    fn isatty_consults_node_truth_not_fd_number() {
+        // 终端节点：真值 1 → isatty 报 1。
+        let tty = StatInfo {
+            node_type: StatInfo::TYPE_CHARDEV,
+            size: 0,
+            perms: 0o666,
+            created_time: 0, modified_time: 0, changed_time: 0,
+            owner_uid: 0, owner_gid: 0,
+            is_terminal: 1,
+        };
+        assert_eq!(isatty_from_info(&tty), 1, "node says terminal -> 1");
+
+        // **同 fd 号、普通文件**：真值 0 → isatty 必须报 0。
+        // 这正是旧硬编码做不到的：stdout 重定向到文件后仍是 fd 1。
+        let file = StatInfo {
+            node_type: StatInfo::TYPE_FILE,
+            size: 0,
+            perms: 0o644,
+            created_time: 0, modified_time: 0, changed_time: 0,
+            owner_uid: 0, owner_gid: 0,
+            is_terminal: 0,
+        };
+        assert_eq!(isatty_from_info(&file), 0, "redirected to a file -> 0 (was 1)");
+
+        // 未知（0）也如实报 0——安全侧，绝不把未知当终端。
+        let unknown = StatInfo { is_terminal: 0, ..tty };
+        assert_eq!(isatty_from_info(&unknown), 0);
+    }
     #[test]
     fn stat_perm_bits_restores_three_segments() {
         // 三段忠实：任意 classic 组合无损还原（不再任一位抹平）。
@@ -511,6 +568,7 @@ mod a7_owner_truth_tests {
             changed_time: 200,
             owner_uid: 1000,
             owner_gid: 50,
+            is_terminal: 0,
         };
         let st: stat = stat_from_info(&info);
         assert_eq!(st.st_mode & 0o777, 0o640, "three-segment mode restore");
