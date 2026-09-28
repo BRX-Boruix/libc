@@ -1,118 +1,284 @@
-# BORUIX libc
+# libc
 
-BORUIX 的用户态 C 标准库（Rust 实现 + C ABI，构建于 libsys 之上）。
+**简体中文** | [English](#english)
 
-## 架构（ADR-001 语言工具链 + 本 crate 设计）
+BORUIX 的 **C 标准库**——用 Rust 实现、对外提供标准 C 接口。
 
-```text
-kernel(syscall)  ←  libsys(薄封装, 提供 _start/user_main)  ←  libc(本 crate, C ABI)  ←  用户程序
-```
+程序可以用 C 写、调用熟悉的 `printf`、`malloc`、`strlen`，而底层实现是内存安全的 Rust。
 
-- **libsys**：syscall 薄封装（\`int 0x80\`，bit63 错误标记），提供进程入口 \`_start\`→\`user_main\`。
-- **libc**：\`extern "C"\` 函数集，供 no_std Rust bin crate 经 \`unsafe extern\` 调用，
-  也产出 staticlib 供未来原生 C 工具链链接。**不接管进程入口**（\`_start\` 仍由 libsys 提供）。
-- crate-type：\`["rlib", "staticlib"]\`，\`#![cfg_attr(not(test), no_std)]\`，
-  \`#![feature(c_variadic)]\`（printf 家族可变参数）。
+---
 
-## 已实现模块与函数
+## 这是什么
 
-| 模块 | 函数 | 真实数据链路（S06） |
-|---|---|---|
-| `malloc` | malloc / free / realloc / calloc / malloc_usable_size / posix_memalign / aligned_alloc | 经 libsys `brk` 扩展堆，自有空闲链表分配器；posix_memalign 支持任意 2 的幂对齐；加固：canary 越界守卫、free 0xDD 毒化、double-free 检测 |
-| \`string\` | memcpy/memmove/memset/memcmp/memchr/strlen/strnlen/strcmp/strncmp/strcpy/strncpy/strcat/strncat/strchr/strrchr/strstr/strdup/strspn/strcspn/strpbrk/strtok/strtok_r | 纯逻辑，可移植（host 可单测）；strtok_r 线程安全（saveptr） |
-| \`ctype\` | isalpha/isalnum/isupper/.../tolower/toupper | 纯逻辑 |
-| \`stdio\` | printf/vprintf/fprintf/vfprintf/sprintf/snprintf/vsnprintf/puts/putchar/getchar/fscanf + fopen/fclose/fread/fwrite/fflush/fgetc/fputc/fgets/fputs/feof/ferror | printf 写 fd 1；FILE 流经内核 VFS |
-| \`stdio_format\` | printf 格式引擎（Spec/Conv/Length 解析、emit_int/emit_str/emit_char） | 纯逻辑，host 单测 |
-| \`float\` | decompose + emit_fixed/emit_exp/emit_general（\`%f/%e/%g\`） | 纯逻辑，host 单测 |
-| \`stdlib\` | abs/labs/llabs/atoi/atol/atoll/strtol/strtoul/strtoll/strtoull/strtod/strtof/strtold/rand/srand/div/ldiv/qsort/bsearch | 纯逻辑；strtod 严格正确舍入（大整数精确法），strtof 亦严格正确舍入（直接 f32 精确路径） |
-| \`random\` | xorshift64* PRNG | 未播种时经 libsys 时间自播种 |
-| `wchar` | wcslen/wcscmp/wcscpy/wcscat/wcschr/mbrtowc/wcrtomb/mbsrtowcs/wcsrtombs/mbstowcs/wcstombs | 宽字符（wchar_t=i32，逐字节扩展编码，无 locale） |
-| \`unistd\` | open/close/read/write/lseek/unlink/chdir/getcwd/isatty | 经 libsys io 域 |
-| \`process\` | exit/_exit/getpid/kill/waitpid/yield_sys | 经 libsys process 域 |
-| \`time\` | time/clock/sleep/usleep/nanosleep | 经 libsys 墙钟与 sleep |
-| \`errno\` | errno()/__errno_location()/set_errno + 错误码常量 | 全局 AtomicI32 |
-| \`ctypes\` | size_t/ssize_t/c_int/.../NULL/EOF 等 | — |
+一个操作系统的价值很大程度上取决于它能跑什么，而大量的软件是用 C 写的。`libc` 就是要让这些
+软件能在这个系统上编译和运行。
 
-## 设计要点
+它的定位是**接口与实现的分离**：C 库是一套**接口约定**（`printf`、`malloc` 这些符号的签名
+与语义），至于用什么语言实现是自由的。这里选择用 Rust 实现，因为 Rust 能精确导出 C 接口，同时
+让内部实现享有内存安全。
 
-- **错误处理（ADR-010）**：所有可能失败的调用经 \`__errno_location()\` 写全局 errno 并返回
-  -1/NULL；errno 值与内核 ADR-010 对齐（EINVAL=22, ENOENT=2, ENOMEM=12, ERANGE=34 等）。
-- **malloc**：16 字节块头，payload 16 字节对齐；首匹配 + 分裂 + 地址序合并；自旋锁保护；；加固：canary 越界守卫、free 0xDD 毒化、double-free 检测
-  堆经 \`brk\` 按 64KB 增长。与 libsys 的 Rust 全局分配器（buddy）相互独立、不冲突。
-- **printf 浮点**：f64 分解为 \`d0.d1d2... × 10^dec_exp\`（**大整数精确法**，
-  float_bigint.rs，全值域精确），round-half-even 舍入，inf/-inf/nan 显式输出。
+## 设计思路
 
-## 使用方式（用户态 Rust 程序）
+BORUIX 的程序绝大部分是 Rust 写的，因此这个库有**两类使用者**：
+
+| 使用者 | 调用方式 |
+| --- | --- |
+| Rust 程序 | 直接经由 Rust 路径调用 |
+| C 程序 | 经由标准 C 接口调用 |
+
+两者由**同一份实现**支撑。这不是两套代码，而是同一套函数同时以 Rust 和 C 两种方式暴露。
+
+具体做法是：所有函数用 `extern "C"` 导出，同时提供配套的 C 头文件。Rust 程序可以直接调用，
+C 程序可以链接静态库并包含头文件。
+
+## 已实现的功能
+
+覆盖 C 标准库的主要部分：
+
+| 领域 | 内容 |
+| --- | --- |
+| 内存管理 | `malloc` / `free` / `realloc` / `calloc` / 对齐分配 |
+| 字符串与内存块 | `memcpy` / `strlen` / `strcmp` / `strtok` / `strstr` 等 |
+| 格式化输出 | `printf` / `snprintf` / `fprintf` 及完整的格式引擎 |
+| 格式化输入 | `fscanf` 系列 |
+| 文件流 | `fopen` / `fread` / `fwrite` / `fgets` 等 |
+| 数值转换 | `strtol` / `strtod` / `atoi` 等，**严格正确舍入** |
+| 字符分类 | `isalpha` / `tolower` 等 |
+| 排序查找 | `qsort` / `bsearch` |
+| 系统调用封装 | `open` / `read` / `write` / `lseek` / `getcwd` 等 |
+| 进程与时间 | `exit` / `getpid` / `waitpid` / `time` / `nanosleep` |
+| 宽字符 | `wcslen` / `mbrtowc` / `wcstombs` 等 |
+| 错误处理 | `errno` 及标准错误码 |
+| 线程 | 线程创建、汇合与同步 |
+
+用 C 写程序的开发者会发现这些都是熟悉的东西。
+
+## 值得说明的实现
+
+**浮点格式化是全值域精确的。** 把浮点数转成十进制文本（`%f` / `%e` / `%g`）看起来简单，
+实则容易出错——朴素的算法在极端数值上会产生最后一位的偏差。这里的实现使用精确的大整数运算，
+在**全部数值范围内**保证结果正确，包括次正规数这类边界情况，并采用银行家舍入（round-half-even，
+与标准一致）。
+
+**字符串转浮点同样严格正确舍入。** 把文本解析成浮点数（`strtod`）是同一个问题的逆过程，同样
+容易在边界上出错。实现走同一套精确路径，覆盖次正规数边界与溢出情形。
+
+**内存分配器带加固。** 除了基本的分配释放，还包含越界守卫、释放后填充标记、以及重复释放检测——
+这些能让常见的内存使用错误在发生时暴露，而不是变成难以追踪的随机故障。
+
+## 已知限制
+
+与标准 C 库相比，有几处**如实说明**的差异：
+
+| 限制 | 说明 |
+| --- | --- |
+| `errno` 是进程级的 | 当前无线程模型下天然如此 |
+| `lseek` 只支持绝对定位 | 相对当前位置与文件末尾的定位不支持，会如实返回"操作不支持" |
+| `waitpid` 的部分选项 | 只支持等待任意子进程，其余选项如实返回错误 |
+| 文件流默认无缓冲 | 直接写到底层，因为该层的缓冲带不来收益 |
+| 无区域设置 | 宽字符按固定编码处理 |
+
+这些不是实现疏漏，而是当前系统能力下的**有意取舍**。使用前请确认你的程序不依赖这些行为。
+
+## 使用
+
+### 从 Rust 程序使用
 
 ```toml
 [dependencies]
-libsys = { path = "../libsys" }
-libc   = { path = "../libc" }
+libc = { path = "../libc" }
 ```
 
 ```rust
-// 直接经 libc crate 路径调用其 C ABI 函数（强制链接 + 真实调用）。
 unsafe {
     let p = libc::malloc::malloc(64);
-    let n = libc::stdio::snprintf(buf.as_mut_ptr() as *mut i8, buf.len(),
+    libc::stdio::snprintf(buf.as_mut_ptr() as *mut i8, buf.len(),
         b"%d %.2f\0".as_ptr() as *const i8, 42, 3.14);
     libc::malloc::free(p);
 }
 ```
 
-> 也可用 \`unsafe extern "C" { fn malloc(size: usize) -> *mut u8; }\` 声明调用
-> \`#[no_mangle]\` 符号；但建议经 crate 路径调用以确保链接期包含 libc 目标文件。
+### 从 C 程序使用
 
-## C 头文件（libc/include/）
+包含 `include/` 下的头文件并链接本库产出的静态库即可。聚合头文件是 `boruix.h`。
 
-为未来原生 C 工具链提供头文件（staticlib 已产出）：\`boruix.h\` 聚合头，
-\`string.h\` / \`stdlib.h\` / \`stdio.h\` / \`unistd.h\` / \`malloc.h\` /
-\`time.h\` / \`errno.h\` / \`boruix_ctypes.h\`。链接时 \`memcpy/memset/memcmp/memmove\`
-由 libsys(builtins) 满足，其余由 libc staticlib 满足。
+## 测试
 
-## 端到端验证（shell）
+逻辑部分（格式化引擎、浮点转换、数值解析等）经过约 **64 个单元测试**，覆盖边界与对抗性情形：
+银行家舍入、负零、极端指数、次正规数边界、数值溢出、进制探测等。
 
-\`shell\` 内建命令 \`libccheck\` 在真实内核上验收 malloc/string/printf/strtol/time/FILE 流：
-在 shell 输入 \`libccheck\`，输出各检查项 OK/FAIL 与汇总 \`[libccheck] passed=N failed=M\`。
+此外系统 shell 内有一个端到端检查命令，在真实内核上验证内存分配、字符串、格式化输出、数值转换
+和时间等链路。
 
-## host 单测（TDD）
+## 构建
 
-\`libc/test_harness/\` 是一个 host std 测试 crate，经 \`#[path]\` include 纯逻辑模块
-（stdio_format/float/ctype/stdlib），验证 printf 格式、浮点 dtoa、strtol 等：
-```sh
-cargo test --manifest-path libc/test_harness/Cargo.toml
+```bash
+cargo build --release
+cargo test --manifest-path test_harness/Cargo.toml
 ```
-64 个用例（含 round-half-even、负零、大数、指数、全范围 dtoa、qsort/bsearch、
-strtod 正确舍入（含 2.2250738585072011e-308 次正规边界、min/max 次正规、溢出）、strtol 溢出/进制探测等对抗性边界）。
-
-## 算法说明
-
-- **fscanf**：支持 \`%d %i %u %x %o %s %c %f %e %g %n %% %[\`（含大写），长度
-  修饰符 \`hh/h/l/ll/z/t/L/j\`（整数目标指针宽度随之变化；\`%f→float*\`、
-  `%lf→double*`、`%Lf→long double*`、`%lc/%ls` 写宽字符）。实数经
-  `strtod` 的精确路径解析（大整数 + 正确舍入），指数饱和到 inf/0。无 pushback 流限制见下。
-- **qsort**：混合式快速排序（median-of-three 选主元 + 小分区插入排序收尾 + 显式
-  栈），平均 O(n log n)，非稳定（C 语义）。见 \`stdlib.rs\`。
-
-## 已知限制（诚实降级说明，S09）
-
-1. **errno 进程局部**：单进程无线程模型下 errno 天然进程局部；未来引入进程内线程
-   须改为 TLS（见 errno.rs 文档）。
-2. **float 精度**：已用大整数精确法（float_bigint.rs）实现**全值域精确** dtoa
-   （含 1e300 / 5e-324 次正规数），无窗口限制；性能为朴素大数除法，printf 默认精度足够。
-3. **getpid**：内核暂无 SYS_TASK_GETPID，实现经解析 \`/processes/list\` 找 Running 状态进程
-   启发式（单核顺序模型下成立）。\`docs/adr/033-process-identity.md\` 有完整设计。
-4. **lseek(SEEK_CUR/SEEK_END)**：内核不暴露当前位置/末尾，如实返回 ENOTSUP（SEEK_SET 可用）。
-5. **waitpid**：返回被收尸子进程的真实 pid（POSIX 语义）；退出码写入 \`*status\` 高 8 位。内核 libsys 仅支持等任意子进程（\`pid>0\` 精确匹配、\`WNOHANG\` 等 options 暂不支持，如实返回 -1 置 ENOTSUP/ENOENT）。
-6. **FILE 流**：默认无缓冲直写（本内核页缓存写即落盘，缓冲期收益为零，S32 无优化无数据）。
-
-## 符号冲突说明
-
-\`memcpy/memmove/memset/memcmp\` 的 C ABI 符号由 **libsys（builtins）** 提供（编译器内建
-路径依赖）。libc 的 \`string.rs\` 对这四个函数**不导出 no_mangle 符号**，仅作纯 Rust 别名，
-避免与 libsys 及 Rust 编译器内建符号冲突（S09）。其余 \`str*/memchr\` 等均正常导出。
 
 ## 目录
 
-- \`src/\` — 各模块实现
-- \`test_harness/\` — host 单测（纯逻辑模块）
+```
+libc/
+├── include/        # C 头文件
+├── src/            # 各模块实现
+└── test_harness/   # 逻辑部分的单元测试
+```
+
+## 相关项目
+
+- [`libsys`](https://github.com/BRX-Boruix/libsys) —— 用户态系统调用封装
+- [`csrc`](https://github.com/BRX-Boruix/csrc) —— 自由式 C 运行环境
+
+## 许可
+
+MIT License，版权归 Yang Borui 所有。详见 [LICENSE](LICENSE)。
+
+---
+
+# English
+
+[简体中文](#libc) | **English**
+
+BORUIX's **C standard library** — implemented in Rust, exposing standard C interfaces.
+
+Programs can be written in C, calling familiar `printf`, `malloc`, and `strlen`, while the
+implementation underneath is memory-safe Rust.
+
+---
+
+## What this is
+
+An operating system's value depends heavily on what it can run, and a great deal of software is
+written in C. `libc` exists so that such software can be compiled and run on this system.
+
+Its premise is the **separation of interface from implementation**: a C library is a set of
+**interface contracts** (the signatures and semantics of symbols like `printf` and `malloc`), and
+the language used to implement them is free. This one is implemented in Rust, because Rust can export
+C interfaces precisely while giving the implementation memory safety.
+
+## Design approach
+
+Nearly all BORUIX programs are written in Rust, so this library has **two kinds of consumer**:
+
+| Consumer | How it calls in |
+| --- | --- |
+| Rust programs | directly, through the Rust path |
+| C programs | through the standard C interfaces |
+
+Both are served by **one implementation**. This is not two codebases — it is one set of functions
+exposed both as Rust and as C.
+
+Concretely, every function is exported with `extern "C"` and accompanied by matching C headers.
+Rust programs can call them directly; C programs can link the static library and include the headers.
+
+## What is implemented
+
+The main body of the C standard library is covered:
+
+| Area | Contents |
+| --- | --- |
+| Memory management | `malloc` / `free` / `realloc` / `calloc` / aligned allocation |
+| Strings and memory blocks | `memcpy` / `strlen` / `strcmp` / `strtok` / `strstr` and more |
+| Formatted output | `printf` / `snprintf` / `fprintf` with a complete format engine |
+| Formatted input | the `fscanf` family |
+| File streams | `fopen` / `fread` / `fwrite` / `fgets` and more |
+| Numeric conversion | `strtol` / `strtod` / `atoi` and more, **correctly rounded** |
+| Character classification | `isalpha` / `tolower` and more |
+| Sorting and searching | `qsort` / `bsearch` |
+| Syscall wrappers | `open` / `read` / `write` / `lseek` / `getcwd` and more |
+| Processes and time | `exit` / `getpid` / `waitpid` / `time` / `nanosleep` |
+| Wide characters | `wcslen` / `mbrtowc` / `wcstombs` and more |
+| Error handling | `errno` and the standard error codes |
+| Threads | thread creation, joining, and synchronisation |
+
+Developers writing C will find these familiar.
+
+## Implementation notes worth stating
+
+**Floating-point formatting is exact across the full range.** Turning a float into decimal text
+(`%f` / `%e` / `%g`) looks simple but is easy to get wrong — naive algorithms produce last-digit
+errors at extreme values. This implementation uses exact big-integer arithmetic to guarantee correct
+results **across the entire numeric range**, including subnormals, with round-half-even rounding as
+the standard requires.
+
+**String-to-float parsing is likewise correctly rounded.** Parsing text into a float (`strtod`) is
+the same problem in reverse and equally prone to boundary errors. It takes the same exact path,
+covering subnormal boundaries and overflow.
+
+**The allocator carries hardening.** Beyond basic allocation and freeing, it includes overrun guards,
+post-free fill marking, and double-free detection — so common memory-use errors surface where they
+happen rather than turning into unreproducible random failures.
+
+## Known limitations
+
+There are a few **honestly stated** differences from a standard C library:
+
+| Limitation | Explanation |
+| --- | --- |
+| `errno` is process-wide | Naturally so given the current lack of a thread model |
+| `lseek` supports absolute positioning only | Seeking relative to the current position or end of file is unsupported and returns "operation not supported" honestly |
+| Some `waitpid` options | Only waiting for any child is supported; other options return an error honestly |
+| File streams are unbuffered by default | They write straight through, since buffering at that layer buys nothing |
+| No locale support | Wide characters use a fixed encoding |
+
+These are not oversights but **deliberate trade-offs** under the system's current capabilities.
+Check that your program does not rely on them before use.
+
+## Usage
+
+### From a Rust program
+
+```toml
+[dependencies]
+libc = { path = "../libc" }
+```
+
+```rust
+unsafe {
+    let p = libc::malloc::malloc(64);
+    libc::stdio::snprintf(buf.as_mut_ptr() as *mut i8, buf.len(),
+        b"%d %.2f\0".as_ptr() as *const i8, 42, 3.14);
+    libc::malloc::free(p);
+}
+```
+
+### From a C program
+
+Include the headers under `include/` and link the static library this crate produces. The umbrella
+header is `boruix.h`.
+
+## Testing
+
+The logic portion (the format engine, float conversion, numeric parsing, and so on) is covered by
+roughly **64 unit tests** spanning boundary and adversarial cases: round-half-even, negative zero,
+extreme exponents, subnormal boundaries, numeric overflow, and base detection.
+
+In addition, a system shell command performs an end-to-end check on real hardware, exercising memory
+allocation, strings, formatted output, numeric conversion, and time.
+
+## Building
+
+```bash
+cargo build --release
+cargo test --manifest-path test_harness/Cargo.toml
+```
+
+## Layout
+
+```
+libc/
+├── include/        # C headers
+├── src/            # module implementations
+└── test_harness/   # unit tests for the logic portion
+```
+
+## Related projects
+
+- [`libsys`](https://github.com/BRX-Boruix/libsys) — the user-space syscall wrapper
+- [`csrc`](https://github.com/BRX-Boruix/csrc) — the freestanding C runtime
+
+## License
+
+MIT License, copyright Yang Borui. See [LICENSE](LICENSE).
