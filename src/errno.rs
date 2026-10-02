@@ -10,7 +10,8 @@
 //! 地址空间，须让 errno **线程局部**才符合 C 语义。落地（见
 //! `docs/DESIGN-T2-TLS-errno-threadlocal.md`，kernel 4f0b724 T2-0）：
 //!
-//! - 每线程持一个用户态 `Tcb`（`crate::thread::Tcb`，独立 mmap，errno 槽在 **offset 0**）；
+//! - 每线程持一个用户态 `Tcb`（`crate::thread::Tcb`，独立 mmap，errno 槽在 **offset 8**——
+//!   3P4-1 引入编译器 TLS 后 offset 0 被 x86-64 TLS ABI 的"线程指针自指针"占用，见该结构文档）；
 //!   线程引导把 `IA32_FS_BASE`（CPL3 可写）设为该 `Tcb` 地址；内核调度器对每线程
 //!   保存/恢复 FS base（T2-0），保证切换后 FS base 恒指向当前线程 `Tcb`。
 //! - `__errno_location()`/`errno()`/`set_errno()` 经 `rdmsr` 读当前线程 FS base：非零 → 其指向
@@ -32,7 +33,7 @@
 static FALLBACK_ERRNO: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
 /// 返回当前线程 errno 槽的可写指针：FS base 非零（本线程已装配 `Tcb`）→ `Tcb.errno`
-/// （offset 0，即 Tcb 基址）；零 → 进程级兜底槽。槽在存活期地址稳定。
+/// （offset 8）；零 → 进程级兜底槽。槽在存活期地址稳定。
 #[inline]
 fn current_errno_ptr() -> *mut i32 {
     let slot = crate::thread::current_errno_ptr_or_null();

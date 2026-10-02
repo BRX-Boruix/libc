@@ -10,20 +10,26 @@
 //! 装配方（`write_fs_base`/`install_tcb`）通常由线程入口（经 libsys `thread_spawn_with_starter` 的
 //! a3 starter 引导）首条调用；组长/主线程入口也须装配自己的 `Tcb`，否则其 errno 回落进程级兜底槽。
 
-/// 每线程控制块（TCB）。`errno` 必须在 **offset 0**（`__errno_location` 直接把 FS base
-/// 当 errno 槽地址返回，故首字段即 errno）。其余字段 T2-1 阶段保留；T2-2 在其上加 TLS 区。
+/// 每线程控制块（TCB）。
+///
+/// **布局契约（3P4-1 起，x86-64 TLS ABI）**：首字段必须是**线程指针自指针**
+/// （offset 0）——编译器 local-exec 序列为 `mov rax, fs:[0]; mov [rax+disp], ...`，
+/// 它从 FS:0 取出线程指针再加**负**位移访问 TLS 变量。T2-1 原把 errno 放在 offset 0，
+/// 与编译器 TLS 冲突（实测症状：选择子与基址都正确，程序仍在首次 fs: 访问处 SIGSEGV，
+/// 因为 fs:[0] 读出 0 → 访问 0xfffffffffffffffc）。故 errno 后移到 **offset 8**。
+/// 内核侧 loader 建的块遵守同一布局（见 kernel loader 的 setup_tls）。
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
 pub struct Tcb {
-    /// errno 槽（offset 0；FS base 即指向此，`FS:[0]` 读写即 errno）。
+    /// 线程指针自指针（offset 0）。FS base 即指向此，`FS:[0]` 读出它。
+    pub this: u64,
+    /// errno 槽（**offset 8**）。
     pub errno: i32,
     _pad: i32,
     /// 本线程 pid（调试/gettid 缓存，可后续由 pthread_self 用之）。
     pub tid: u64,
     /// 组长进程 pid（tgid）。
     pub tgid: u64,
-    /// 自指针（可选自校验）。
-    pub this: u64,
     // ---- T2-2 库管理 TLS 区（bump arena，仅本线程读写，无锁）----
     /// 本线程 TLS arena 基址（线程私有 mmap 区，可与本 Tcb 异址）。
     pub tls_base: u64,
@@ -36,7 +42,7 @@ pub struct Tcb {
 impl Tcb {
     /// 全零 Tcb（errno=0，id 与 TLS arena 待填）。
     pub const fn zeroed() -> Self {
-        Self { errno: 0, _pad: 0, tid: 0, tgid: 0, this: 0, tls_base: 0, tls_cursor: 0, tls_end: 0 }
+        Self { this: 0, errno: 0, _pad: 0, tid: 0, tgid: 0, tls_base: 0, tls_cursor: 0, tls_end: 0 }
     }
 }
 
@@ -108,18 +114,39 @@ pub fn write_fs_base(base: u64) {
 /// 线程引导在首条用户指令调用：先 mmap/零初始化一个 `Tcb`，把地址传本函数。
 #[inline]
 pub fn install_tcb(tcb: &mut Tcb, tid: u64, tgid: u64) {
+    // **不得覆盖内核已建好的 TLS 块**（3P4-1）：镜像含 PT_TLS 时，内核在进程/线程
+    // 启动前已分配并初始化本执行单元的 TLS 块、且 FS base 已指向它。若此处再
+    // write_fs_base(libc 自己的 Tcb)，编译器生成的 fs: 访问就会落到 libc 的 Tcb 上
+    // （布局不同）→ TLS 变量读写错位。故既有非零基址时只回填本库关心的字段。
+    let existing = read_fs_base();
+    if existing != 0 {
+        let p = existing as *mut Tcb;
+        unsafe {
+            (*p).this = existing;
+            (*p).tid = tid;
+            (*p).tgid = tgid;
+        }
+        return;
+    }
+    tcb.this = tcb as *mut Tcb as u64;
     tcb.tid = tid;
     tcb.tgid = tgid;
-    tcb.this = tcb as *mut Tcb as u64;
     write_fs_base(tcb as *mut Tcb as u64);
 }
 
+/// errno 槽相对线程指针的偏移（**offset 8**，见 `Tcb` 布局契约）。
+const ERRNO_OFFSET: u64 = 8;
+
 /// 取当前线程 errno 槽的可写指针（供 `errno` 模块 / `__errno_location` 使用）：
-/// FS base 非零 → 其指向 `Tcb`（errno 在 offset 0）；零 → `None`（调用方回落进程兜底槽）。
+/// FS base 非零 → 其指向 `Tcb`（errno 在 `ERRNO_OFFSET`）；零 → `None`（调用方回落进程兜底槽）。
 #[inline]
 pub fn current_errno_ptr_or_null() -> *mut i32 {
     let base = read_fs_base();
-    if base != 0 { base as *mut i32 } else { core::ptr::null_mut() }
+    if base != 0 {
+        (base + ERRNO_OFFSET) as *mut i32
+    } else {
+        core::ptr::null_mut()
+    }
 }
 
 // ---- T2-2 库管理 TLS 区（threads.md T2-2，S09：库管理仿真，非编译器 `__thread`）----
