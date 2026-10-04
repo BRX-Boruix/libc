@@ -15,6 +15,22 @@ pub const MAP_ANONYMOUS: c_int = 0x20;
 /// POSIX 失败哨兵（`(void *)-1`）。
 pub const MAP_FAILED: *mut c_void = usize::MAX as *mut c_void;
 
+/// `mprotect(addr, len, prot)`：修改已映射内存权限（3P4-5）。
+///
+/// W^X 由内核**单点**拒绝（写+执行同页 → EINVAL），本层不预检。`prot == 0`
+/// （PROT_NONE）当前如实 `ENOTSUP`——抽象层没有「存在但不可访问」的权限表示。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -> c_int {
+    let prot_bits = (prot as u64) & 0x7;
+    match libsys::mprotect(addr as u64, len as u64, prot_bits) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// `mmap(addr, length, prot, flags, fd, offset)`：匿名映射（3P4-4）。
 ///
 /// **当前只支持匿名映射**：`addr` 必须为 NULL（由内核选地址）、`flags` 必须含
