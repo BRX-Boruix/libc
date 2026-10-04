@@ -77,6 +77,8 @@ pub const EEXIST: i32 = 17;
 pub const ENOTSUP: i32 = 95;
 /// 非阻塞操作无法立即完成 EAGAIN。
 pub const EAGAIN: i32 = 11;
+/// 阻塞中的系统调用被信号打断 EINTR（ADR-051）。
+pub const EINTR: i32 = 4;
 /// 空间不足 ENOSPC。
 pub const ENOSPC: i32 = 28;
 /// 设备 I/O 错误 EIO。
@@ -132,6 +134,7 @@ pub fn from_libsys(e: libsys::Error) -> i32 {
         libsys::Error::AlreadyExists => EEXIST,
         libsys::Error::NotSupported => ENOTSUP,
         libsys::Error::WouldBlock => EAGAIN,
+    libsys::Error::Interrupted => EINTR,
         libsys::Error::NoSpace => ENOSPC,
         libsys::Error::Io => EIO,
         libsys::Error::NotDirectory => ENOTDIR,
