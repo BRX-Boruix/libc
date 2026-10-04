@@ -128,6 +128,8 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
         FmMode::Write => libsys::OpenFlags::CREATE_OR_TRUNCATE,
         FmMode::Append => libsys::OpenFlags {
             read: false, write: true, create: true, truncate: false, append: true, directory: false, pipe: false,
+            // fopen 不带 FD_CLOEXEC（C 侧需要时经 fcntl 设置，属后续项）。
+            cloexec: false,
         },
     };
     let perm = libsys::Permissions::read_write();

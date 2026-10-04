@@ -13,6 +13,9 @@ pub const O_RDONLY: c_int = 0;
 pub const O_WRONLY: c_int = 1;
 pub const O_RDWR: c_int = 2;
 pub const O_CREAT: c_int = 0x40;
+/// O_CLOEXEC（3P4-3）：exec 时不继承该 fd。取值与 Linux 一致（0o2000000），
+/// 与同处其余 O_* 的取值风格相同。
+pub const O_CLOEXEC: c_int = 0x80000;
 pub const O_TRUNC: c_int = 0x200;
 pub const O_APPEND: c_int = 0x400;
 
@@ -36,6 +39,8 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_uint) -
     let oflags = libsys::OpenFlags {
         read, write, create, truncate, append,
         directory: false, pipe: false,
+        // 3P4-3：把 C 侧 O_CLOEXEC 透传到内核的每-fd 标志（fd 打标后由 exec 过滤）。
+        cloexec: flags & O_CLOEXEC != 0,
     };
     // 权限：从 mode 取 r/w/x 位（本内核 Permissions 用最低 3 位）。
     let perm = libsys::Permissions {
