@@ -147,6 +147,81 @@ pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     }
 }
 
+/// symlink(target, link_path)：创建软链接（3P4-8）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn symlink(target: *const c_char, link_path: *const c_char) -> c_int {
+    if target.is_null() || link_path.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let t = match unsafe { crate::stdio::cstr_to_str(target) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return -1; }
+    };
+    let l = match unsafe { crate::stdio::cstr_to_str(link_path) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return -1; }
+    };
+    match libsys::symlink(t, l) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
+/// readlink(path, buf, bufsiz)：读软链接目标（3P4-8）。
+///
+/// POSIX 语义写入**不含**终止 NUL 并返回字节数；本实现**不截断**——缓冲不足时
+/// 内核返回 NoSpace，此处如实转成 ERANGE，绝不把不完整目标伪装成完整（S09）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn readlink(
+    path: *const c_char,
+    buf: *mut c_char,
+    bufsiz: size_t,
+) -> ssize_t {
+    if path.is_null() || buf.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let p = match unsafe { crate::stdio::cstr_to_str(path) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return -1; }
+    };
+    let target = match libsys::readlink(p) {
+        Ok(t) => t,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            return -1;
+        }
+    };
+    if target.len() > bufsiz {
+        set_errno(crate::errno::ERANGE);
+        return -1;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(target.as_ptr(), buf as *mut u8, target.len());
+    }
+    target.len() as ssize_t
+}
+
+/// ftruncate(fd, length)：按 fd 截断/扩展文件（3P4-8）。
+#[unsafe(no_mangle)]
+pub extern "C" fn ftruncate(fd: c_int, length: crate::ctypes::off_t) -> c_int {
+    if length < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    match libsys::ftruncate(fd as u64, length as u64) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// \`chdir(path)\`：切换工作目录。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chdir(path: *const c_char) -> c_int {
