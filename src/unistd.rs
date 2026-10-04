@@ -206,6 +206,31 @@ pub unsafe extern "C" fn readlink(
     target.len() as ssize_t
 }
 
+/// `_SC_NPROCESSORS_ONLN`：在线 CPU 数（取值与 Linux 一致）。
+pub const _SC_NPROCESSORS_ONLN: c_int = 84;
+
+/// `sysconf(name)`：系统配置查询（3P4-8c）。
+///
+/// 当前支持 `_SC_NPROCESSORS_ONLN`——数据来源**单一**：libsys 的
+/// `info(INFO_CPU_COUNT)`（内核 `mm::cpu_count()` 经 sysfs `/system/info/cpu` 投影）。
+/// 不支持的名字返回 -1 并置 `EINVAL`（POSIX 允许；**不编造**返回值）。
+#[unsafe(no_mangle)]
+pub extern "C" fn sysconf(name: c_int) -> crate::ctypes::c_long {
+    match name {
+        _SC_NPROCESSORS_ONLN => match libsys::info(libsys::nr::INFO_CPU_COUNT) {
+            Ok(n) => n as crate::ctypes::c_long,
+            Err(e) => {
+                set_errno(from_libsys(e));
+                -1
+            }
+        },
+        _ => {
+            set_errno(EINVAL);
+            -1
+        }
+    }
+}
+
 /// ftruncate(fd, length)：按 fd 截断/扩展文件（3P4-8）。
 #[unsafe(no_mangle)]
 pub extern "C" fn ftruncate(fd: c_int, length: crate::ctypes::off_t) -> c_int {
