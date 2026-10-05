@@ -8,18 +8,13 @@
 extern "C" {
 #endif
 
-#define O_RDONLY 0x00
-#define O_WRONLY 0x01
-#define O_RDWR   0x02
-#define O_CREAT  0x40
-#define O_TRUNC  0x200
-#define O_APPEND 0x400
+/* O_* 与 open() 归 <fcntl.h>（POSIX 归属）——本头文件不再重复定义，
+ * 否则与 fcntl.h 冲突（实测：宏重定义 + open 原型冲突）。 */
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2
 
-int open(const char *path, int flags, unsigned mode);
 int close(int fd);
 ssize_t read(int fd, void *buf, size_t count);
 ssize_t write(int fd, const void *buf, size_t count);
@@ -29,8 +24,8 @@ int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
 int isatty(int fd);
 
-void exit(int status);
-void _exit(int status);
+/* exit/_Exit/abort/atexit 归 <stdlib.h>（POSIX 归属）；unistd.h 只留 _exit。 */
+__attribute__((noreturn)) void _exit(int status);
 
 #ifdef __cplusplus
 }
