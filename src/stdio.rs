@@ -53,6 +53,14 @@ pub struct FILE {
     pub closed: bool,
     /// 1 字节 pushback 槽（ungetc / fscanf 回退）。-1 表示空。
     pub pushback: i32,
+    /// **内存源**（`sscanf` 用）：非 null 时扫描从这个缓冲区读，而不是 fd。
+    ///
+    /// 为什么给 FILE 加源而不是另写一套扫描器：解析逻辑必须**单点定义**（S15）——
+    /// 复制第二套 sscanf 解析迟早与 fscanf 分叉。C 侧 `FILE` 是不透明类型
+    /// （`typedef struct FILE FILE;`），故加字段不破坏 ABI。
+    pub str_src: *const u8,
+    pub str_len: usize,
+    pub str_pos: usize,
 }
 
 /// 全局锁：保护标准流初始化与输出（单进程模型下防重入）。
@@ -79,14 +87,17 @@ pub fn stdio_init() {
         static STREAM_STDIN: SyncStream = SyncStream::new(FILE {
             fd: 0, mode: FmMode::Read, buf_mode: FmBufMode::None, eof: false, error: false,
             buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false, pushback: -1,
+            str_src: core::ptr::null(), str_len: 0, str_pos: 0,
         });
         static STREAM_STDOUT: SyncStream = SyncStream::new(FILE {
             fd: 1, mode: FmMode::Write, buf_mode: FmBufMode::None, eof: false, error: false,
             buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false, pushback: -1,
+            str_src: core::ptr::null(), str_len: 0, str_pos: 0,
         });
         static STREAM_STDERR: SyncStream = SyncStream::new(FILE {
             fd: 2, mode: FmMode::Write, buf_mode: FmBufMode::None, eof: false, error: false,
             buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false, pushback: -1,
+            str_src: core::ptr::null(), str_len: 0, str_pos: 0,
         });
         if stdin.is_null() {
             stdin = STREAM_STDIN.get();
@@ -146,6 +157,7 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
                     fd, mode: fm, buf_mode: FmBufMode::None, eof: false, error: false,
                     buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false,
                     pushback: -1,
+                    str_src: core::ptr::null(), str_len: 0, str_pos: 0,
                 });
             }
             fp
@@ -963,11 +975,22 @@ pub unsafe extern "C" fn getchar() -> c_int {
 
 /// 内部：从 FILE 读一个字节；EOF 返回 -1。
 unsafe fn fscan_getc(f: &mut FILE) -> i32 {
-    // 优先读回 pushback 槽。
+    // pushback 槽优先——**与源类型无关**（内存源也要能回退，否则 sscanf 的
+    // 「读超了再吐回一个字符」会失效）。
     if f.pushback >= 0 {
         let c = f.pushback;
         f.pushback = -1;
         return c;
+    }
+    // 内存源（sscanf）：读完即 EOF。
+    if !f.str_src.is_null() {
+        if f.str_pos >= f.str_len {
+            f.eof = true;
+            return -1;
+        }
+        let c = unsafe { *f.str_src.add(f.str_pos) };
+        f.str_pos += 1;
+        return c as i32;
     }
     let mut b = [0u8; 1];
     match libsys::read(f.fd, &mut b) {
@@ -1074,6 +1097,7 @@ pub fn f64_pow10(k: i32) -> f64 {
 /// 字符（非本转换数字/集合外/超宽/实数终止符）时压回供后续转换复用，避免字符丢失；
 /// 多字节 pushback 仅支持 1 槽。%lc/%ls（l 修饰宽字符）目标为 wchar_t*（x86_64 上 4 字节），
 /// 每字节扩展为宽字符。返回成功赋值项数；遇 EOF/错误返回 EOF。
+/// `fscanf(fp, fmt, ...)`：从流读取格式化输入。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c_int {
     use core::ffi::VaList;
@@ -1081,15 +1105,52 @@ pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c
         set_errno(EINVAL);
         return EOF;
     }
-    unsafe {
-        let f = &mut *fp;
-        if f.mode != FmMode::Read {
-            f.error = true;
-            set_errno(EINVAL);
-            return EOF;
-        }
-        let mut ap: VaList = core::mem::transmute(ap);
-        let fmt_bytes = crate::stdio::cstr_to_bytes(fmt);
+    let ap: VaList = unsafe { core::mem::transmute(ap) };
+    unsafe { vscan(&mut *fp, fmt, ap) }
+}
+
+/// `sscanf(s, fmt, ...)`：从**字符串**读取格式化输入。
+///
+/// 与 `fscanf` 共用同一套扫描核心 `vscan`（解析逻辑单点定义，S15）：本函数只是把
+/// 输入源换成内存缓冲区。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sscanf(s: *const c_char, fmt: *const c_char, ap: ...) -> c_int {
+    use core::ffi::VaList;
+    if s.is_null() || fmt.is_null() {
+        set_errno(EINVAL);
+        return EOF;
+    }
+    let bytes = unsafe { crate::stdio::cstr_to_bytes(s) };
+    let mut f = FILE {
+        fd: u64::MAX, // 无 fd：本 FILE 是纯内存源（不参与 fd 路径）
+        mode: FmMode::Read,
+        buf_mode: FmBufMode::None,
+        eof: false,
+        error: false,
+        buf_ptr: core::ptr::null_mut(),
+        buf_len: 0,
+        buf_pos: 0,
+        closed: false,
+        pushback: -1,
+        str_src: bytes.as_ptr(),
+        str_len: bytes.len(),
+        str_pos: 0,
+    };
+    let ap: VaList = unsafe { core::mem::transmute(ap) };
+    unsafe { vscan(&mut f, fmt, ap) }
+}
+
+/// 格式化扫描的**共同核心**：`fscanf` 与 `sscanf` 都走这里。
+///
+/// `f` 的输入源由 `FILE::str_src` 决定（非 null 即内存源），故本函数与源类型无关。
+unsafe fn vscan(f: &mut FILE, fmt: *const c_char, mut ap: VaList) -> c_int {
+    use core::ffi::VaList;
+    if f.mode != FmMode::Read {
+        f.error = true;
+        set_errno(EINVAL);
+        return EOF;
+    }
+    let fmt_bytes = crate::stdio::cstr_to_bytes(fmt);
         let mut i = 0usize;
         let mut assigned: c_int = 0;
         // 从流累计消费的字符数（用于 %n）。
@@ -1592,7 +1653,6 @@ pub unsafe extern "C" fn fscanf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c
                 i += 1;
             }
         }
-        assigned
-    }
+    assigned
 }
 
