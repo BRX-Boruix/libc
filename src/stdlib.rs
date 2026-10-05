@@ -11,6 +11,16 @@ use crate::ctypes::{c_int, c_long, c_ulong, c_longlong, c_ulonglong, c_uint, siz
 use crate::errno::{set_errno, ERANGE};
 use crate::ctypes::c_char;
 
+/// `boruix_so_abi_version()`：共享库 ABI 版本探针（阶段 5 / 3P5-2）。
+///
+/// **加它是故意的**：用于验证"重编 libc、**只替换 `.so`** 之后，**未重链接**的旧程序仍能跑"。
+/// 一个**新增**导出不会破坏既有程序——这正是"符号 ABI 冻结"的含义：
+/// 已发布的符号不得改签名/改语义，新增是允许的（向后兼容）。
+#[unsafe(no_mangle)]
+pub extern "C" fn boruix_so_abi_version() -> c_int {
+    2
+}
+
 // ---------- atexit（3P3-2）----------
 
 use spin::Mutex;

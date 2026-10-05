@@ -7,6 +7,7 @@
     atoi;
     atol;
     atoll;
+    boruix_so_abi_version;
     bsearch;
     calloc;
     ceil;

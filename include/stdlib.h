@@ -8,6 +8,9 @@
 extern "C" {
 #endif
 
+/* 共享库 ABI 版本探针（阶段 5 / 3P5-2）。**新增导出**，不影响既有程序。 */
+int boruix_so_abi_version(void);
+
 int abs(int n);
 long labs(long n);
 long long llabs(long long n);
