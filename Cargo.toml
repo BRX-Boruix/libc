@@ -7,6 +7,11 @@ description = "BORUIX 用户态 C 标准库（Rust 实现 + C ABI，构建于 li
 
 # 供 no_std bin crate 作为 Rust 依赖链接（rlib），同时产出 C 静态库（staticlib）
 # 以便未来原生 C 工具链 / 其他语言经 C ABI 链接（ADR-001：libc = Rust 实现 + C ABI）。
+#
+# 阶段 5（3P5-2）：`.so` 不在 manifest 里声明 `cdylib`——**cargo 对本自定义目标会丢弃该类型**
+# （实测警告 `dropping unsupported crate type`，且加 `dynamic-linking: true` 也不生效）。
+# 改为经 `cargo rustc -- --crate-type cdylib` 追加（rustc 会累积多个 --crate-type），
+# 见 tools/tools_build/install.py 的 build_cdylib 与 docs/TODO/3p.md 3P5-2。
 [lib]
 crate-type = ["rlib", "staticlib"]
 
