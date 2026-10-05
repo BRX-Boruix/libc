@@ -9,6 +9,36 @@
 
 use crate::ctypes::{c_int, c_long, c_ulong, c_longlong, c_ulonglong, c_uint, size_t, c_void};
 use crate::errno::{set_errno, ERANGE};
+use crate::ctypes::c_char;
+
+// ---------- 异常终止与断言（3P3-2）----------
+
+/// `abort()`：异常终止（`stdlib.h`）。
+///
+/// 按 C 语义先发 SIGABRT（POSIX 固定号 6）；若该信号被忽略或捕获而返回，则用
+/// `_exit(128 + SIGABRT)` 兜底。**绝不返回**。
+#[unsafe(no_mangle)]
+pub extern "C" fn abort() -> ! {
+    let _ = crate::signal::raise(6);
+    crate::process::_exit(134)
+}
+
+/// `__assert_fail(expr, file, line)`：`assert()` 失败路径（`assert.h`）。
+///
+/// 直写 stderr 而不依赖缓冲状态——断言失败路径上不应再有「输出可能丢失」的不确定性。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __assert_fail(expr: *const c_char, file: *const c_char, line: c_uint) -> ! {
+    unsafe {
+        let _ = crate::stdio::fprintf(
+            crate::stdio::stderr,
+            c"assertion failed: %s (%s:%u)\n".as_ptr(),
+            expr,
+            file,
+            line,
+        );
+    }
+    abort()
+}
 
 /// \`abs(n)\`：绝对值（i32::MIN 返回自身，未定义）。
 #[unsafe(no_mangle)]
