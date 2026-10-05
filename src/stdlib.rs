@@ -71,7 +71,9 @@ pub fn run_atexit_handlers() {
 /// `_exit(128 + SIGABRT)` 兜底。**绝不返回**。
 #[unsafe(no_mangle)]
 pub extern "C" fn abort() -> ! {
-    let _ = crate::signal::raise(6);
+    // 本系统**没有** SIGABRT（内核 task::signals 的集合里没有 6），故不能像 glibc 那样
+    // 先 raise(SIGABRT)。直接以 128+6=134 异常终止——与 POSIX 约定中「被 SIGABRT 终止」的
+    // 退出码一致，调用方（shell/wait）看到的结果语义相同。绝不返回。
     crate::process::_exit(134)
 }
 
