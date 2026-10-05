@@ -15,8 +15,15 @@ description = "BORUIX 用户态 C 标准库（Rust 实现 + C ABI，构建于 li
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+# `crt`（默认开）：把 libsys 的进程入口 `_start` 带进来——静态可执行文件需要它。
+# 构建 `.so` 时用 `--no-default-features` 关掉：库不该带入口（见 libsys 的同名 feature 说明）。
+default = ["crt"]
+crt = ["libsys/crt"]
+
 [dependencies]
-libsys = { path = "../libsys" }
+# default-features = false：crt 由本 crate 的 feature 决定是否开启（见上）。
+libsys = { path = "../libsys", default-features = false }
 spin = "0.9"
 
 # 用户态裸机库：无 unwinding 运行时。unwind 相关函数由 no_std 下层与
