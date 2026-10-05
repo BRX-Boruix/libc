@@ -1603,11 +1603,11 @@ unsafe fn vscan(f: &mut FILE, fmt: *const c_char, mut ap: VaList) -> c_int {
                         } else if adjust < -324 {
                             value = 0.0;
                         } else {
-                            if adjust < 0 {
-                                value *= f64_pow10(-adjust as i32);
-                            } else {
-                                value *= f64_pow10(adjust as i32);
-                            }
+                            // value = mant × 10^adjust。adjust 已含小数点位移（exp10 - frac_digits），
+                            // 故**两个方向都是同一个公式**——此前负数分支多取了一次负号，
+                            // 把 "3.5"（mant=35, frac_digits=1, adjust=-1）算成 35×10¹ = 350。
+                            // 这是 fscanf 里的**既有**缺陷，sscanf 复用它才暴露出来。
+                            value *= f64_pow10(adjust as i32);
                         }
                         if neg {
                             value = -value;
