@@ -10,6 +10,7 @@
 
 typedef unsigned long size_t;
 typedef long ssize_t;
+typedef long off_t; /* LP64：与 Rust 侧 libc::ctypes::off_t（c_long）同一事实 */
 typedef int c_int;
 typedef long c_long;
 typedef unsigned long c_ulong;

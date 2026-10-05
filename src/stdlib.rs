@@ -11,6 +11,58 @@ use crate::ctypes::{c_int, c_long, c_ulong, c_longlong, c_ulonglong, c_uint, siz
 use crate::errno::{set_errno, ERANGE};
 use crate::ctypes::c_char;
 
+// ---------- atexit（3P3-2）----------
+
+use spin::Mutex;
+
+/// 退出处理函数登记表容量。
+///
+/// **固定容量、不分配**：atexit 常被用在退出路径上，此时不应再依赖堆状态
+/// （堆可能已损坏或已被释放）。表满时按 POSIX 允许的方式如实返回非 0。
+const MAX_ATEXIT: usize = 32;
+
+type ExitFn = extern "C" fn();
+
+static ATEXIT_FNS: Mutex<[Option<ExitFn>; MAX_ATEXIT]> = Mutex::new([None; MAX_ATEXIT]);
+
+/// `atexit(f)`：登记退出处理函数。成功返回 0；表满返回非 0。
+#[unsafe(no_mangle)]
+pub extern "C" fn atexit(f: Option<ExitFn>) -> c_int {
+    let Some(f) = f else {
+        return -1;
+    };
+    let mut table = ATEXIT_FNS.lock();
+    for slot in table.iter_mut() {
+        if slot.is_none() {
+            *slot = Some(f);
+            return 0;
+        }
+    }
+    1
+}
+
+/// 逆序调用全部已登记的退出处理函数（LIFO，POSIX 语义）。由 `exit` 调用；`_exit` 不调用。
+///
+/// 逐个「取出后释放锁再调用」：处理函数内部可能再次调用 `atexit`/`exit`，持锁调用会自死锁。
+pub fn run_atexit_handlers() {
+    loop {
+        let f = {
+            let mut table = ATEXIT_FNS.lock();
+            let mut picked = None;
+            for slot in table.iter_mut().rev() {
+                if slot.is_some() {
+                    picked = slot.take();
+                    break;
+                }
+            }
+            picked
+        };
+        match f {
+            Some(f) => f(),
+            None => break,
+        }
+    }
+}
 // ---------- 异常终止与断言（3P3-2）----------
 
 /// `abort()`：异常终止（`stdlib.h`）。

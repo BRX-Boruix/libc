@@ -11,12 +11,15 @@ use crate::ctypes::c_int;
 use crate::errno::{set_errno, from_libsys};
 
 /// `exit(code)`：终止当前进程。永不返回。
+///
+/// POSIX：`exit` 先按 LIFO 调用 `atexit` 登记的处理函数，再真正退出；`_exit` 不调用。
 #[unsafe(no_mangle)]
 pub extern "C" fn exit(code: c_int) -> ! {
+    crate::stdlib::run_atexit_handlers();
     libsys::exit(code)
 }
 
-/// `_exit(code)`：与 exit 等价（本实现无 atexit/清理）。
+/// `_exit(code)`：立即终止，**不**运行 `atexit` 处理函数、不做任何清理（POSIX 语义）。
 #[unsafe(no_mangle)]
 pub extern "C" fn _exit(code: c_int) -> ! {
     libsys::exit(code)

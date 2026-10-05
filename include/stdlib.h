@@ -12,6 +12,18 @@ int abs(int n);
 long labs(long n);
 long long llabs(long long n);
 
+/* 进程终止与退出处理（POSIX 把这三个放在 stdlib.h）。 */
+__attribute__((noreturn)) void exit(int status);
+__attribute__((noreturn)) void _Exit(int status);
+__attribute__((noreturn)) void abort(void);
+int atexit(void (*func)(void));
+
+/* 动态内存（另见 malloc.h；POSIX 同样在 stdlib.h 声明这四个）。 */
+void *malloc(size_t size);
+void *calloc(size_t nmemb, size_t size);
+void *realloc(void *ptr, size_t size);
+void free(void *ptr);
+
 int atoi(const char *s);
 long atol(const char *s);
 long long atoll(const char *s);

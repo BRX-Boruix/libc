@@ -15,6 +15,18 @@ pub const MAP_ANONYMOUS: c_int = 0x20;
 /// POSIX 失败哨兵（`(void *)-1`）。
 pub const MAP_FAILED: *mut c_void = usize::MAX as *mut c_void;
 
+/// `munmap(addr, len)`：解除映射（`mmap` 的配对操作）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn munmap(addr: *mut c_void, len: size_t) -> c_int {
+    match libsys::munmap(addr as u64, len as u64) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// `mprotect(addr, len, prot)`：修改已映射内存权限（3P4-5）。
 ///
 /// W^X 由内核**单点**拒绝（写+执行同页 → EINVAL），本层不预检。`prot == 0`
