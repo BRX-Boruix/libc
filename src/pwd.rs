@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 use core::ptr;
 use spin::Mutex;
 
-use crate::ctypes::{c_char, c_int};
+use crate::ctypes::c_char;
 
 /// POSIX `struct passwd`（字段顺序遵循 POSIX；本实现填充前四项，其余为 NULL）。
 #[repr(C)]

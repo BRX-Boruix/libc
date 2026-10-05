@@ -167,7 +167,20 @@ pub unsafe extern "C" fn sigprocmask(
             return -1;
         }
     };
-    let set_val: sigset_t = if set.is_null() { 0 } else { unsafe { *set } };
+    // POSIX：`set == NULL` 表示**纯查询**——屏蔽集**不变**，只回写旧值（`how` 不影响结果）。
+    //
+    // 此前把 NULL 当 0 传给内核，于是 `SIG_SETMASK` 变成「把屏蔽集设为 0」= **清空**：
+    // 调用方做一次查询就把屏蔽解掉了。3P3-2 的 sigprocmask 行为用例正是被这一点误导——
+    // 观测到的 `after=0x800` 是内核返回的**旧值**，而屏蔽当时已被清空，故后续 raise 被投递
+    // （我一度据此误判为「内核投递路径不检查屏蔽位」并立项 3P4-11；**该定性是错的**）。
+    //
+    // 无副作用的只读查询：用 `SIGNAL_BLOCK` 传**空集**（`blocked |= ∅` 不变）且仍返回旧值——
+    // 一次 syscall 完成，没有「先读后写」的竞态窗口。
+    let (how_map, set_val) = if set.is_null() {
+        (libsys::signal::SIGNAL_BLOCK, 0)
+    } else {
+        (how_map, unsafe { *set })
+    };
     match libsys::signal::mask(how_map, set_val) {
         Ok(old) => {
             if !oset.is_null() {
@@ -182,6 +195,68 @@ pub unsafe extern "C" fn sigprocmask(
     }
 }
 
+// ---------- 信号集操作（POSIX sigset 家族，3P3-2 补齐）----------
+
+/// 信号集的位编码 = **`1 << sig`**（与内核 `task::signal_set::SignalSet` 同一事实）。
+///
+/// 为什么必须提供这些函数：`sigset_t` 是 u64 位图，若不给辅助函数，C 程序只能**手搓位**——
+/// 极易按「bit(sig-1)」的直觉写错（本仓的覆盖面驱动就这么错过一次：传 `1<<11` 以为屏蔽了
+/// SIGUSR2，实际屏蔽的是 SIGSEGV=11）。POSIX 要求这五个函数正是为了让调用方不碰编码。
+const SIGSET_NSIG: c_int = 64;
+
+/// `sigemptyset(set)`：清空信号集。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigemptyset(set: *mut sigset_t) -> c_int {
+    if set.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    unsafe { *set = 0 };
+    0
+}
+
+/// `sigfillset(set)`：置入全部信号（bit63 保留，与内核 NSIG=64 的约定一致）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigfillset(set: *mut sigset_t) -> c_int {
+    if set.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    unsafe { *set = u64::MAX & !(1u64 << 63) };
+    0
+}
+
+/// `sigaddset(set, sig)`：把信号加入集合。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigaddset(set: *mut sigset_t, sig: c_int) -> c_int {
+    if set.is_null() || !(0..SIGSET_NSIG).contains(&sig) {
+        set_errno(EINVAL);
+        return -1;
+    }
+    unsafe { *set |= 1u64 << sig };
+    0
+}
+
+/// `sigdelset(set, sig)`：把信号移出集合。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigdelset(set: *mut sigset_t, sig: c_int) -> c_int {
+    if set.is_null() || !(0..SIGSET_NSIG).contains(&sig) {
+        set_errno(EINVAL);
+        return -1;
+    }
+    unsafe { *set &= !(1u64 << sig) };
+    0
+}
+
+/// `sigismember(set, sig)`：信号是否在集合中（1=是，0=否，-1=错误）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigismember(set: *const sigset_t, sig: c_int) -> c_int {
+    if set.is_null() || !(0..SIGSET_NSIG).contains(&sig) {
+        set_errno(EINVAL);
+        return -1;
+    }
+    ((unsafe { *set } >> sig) & 1) as c_int
+}
 /// `raise(sig)`：向自身发送信号（复用内核 kill(getpid)）。
 ///
 /// 返回 0 成功，-1 失败置 errno。

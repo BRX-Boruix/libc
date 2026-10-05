@@ -1144,7 +1144,6 @@ pub unsafe extern "C" fn sscanf(s: *const c_char, fmt: *const c_char, ap: ...) -
 ///
 /// `f` 的输入源由 `FILE::str_src` 决定（非 null 即内存源），故本函数与源类型无关。
 unsafe fn vscan(f: &mut FILE, fmt: *const c_char, mut ap: VaList) -> c_int {
-    use core::ffi::VaList;
     if f.mode != FmMode::Read {
         f.error = true;
         set_errno(EINVAL);

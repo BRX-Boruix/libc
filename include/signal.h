@@ -43,6 +43,14 @@ struct sigaction {
     void        *sa_restorer; /* 保留：本系统由内核自动安装 restorer，恒为 0 */
 };
 
+/* 信号集操作（POSIX）。**必须用这些**，不要手搓位：
+ * 位编码是 `1 << sig`（与内核 SignalSet 同一事实）。 */
+int sigemptyset(sigset_t *set);
+int sigfillset(sigset_t *set);
+int sigaddset(sigset_t *set, int sig);
+int sigdelset(sigset_t *set, int sig);
+int sigismember(const sigset_t *set, int sig);
+
 /* sigprocmask 的 how 取值（POSIX）。 */
 #define SIG_BLOCK   0
 #define SIG_UNBLOCK 1
