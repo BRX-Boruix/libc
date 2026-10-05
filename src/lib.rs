@@ -51,6 +51,7 @@ pub mod mman;
 pub mod process;
 pub mod pwd;
 pub mod random;
+pub mod setjmp;
 pub mod sha256;
 pub mod shadow;
 pub mod signal;

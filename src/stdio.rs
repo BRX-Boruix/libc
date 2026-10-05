@@ -582,6 +582,25 @@ use core::ffi::VaList;
 /// 浮点改走此路径即修复）。这是对编译器缺陷的显式规避（详见 shell/README 已知限制章节）。
 ///
 /// 调用后 `gp_offset` 前进 8（每个变长实参占一个 8 字节 GP 槽）。
+/// 从 va_list 读取下一个变长 `double`。**ABI 相关，必须按目标分派**：
+///
+/// - `os="boruix"`（用户态目标，硬浮点 +SSE）：走标准的 FP 槽；
+/// - `os="none"`（内核目标，`rustc-abi: softfloat`）：该 ABI 下变长 `double` 由调用方放进
+///   **通用寄存器**，只能走 GP 槽。
+///
+/// 此前这里只实现了后者，并把它描述成「编译器 c_variadic 缺陷」——**根因其实是目标 ABI 是
+/// soft-float**（3P3-2 实测：用户态改用硬浮点目标后，只有标准路径才读得对；`%f` 一度全错）。
+#[cfg(target_os = "boruix")]
+unsafe fn next_float_arg(ap: &mut VaList) -> f64 {
+    unsafe { ap.next_arg::<f64>() }
+}
+
+#[cfg(not(target_os = "boruix"))]
+unsafe fn next_float_arg(ap: &mut VaList) -> f64 {
+    f64::from_bits(unsafe { next_float_arg_gp(ap) })
+}
+
+#[cfg(not(target_os = "boruix"))]
 unsafe fn next_float_arg_gp(ap: &mut VaList) -> u64 {
     #[repr(C)]
     struct VL {
@@ -667,7 +686,7 @@ fn render_spec(
             emit_int(&s, v, false, sink)
         }
         Conv::Float | Conv::Exp | Conv::General => {
-            let v = f64::from_bits(unsafe { next_float_arg_gp(ap) });
+            let v = unsafe { next_float_arg(ap) };
             let precision = if s.prec >= 0 { s.prec as usize } else { 6 };
             let mut d = crate::float::decompose(v);
             match s.conv {
@@ -677,7 +696,7 @@ fn render_spec(
             }
         }
         Conv::HexFloat => {
-            let v = f64::from_bits(unsafe { next_float_arg_gp(ap) });
+            let v = unsafe { next_float_arg(ap) };
             crate::float::emit_hexfloat(&s, v, sink)
         }
     }
