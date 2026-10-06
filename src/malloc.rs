@@ -324,6 +324,40 @@ pub extern "C" fn boruix_heap_diag(on: crate::ctypes::c_int) {
     libsys::heap_diag(on != 0);
 }
 
+/// 分配器**契约自检**（默认关闭，由 `boruix_heap_diag(1)` 打开）。
+///
+/// 契约：`malloc(size)`/`realloc(ptr,size)` 返回的块，**可用容量必须 >= size**。
+///
+/// 为什么加它：tcc 在系统内加载对象时，`section_realloc` 的 `memset` 会写过一个块的末尾
+/// （内核留证显示：用户态写不存在的页、指令落在 `memset`、地址刚越过 `brk`）。
+/// 那条 `memset` 的起点与长度都正确，所以充分嫌疑是**分配器给了太小的块**。
+/// 与其继续读代码猜，不如让分配器自己回答——这正是本次崩溃的充分条件。
+///
+/// 零分配：栈缓冲 + write（诊断路径绝不能分配）。
+fn check_capacity(tag: u8, cap: usize, want: usize) {
+    if !libsys::heap_diag_on() {
+        return;
+    }
+    if cap >= want {
+        return;
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = [0u8; 40];
+    buf[0] = b'[';
+    buf[1] = tag;
+    buf[2] = b'!';
+    buf[3] = b']';
+    for i in 0..16usize {
+        buf[4 + i] = HEX[((cap as u64 >> (60 - i * 4)) & 0xf) as usize];
+    }
+    buf[20] = b' ';
+    for i in 0..16usize {
+        buf[21 + i] = HEX[((want as u64 >> (60 - i * 4)) & 0xf) as usize];
+    }
+    buf[37] = b'\n';
+    let _ = libsys::write(1, &buf[..38]);
+}
+
 unsafe fn heap_extend(need: usize) -> *mut u8 {
     let cur = match libsys::brk(0) {
         Ok(b) => b,
@@ -429,6 +463,7 @@ pub extern "C" fn malloc(size: size_t) -> *mut u8 {
     unsafe {
         set_payload_offset(payload, HEADER); // 存偏移=16，供 free/realloc 反推
         let cap = payload_capacity(block, payload);
+        check_capacity(b'M', cap, size); // 契约自检：容量必须 >= 请求
         write_canary(payload, cap);
     }
     ALLOC_LOCK.unlock();
@@ -492,6 +527,7 @@ pub extern "C" fn realloc(ptr: *mut u8, new_size: size_t) -> *mut u8 {
         if old_size >= new_need {
             // 原地：canary 需重写到新容量末尾，并毒化多出的尾部。
             let new_cap = old_cap.min(new_alloc + HEADER);
+            check_capacity(b'R', new_cap, new_size); // 契约自检：原地分支
             write_canary(ptr, new_cap);
             let old_user = user_size(old_cap);
             let new_user = user_size(new_cap);
@@ -512,7 +548,9 @@ pub extern "C" fn realloc(ptr: *mut u8, new_size: size_t) -> *mut u8 {
         let copy_len = user_size(old_cap).min(new_size);
         core::ptr::copy_nonoverlapping(ptr, new_payload, copy_len);
         set_payload_offset(new_payload, HEADER);
-        write_canary(new_payload, payload_capacity(new_block, new_payload));
+        let np_cap = payload_capacity(new_block, new_payload);
+        check_capacity(b'C', np_cap, new_size); // 契约自检：搬迁分支
+        write_canary(new_payload, np_cap);
         // 释放旧块。
         let old_cap2 = payload_capacity(block, ptr);
         if !freelist_contains(block) {
