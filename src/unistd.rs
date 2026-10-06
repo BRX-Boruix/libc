@@ -112,15 +112,34 @@ pub const SEEK_END: c_int = 2;
 /// \`lseek(fd, offset, whence)\`：定位。
 ///
 /// 内核 STREAM read/write 支持绝对偏移（pread/pwrite 语义）与顺序
-/// （STREAM_OFFSET_CURRENT）。本实现用 libsys pread/pwrite 的绝对偏移表达
-/// SEEK_SET；SEEK_CUR/SEEK_END 因内核不暴露当前位置而**如实返回 ENOTSUP**
-/// （S09，不伪造）。
+/// （STREAM_OFFSET_CURRENT）。本实现用绝对偏移表达 SEEK_SET——**本系统没有"文件位置"**：
+/// 每次读写自带偏移，位置由调用方自己掌握，故 SEEK_SET 只是把 offset 原样返回。
+///
+/// `SEEK_END` 经 `fstat` 取文件大小（**文件大小是可得的**，只是不在"位置"里）：
+/// POSIX 的 SEEK_END 语义正是"相对末尾"，故返回 `size + offset`。
+/// `SEEK_CUR` 仍如实返回 ENOTSUP——本系统确实没有"当前位置"可查（S09 不伪造）。
+///
+/// **这条修复是 tcc 移植撞出来的**：tcc 用 `lseek(fd, 0, SEEK_END)` 取对象文件大小，
+/// 拿到 -1 就判 `invalid object file`。实测（探针输出见 tcc-on-boruix/boruix/probe_file.c）：
+/// 盘上那份其实是**完好的 ELF**（头 16 字节正是 ELF 魔数）——所以问题不在文件，在这里。
 #[unsafe(no_mangle)]
-pub extern "C" fn lseek(_fd: c_int, offset: crate::ctypes::c_long, whence: c_int) -> crate::ctypes::c_long {
+pub extern "C" fn lseek(
+    fd: c_int,
+    offset: crate::ctypes::c_long,
+    whence: c_int,
+) -> crate::ctypes::c_long {
     match whence {
         SEEK_SET => offset,
+        SEEK_END => {
+            let mut st = core::mem::MaybeUninit::<stat>::uninit();
+            if unsafe { fstat(fd, st.as_mut_ptr()) } != 0 {
+                return -1;
+            }
+            let st = unsafe { st.assume_init() };
+            st.st_size + offset
+        }
         _ => {
-            // 内核无当前位置/文件末尾查询原语：如实不支持。
+            // SEEK_CUR：本系统没有"当前位置"这一概念（无状态偏移模型），如实不支持。
             set_errno(crate::errno::ENOTSUP);
             -1
         }
