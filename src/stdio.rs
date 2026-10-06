@@ -861,6 +861,15 @@ fn vformat_mem(
     buf: *mut u8,
     cap: usize,
 ) -> Result<ssize_t, ()> {
+    // `sprintf` 语义上无上界（由调用方保证缓冲区足够大），它经 `usize::MAX` 传入。
+    //
+    // **但 `slice::from_raw_parts_mut` 的契约要求 `len <= isize::MAX`**：传 `usize::MAX`
+    // 是 UB，而且会让 `MemSink::write` 的边界检查（`self.pos < self.buf.len()`）形同虚设，
+    // 于是写出缓冲区一路写到代码段才崩（实测：tcc 的 sprintf 就是这样崩的，
+    // 内核留证 fault_addr 落在 emit_str 的代码里、err=0x7 用户态写）。
+    //
+    // 收敛到 `isize::MAX`：满足切片契约，同时保持「实际上无界」的语义。
+    let cap = cap.min(isize::MAX as usize);
     if cap == 0 || buf.is_null() {
         // 只统计长度（snprintf cap=0 合法）。
         let fmt_bytes = unsafe { cstr_bytes(fmt) };
