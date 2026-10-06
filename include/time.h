@@ -19,6 +19,24 @@ struct timespec {
     long tv_nsec;
 };
 
+/* 日历时间。字段顺序必须与 Rust 侧 libc/src/time.rs 的 #[repr(C)] struct Tm 一致。 */
+struct tm {
+    int tm_sec;    /* 秒 0-60 */
+    int tm_min;    /* 分 0-59 */
+    int tm_hour;   /* 时 0-23 */
+    int tm_mday;   /* 日 1-31 */
+    int tm_mon;    /* 月 0-11（注意：**0 起**，与直觉差 1） */
+    int tm_year;   /* 自 1900 起的年数（注意：**减 1900**） */
+    int tm_wday;   /* 星期 0-6，0=周日 */
+    int tm_yday;   /* 年内第几天 0-365 */
+    int tm_isdst;  /* 夏令时标志；本系统恒为 0 */
+};
+
+/* 两者都返回指向**静态存储**的指针（后续调用会覆盖，POSIX 允许）。
+ * **诚实边界**：本系统无时区数据库，故 localtime 与 gmtime 行为完全相同（按 UTC）。 */
+struct tm *gmtime(const time_t *t);
+struct tm *localtime(const time_t *t);
+
 time_t time(time_t *tloc);
 clock_t clock(void);
 int sleep(unsigned seconds);

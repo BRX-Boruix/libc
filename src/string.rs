@@ -578,3 +578,78 @@ pub unsafe extern "C" fn strsep(strp: *mut *mut c_char, delim: *const c_char) ->
     }
 }
 
+/// 未知错误号的缓冲（POSIX 允许返回静态存储；与 glibc 同约定，不做线程局部）。
+static mut UNKNOWN_ERR: [u8; 32] = [0; 32];
+
+/// `strerror(errnum)`：错误号 → NUL 结尾的静态描述串。
+///
+/// **不返回 NULL**：POSIX 只要求不认识的号给个通用描述；返回 NULL 会让调用方在 `%s` 上崩。
+/// 未知号写入 "Unknown error N" 到静态缓冲（与 glibc 行为一致）。
+#[unsafe(no_mangle)]
+pub extern "C" fn strerror(errnum: crate::ctypes::c_int) -> *mut crate::ctypes::c_char {
+    use crate::errno as e;
+    let msg: &[u8] = match errnum {
+        0 => b"Success\0",
+        e::ENOENT => b"No such file or directory\0",
+        e::EINTR => b"Interrupted system call\0",
+        e::EIO => b"Input/output error\0",
+        e::E2BIG => b"Argument list too long\0",
+        e::ENOEXEC => b"Exec format error\0",
+        e::EBADF => b"Bad file descriptor\0",
+        e::EAGAIN => b"Resource temporarily unavailable\0",
+        e::ENOMEM => b"Cannot allocate memory\0",
+        e::EACCES => b"Permission denied\0",
+        e::EFAULT => b"Bad address\0",
+        e::EBUSY => b"Device or resource busy\0",
+        e::EEXIST => b"File exists\0",
+        e::ENOTDIR => b"Not a directory\0",
+        e::EISDIR => b"Is a directory\0",
+        e::EINVAL => b"Invalid argument\0",
+        e::ENFILE => b"Too many open files in system\0",
+        e::EMFILE => b"Too many open files\0",
+        e::ENOSPC => b"No space left on device\0",
+        e::ESPIPE => b"Illegal seek\0",
+        e::EROFS => b"Read-only file system\0",
+        e::ERANGE => b"Numerical result out of range\0",
+        e::ENAMETOOLONG => b"File name too long\0",
+        e::ENOTEMPTY => b"Directory not empty\0",
+        e::ELOOP => b"Too many levels of symbolic links\0",
+        e::EILSEQ => b"Invalid or incomplete multibyte or wide character\0",
+        e::ENOTSUP => b"Operation not supported\0",
+        e::EUCLEAN => b"Structure needs cleaning\0",
+        _ => {
+            // 未知号：写 "Unknown error N\0" 到静态缓冲（有界写入）。
+            let buf = unsafe { &mut *core::ptr::addr_of_mut!(UNKNOWN_ERR) };
+            let mut n = 0usize;
+            for &b in b"Unknown error " {
+                buf[n] = b;
+                n += 1;
+            }
+            let mut v = errnum;
+            if v < 0 {
+                buf[n] = b'-';
+                n += 1;
+                v = -v;
+            }
+            let mut digits = [0u8; 10];
+            let mut d = 0usize;
+            loop {
+                digits[d] = b'0' + (v % 10) as u8;
+                d += 1;
+                v /= 10;
+                if v == 0 || d == digits.len() {
+                    break;
+                }
+            }
+            while d > 0 {
+                d -= 1;
+                buf[n] = digits[d];
+                n += 1;
+            }
+            buf[n] = 0;
+            return buf.as_mut_ptr() as *mut crate::ctypes::c_char;
+        }
+    };
+    msg.as_ptr() as *mut crate::ctypes::c_char
+}
+

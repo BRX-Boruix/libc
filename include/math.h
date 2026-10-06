@@ -30,5 +30,7 @@ double exp(double x);
 double round(double x);
 double trunc(double x);
 double fmod(double x, double y);
+/* long double 版：本目标 long double 是 x87 80 位（实测 16 字节），实现见 libc/src/float.rs。 */
+long double ldexpl(long double x, int exp);
 
 #endif /* _MATH_H */

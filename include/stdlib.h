@@ -11,6 +11,11 @@ extern "C" {
 /* 共享库 ABI 版本探针（阶段 5 / 3P5-2）。**新增导出**，不影响既有程序。 */
 int boruix_so_abi_version(void);
 
+/* 环境访问（3P6-2）。`environ` 由 C 入口桥接（csrc/user_main.c）在调用 main 之前注册；
+ * 不经该桥接的程序（如 Rust 程序）其 `environ` 保持 NULL——**已声明的边界**。 */
+extern char **environ;
+char *getenv(const char *name);
+
 int abs(int n);
 long labs(long n);
 long long llabs(long long n);

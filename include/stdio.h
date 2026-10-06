@@ -15,6 +15,10 @@ extern FILE *stdout;
 extern FILE *stderr;
 
 FILE *fopen(const char *path, const char *mode);
+FILE *fdopen(int fd, const char *mode);
+FILE *freopen(const char *path, const char *mode, FILE *fp);
+/* 删除文件（或空目录）。成功 0，失败 -1 置 errno。 */
+int remove(const char *path);
 int sscanf(const char *s, const char *fmt, ...);
 int fclose(FILE *fp);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *fp);

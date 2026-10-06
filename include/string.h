@@ -36,6 +36,9 @@ int strncasecmp(const char *a, const char *b, size_t n);
 void *memmem(const void *haystack, size_t hl, const void *needle, size_t nl);
 char *strsep(char **strp, const char *delim);
 
+/* 错误号 → 人类可读描述（NUL 结尾静态串，调用方不需释放）。 */
+char *strerror(int errnum);
+
 #ifdef __cplusplus
 }
 #endif

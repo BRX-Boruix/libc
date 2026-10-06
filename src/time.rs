@@ -156,3 +156,73 @@ pub struct Timespec {
     pub tv_sec: i64,
     pub tv_nsec: i64,
 }
+
+/// `struct tm`（C 布局，字段顺序与 libc/include/time.h 一致）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Tm {
+    pub tm_sec: i32,
+    pub tm_min: i32,
+    pub tm_hour: i32,
+    pub tm_mday: i32,
+    pub tm_mon: i32,
+    pub tm_year: i32,
+    pub tm_wday: i32,
+    pub tm_yday: i32,
+    pub tm_isdst: i32,
+}
+
+/// `gmtime`/`localtime` 共用的静态结果（POSIX 允许，并明确说可能被后续调用覆盖）。
+static mut TM_BUF: Tm = Tm {
+    tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 1, tm_mon: 0, tm_year: 70,
+    tm_wday: 4, tm_yday: 0, tm_isdst: 0,
+};
+
+/// 从"自 1970-01-01 的天数"求公历 (y, m, d)（Howard Hinnant 算法，与 days_from_civil 互逆）。
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// `gmtime(t)`：epoch 秒 → UTC 日历时间（静态存储）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gmtime(t: *const time_t) -> *mut Tm {
+    if t.is_null() {
+        set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+    let secs = unsafe { *t };
+    // 向下取整除法（负数 epoch 也要正确）。
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let tm = unsafe { &mut *core::ptr::addr_of_mut!(TM_BUF) };
+    tm.tm_sec = (rem % 60) as i32;
+    tm.tm_min = ((rem / 60) % 60) as i32;
+    tm.tm_hour = (rem / 3600) as i32;
+    tm.tm_mday = d as i32;
+    tm.tm_mon = (m - 1) as i32;
+    tm.tm_year = (y - 1900) as i32;
+    // 1970-01-01 是星期四（4）。
+    tm.tm_wday = (days + 4).rem_euclid(7) as i32;
+    tm.tm_yday = (days - days_from_civil(y, 1, 1)) as i32;
+    tm.tm_isdst = 0;
+    tm as *mut Tm
+}
+
+/// `localtime(t)`：**本系统无时区数据库**，故与 `gmtime` 完全相同（按 UTC 解释）。
+///
+/// **诚实边界（S39）**：POSIX 的 localtime 应受 TZ 影响；BORUIX 目前没有时区数据，
+/// 故这里不做"假装有本地时区"的处理——直接用 UTC，并在此声明。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn localtime(t: *const time_t) -> *mut Tm {
+    unsafe { gmtime(t) }
+}

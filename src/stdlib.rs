@@ -169,6 +169,81 @@ pub unsafe extern "C" fn strtoumax(
     unsafe { strtoull(s, endptr, base) }
 }
 
+/// C 全局 `environ`：环境数组（NUL 终结的 `char*` 数组）。
+///
+/// **直接指向进程初始栈上的 envp 数组本身**——无需拷贝，也不占额外内存。
+/// 程序可以给它赋值（POSIX 允许），此后 `getenv` 读的是新数组。
+///
+/// **诚实边界（S39）**：只有经 C 入口桥接（`csrc/user_main.c`）启动的程序才会被注册；
+/// 不经该桥接的程序（例如 Rust 程序）`environ` 保持 NULL，`getenv` 如实返回 NULL。
+#[unsafe(no_mangle)]
+pub static mut environ: *mut *mut crate::ctypes::c_char = core::ptr::null_mut();
+
+/// 由 C 入口桥接在调用 `main` **之前**调用：把入口 argc/argv 交给 libc。
+///
+/// 为什么需要这一步：环境（envp）位于**进程初始栈**上，只能从入口的 argc/argv 定位
+/// （ABI §4）。而 `getenv` 要在**任意调用点**可用，故必须在入口处捕获一次。
+/// 定位逻辑复用 libsys（S15 单点：`libsys::env::envp`）。
+#[unsafe(no_mangle)]
+pub extern "C" fn __boruix_init_environ(argc: isize, argv: *const *const u8) {
+    match unsafe { libsys::env::envp(argc, argv) } {
+        Some(items) => unsafe {
+            *core::ptr::addr_of_mut!(environ) = items.as_ptr() as *mut *mut crate::ctypes::c_char;
+        },
+        None => {
+            // 契约被破坏（envp 无 NULL 终结）：**不注册**。getenv 将如实返回 NULL，
+            // 而不是拿着一个越界数组去读（宁缺毋假，S09）。
+            unsafe { *core::ptr::addr_of_mut!(environ) = core::ptr::null_mut() };
+        }
+    }
+}
+
+/// `getenv(name)`：按名字取环境变量值（找不到返回 NULL）。
+///
+/// 读的是 **`environ`**（而不是直接读入口栈）：程序若给 `environ` 赋了新数组，getenv 必须
+/// 看到新值——这是 POSIX 的契约，也是"可替换环境"的基础。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getenv(name: *const crate::ctypes::c_char) -> *mut crate::ctypes::c_char {
+    if name.is_null() {
+        return core::ptr::null_mut();
+    }
+    let env = unsafe { *core::ptr::addr_of!(environ) };
+    if env.is_null() {
+        return core::ptr::null_mut();
+    }
+    // 名字长度（有界扫描，防传入未终止串）。
+    let mut nlen = 0usize;
+    while nlen < 4096 && unsafe { *name.add(nlen) } != 0 {
+        nlen += 1;
+    }
+    if nlen == 0 || nlen >= 4096 {
+        return core::ptr::null_mut();
+    }
+    let mut i = 0usize;
+    loop {
+        let entry = unsafe { *env.add(i) };
+        if entry.is_null() {
+            return core::ptr::null_mut();
+        }
+        // 比较 `name` 全部字节 + 紧随其后的 '='（避免 PATH 误命中 PATHEXTRA）。
+        let mut k = 0usize;
+        while k < nlen {
+            if unsafe { *entry.add(k) } != unsafe { *name.add(k) } {
+                break;
+            }
+            k += 1;
+        }
+        if k == nlen && unsafe { *entry.add(nlen) } == b'=' as crate::ctypes::c_char {
+            return unsafe { entry.add(nlen + 1) };
+        }
+        i += 1;
+        // 防御上界：与内核 loader 的 MAX_ENV_COUNT 一致（镜像常量，见 libsys::env）。
+        if i > libsys::env::MAX_ENV_COUNT {
+            return core::ptr::null_mut();
+        }
+    }
+}
+
 /// \`atoi(s)\`：字符串转 int（等价 strtol base=10）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atoi(s: *const crate::ctypes::c_char) -> c_int {

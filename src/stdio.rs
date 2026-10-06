@@ -108,6 +108,103 @@ pub fn stdio_init() {
     unlock();
 }
 
+/// 由 `FmMode` 得到打开旗标。**单点定义**：fopen 与 freopen 共用（两处各写一份必然漂移，S15）。
+fn open_flags_for(fm: FmMode) -> libsys::OpenFlags {
+    match fm {
+        FmMode::Read => libsys::OpenFlags::READ_ONLY,
+        FmMode::Write => libsys::OpenFlags::CREATE_OR_TRUNCATE,
+        FmMode::Append => libsys::OpenFlags {
+            read: false, write: true, create: true, truncate: false, append: true,
+            directory: false, pipe: false,
+            // 不带 FD_CLOEXEC：C 侧需要时经 fcntl 设置（属后续项）。
+            cloexec: false,
+        },
+    }
+}
+
+/// 分配并初始化一个 FILE（fopen/fdopen/freopen 共用，S15 单点）。
+unsafe fn alloc_file(fd: u64, fm: FmMode) -> *mut FILE {
+    let fp = crate::malloc::malloc(core::mem::size_of::<FILE>()) as *mut FILE;
+    if fp.is_null() {
+        set_errno(crate::errno::ENOMEM);
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        core::ptr::write(fp, FILE {
+            fd, mode: fm, buf_mode: FmBufMode::None, eof: false, error: false,
+            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false,
+            pushback: -1,
+            str_src: core::ptr::null(), str_len: 0, str_pos: 0,
+        });
+    }
+    fp
+}
+
+/// `fdopen(fd, mode)`：把**已打开**的 fd 包成 FILE*（不重新打开、不动文件偏移）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdopen(fd: crate::ctypes::c_int, mode: *const c_char) -> *mut FILE {
+    if mode.is_null() {
+        set_errno(EINVAL);
+        return core::ptr::null_mut();
+    }
+    let fm = match parse_mode(mode) {
+        Some(m) => m,
+        None => { set_errno(EINVAL); return core::ptr::null_mut(); }
+    };
+    unsafe { alloc_file(fd as u64, fm) }
+}
+
+/// `freopen(path, mode, fp)`：把 fp 重新绑到 path，返回**同一个** FILE*。
+///
+/// 语义取舍（POSIX 对"失败时原流状态"未作规定）：
+/// - **先开新文件、再关旧的**：新文件打不开时原流**仍然可用**，不制造"流已被破坏"的中间态；
+/// - `path == NULL`（POSIX 的"只改模式"用法）本实现**不支持** → EINVAL（如实声明）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn freopen(
+    path: *const c_char,
+    mode: *const c_char,
+    fp: *mut FILE,
+) -> *mut FILE {
+    if path.is_null() || mode.is_null() || fp.is_null() {
+        set_errno(EINVAL);
+        return core::ptr::null_mut();
+    }
+    let fm = match parse_mode(mode) {
+        Some(m) => m,
+        None => { set_errno(EINVAL); return core::ptr::null_mut(); }
+    };
+    let p = match unsafe { cstr_to_str(path) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return core::ptr::null_mut(); }
+    };
+    match libsys::open(p, open_flags_for(fm), libsys::Permissions::read_write()) {
+        Ok(newfd) => {
+            let f = unsafe { &mut *fp };
+            if !f.closed {
+                let _ = libsys::close(f.fd);
+            }
+            f.fd = newfd;
+            f.mode = fm;
+            f.eof = false;
+            f.error = false;
+            f.closed = false;
+            f.buf_mode = FmBufMode::None;
+            f.buf_ptr = core::ptr::null_mut();
+            f.buf_len = 0;
+            f.buf_pos = 0;
+            f.pushback = -1;
+            f.str_src = core::ptr::null();
+            f.str_len = 0;
+            f.str_pos = 0;
+            fp
+        }
+        Err(e) => {
+            set_errno(from_libsys(e));
+            core::ptr::null_mut()
+        }
+    }
+}
+
 fn parse_mode(mode: *const c_char) -> Option<FmMode> {
     unsafe {
         let c0 = *mode as u8;
@@ -134,31 +231,16 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
         Some(s) => s,
         None => { set_errno(EINVAL); return core::ptr::null_mut(); }
     };
-    let flags = match fm {
-        FmMode::Read => libsys::OpenFlags::READ_ONLY,
-        FmMode::Write => libsys::OpenFlags::CREATE_OR_TRUNCATE,
-        FmMode::Append => libsys::OpenFlags {
-            read: false, write: true, create: true, truncate: false, append: true, directory: false, pipe: false,
-            // fopen 不带 FD_CLOEXEC（C 侧需要时经 fcntl 设置，属后续项）。
-            cloexec: false,
-        },
-    };
+    // 旗标与 FILE 分配都走单点（open_flags_for / alloc_file，S15）。
+    let flags = open_flags_for(fm);
     let perm = libsys::Permissions::read_write();
     match libsys::open(path_str, flags, perm) {
         Ok(fd) => {
-            let fp = crate::malloc::malloc(core::mem::size_of::<FILE>()) as *mut FILE;
+            let fp = unsafe { alloc_file(fd, fm) };
             if fp.is_null() {
+                // 分配失败：关掉刚打开的 fd，避免泄漏。
                 let _ = libsys::close(fd);
-                set_errno(crate::errno::ENOMEM);
                 return core::ptr::null_mut();
-            }
-            unsafe {
-                core::ptr::write(fp, FILE {
-                    fd, mode: fm, buf_mode: FmBufMode::None, eof: false, error: false,
-                    buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false,
-                    pushback: -1,
-                    str_src: core::ptr::null(), str_len: 0, str_pos: 0,
-                });
             }
             fp
         }
