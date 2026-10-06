@@ -338,6 +338,9 @@ fn check_capacity(tag: u8, cap: usize, want: usize) {
     if !libsys::heap_diag_on() {
         return;
     }
+    // **口径收紧**：`cap` 是 payload 容量（**含末尾 canary 区**），用户真正可写的只有
+    // `user_size(cap) = cap - CANARY_SIZE`。上一轮用 `cap >= want` 比较，口径偏松。
+    let cap = user_size(cap);
     if cap >= want {
         return;
     }
@@ -546,8 +549,14 @@ pub extern "C" fn realloc(ptr: *mut u8, new_size: size_t) -> *mut u8 {
         let new_payload = payload_of(new_block);
         // 复制用户数据（含原 canary 前的数据；不含 canary）。
         let copy_len = user_size(old_cap).min(new_size);
-        core::ptr::copy_nonoverlapping(ptr, new_payload, copy_len);
+        // **顺序要紧**：先把 payload 偏移写进新块，`payload_capacity` 才能算出真实容量。
+        // 曾把检查放在这一行**之前**，`payload_offset` 读到未初始化内存，容量被算成 0，
+        // 报出 47 次假警报（[D!] 容量 0）——检查自己的顺序错，不是缺陷。
         set_payload_offset(new_payload, HEADER);
+        // 拷贝点两侧各查一次契约：源可读、目标可写，都不得小于 copy_len。
+        check_capacity(b'S', old_cap, copy_len);
+        check_capacity(b'D', payload_capacity(new_block, new_payload), copy_len);
+        core::ptr::copy_nonoverlapping(ptr, new_payload, copy_len);
         let np_cap = payload_capacity(new_block, new_payload);
         check_capacity(b'C', np_cap, new_size); // 契约自检：搬迁分支
         write_canary(new_payload, np_cap);
