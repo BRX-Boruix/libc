@@ -621,15 +621,33 @@ pub unsafe fn cstr_to_bytes(p: *const c_char) -> alloc::vec::Vec<u8> {
     }
 }
 
-/// 把 C 字符串转换为 Rust `&str`（用于 libsys 的 &str 参数）。
+/// 把 C 字符串转换为 Rust `&str`（用于 libsys 的 &str 参数）。**零分配。**
+///
+/// 直接在 C 字符串本身上取切片（长度 = 到 NUL 为止），不复制、不分配。
 /// 非法 UTF-8 返回 None（调用方置 EINVAL，S02 显式处理编码）。
-pub unsafe fn cstr_to_str(p: *const c_char) -> Option<&'static str> {
+///
+/// # 为什么不再是「复制进 Vec 再 Box::leak」
+///
+/// 旧实现把字节复制进 Rust `Vec` 再 `Box::leak` 成 `'static`——那会让**每一次**路径转换
+/// 都**泄漏**一块 Rust 堆内存，并且让 C 侧的 `malloc` 与 Rust 侧的 buddy 全局分配器
+/// **交替**推进同一个 `brk`。实测该交替会破坏 buddy 的 free_list（见
+/// `tcc-on-boruix/boruix/CRT-AND-LIBS`）。零分配同时消掉泄漏与交替。
+///
+/// # Safety
+///
+/// `p` 必须指向以 NUL 结尾、且在返回的 `&str` 被使用期间保持有效的 C 字符串。
+/// 所有现有调用点都是「取到后立即用于 libsys 调用」，满足该约定。
+pub unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {
         return None;
     }
-    let bytes = unsafe { cstr_to_bytes(p) };
-    // 泄漏为 'static（进程生命周期内恒定）。
-    core::str::from_utf8(alloc::boxed::Box::leak(bytes.into_boxed_slice())).ok()
+    unsafe {
+        let mut n = 0usize;
+        while *p.add(n) != 0 {
+            n += 1;
+        }
+        core::str::from_utf8(core::slice::from_raw_parts(p as *const u8, n)).ok()
+    }
 }
 
 /// 内部：把格式化结果写到内存缓冲的 sink（sprintf/snprintf 用）。
