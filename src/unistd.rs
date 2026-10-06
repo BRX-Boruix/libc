@@ -81,6 +81,15 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssi
         set_errno(EINVAL);
         return -1;
     }
+    // POSIX：`count == 0` 时**不碰内核**，直接返回 0。
+    //
+    // 此前把零长读下发内核，内核按非法参数报错 -> 返回 -1。后果是真实的：
+    // tcc 的 `load_data(fd, off, sh_size)` 在 `sh_size == 0` 的节上做零长读，
+    // `full_read` 拿到 -1（而上游**丢弃**这个返回值），于是缓冲区内容未定义，
+    // 随后被当成节表/字符串表使用，最终野指针崩溃（内核留证 fault_addr 是垃圾值）。
+    if count == 0 {
+        return 0;
+    }
     let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
     // 已被 lseek 转入「用户态维护位置」的 fd 用**定位读**并推进位置；否则顺序读（内核维护）。
     fd_pos_lock();
