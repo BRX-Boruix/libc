@@ -443,9 +443,14 @@ unsafe fn heap_alloc_block(need_total: usize) -> *mut u8 {
 /// \`malloc(size)\`：分配 \`size\` 字节，返回 16 字节对齐指针；失败返回 NULL 置 ENOMEM。
 #[unsafe(no_mangle)]
 pub extern "C" fn malloc(size: size_t) -> *mut u8 {
-    if size == 0 {
-        return core::ptr::null_mut();
-    }
+    // `malloc(0)`：C 标准允许返回 NULL，但**主流实现（glibc）返回可用的非空指针**，
+    // 而大量既有程序依赖后者。实测 tcc 就是这样：它的 `load_data()` 对 `sh_size == 0`
+    // 的节直接 `tcc_malloc(0)` 并把结果当指针用（`strsec = load_data(...)`），
+    // 返回 NULL 会在随后的 `strncmp` 上读空指针而崩溃
+    // （内核留证：fault_addr=0x0、用户态读、rip 在 strncmp、ret 在 tcc_load_object_file）。
+    //
+    // 3P6-1 的目标是兼容既有程序，故此处**与 glibc 对齐**：按最小块分配并返回非空指针。
+    let size = size.max(1);
     // 加固：多分配 CANARY_SIZE 字节，canary 置于 payload+size（末尾）。
     let alloc = match size.checked_add(CANARY_SIZE) {
         Some(n) => n,
@@ -575,6 +580,7 @@ pub extern "C" fn realloc(ptr: *mut u8, new_size: size_t) -> *mut u8 {
 /// \`calloc(nmemb, size)\`：分配并清零 nmemb*size 字节。
 #[unsafe(no_mangle)]
 pub extern "C" fn calloc(nmemb: size_t, size: size_t) -> *mut u8 {
+    // 与 malloc(0) 同一口径：零大小也返回可用的非空指针（glibc 行为）。
     let total = match nmemb.checked_mul(size) {
         Some(t) if t > 0 => t,
         _ => return core::ptr::null_mut(),
