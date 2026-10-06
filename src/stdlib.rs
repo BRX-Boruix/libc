@@ -351,7 +351,7 @@ unsafe fn strtof_impl<T: FloatConv>(s: *const crate::ctypes::c_char, endptr: *mu
             }
             return T::zero();
         }
-        let bytes = crate::stdio::cstr_to_bytes(s);
+        let bytes = unsafe { crate::stdio::cstr_bytes(s) };
         let mut p = 0usize;
         // 前导空白。
         while p < bytes.len() && crate::ctype::isspace(bytes[p] as i32) != 0 {

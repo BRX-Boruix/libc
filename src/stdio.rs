@@ -608,16 +608,25 @@ pub unsafe extern "C" fn ftell(_fp: *mut FILE) -> c_long {
 
 // ---------- 内部辅助 ----------
 
-/// 把 C 字符串复制为 Rust 字节 Vec（直到 NUL）。
-pub unsafe fn cstr_to_bytes(p: *const c_char) -> alloc::vec::Vec<u8> {
+/// 把 C 字符串取为字节切片（直到 NUL）。**零分配。**
+///
+/// # 为什么不再复制成 `Vec`
+///
+/// 旧实现 `cstr_to_bytes` 每次调用都分配一块 Rust `Vec`。`printf`/`puts`/`fputs` 等
+/// **每次调用**都会走这里，于是 Rust 侧的 buddy 全局分配器与 C 侧的 `malloc` **交替**
+/// 推进同一个 `brk`——实测该交替会破坏 buddy 的 free_list（见
+/// `tcc-on-boruix/boruix/CRT-AND-LIBS`）。改为借用后，这些路径完全不再分配。
+///
+/// # Safety
+///
+/// `p` 必须指向以 NUL 结尾、且在返回的切片被使用期间保持有效的 C 字符串。
+pub unsafe fn cstr_bytes<'a>(p: *const c_char) -> &'a [u8] {
     unsafe {
-        let mut v = alloc::vec::Vec::new();
-        let mut q = p;
-        while *q != 0 {
-            v.push(*q as u8);
-            q = q.add(1);
+        let mut n = 0usize;
+        while *p.add(n) != 0 {
+            n += 1;
         }
-        v
+        core::slice::from_raw_parts(p as *const u8, n)
     }
 }
 
@@ -774,7 +783,7 @@ fn render_spec(
             if p.is_null() {
                 emit_str(&s, b"(null)", sink)
             } else {
-                let bytes = unsafe { cstr_to_bytes(p) };
+                let bytes = unsafe { cstr_bytes(p) };
                 emit_str(&s, &bytes, sink)
             }
         }
@@ -836,7 +845,7 @@ fn vformat_to_sink(
     ap: &mut VaList,
     sink: &mut dyn FmtSink,
 ) -> Result<ssize_t, ()> {
-    let fmt_bytes = unsafe { cstr_to_bytes(fmt) };
+    let fmt_bytes = unsafe { cstr_bytes(fmt) };
     parse_and_format(&fmt_bytes, sink, |spec, sink| {
         let before = sink.count();
         render_spec(spec, before, ap, sink)?;
@@ -854,7 +863,7 @@ fn vformat_mem(
 ) -> Result<ssize_t, ()> {
     if cap == 0 || buf.is_null() {
         // 只统计长度（snprintf cap=0 合法）。
-        let fmt_bytes = unsafe { cstr_to_bytes(fmt) };
+        let fmt_bytes = unsafe { cstr_bytes(fmt) };
         let mut counter = CounterSink { n: 0 };
         parse_and_format(&fmt_bytes, &mut counter, |spec, sink| {
             let before = sink.count();
@@ -868,7 +877,7 @@ fn vformat_mem(
         pos: 0,
         truncated: false,
     };
-    let fmt_bytes = unsafe { cstr_to_bytes(fmt) };
+    let fmt_bytes = unsafe { cstr_bytes(fmt) };
     parse_and_format(&fmt_bytes, &mut mem, |spec, sink| {
         let before = sink.count();
         render_spec(spec, before, ap, sink)?;
@@ -1004,7 +1013,7 @@ pub unsafe extern "C" fn vsnprintf(buf: *mut c_char, size: size_t, fmt: *const c
     let mut ap = ap;
     if size == 0 {
         // 只返回应写长度。
-        let fmt_bytes = unsafe { cstr_to_bytes(fmt) };
+        let fmt_bytes = unsafe { cstr_bytes(fmt) };
         let mut counter = CounterSink { n: 0 };
         let mut emitted = 0usize;
         match parse_and_format(&fmt_bytes, &mut counter, |spec, sink| {
@@ -1032,7 +1041,7 @@ pub unsafe extern "C" fn puts(s: *const c_char) -> c_int {
         set_errno(EINVAL);
         return EOF;
     }
-    let bytes = unsafe { cstr_to_bytes(s) };
+    let bytes = unsafe { cstr_bytes(s) };
     let mut sink = FdSink { fd: 1, wrote: 0 };
     sink.write(&bytes).ok();
     sink.write(b"\n").ok();
@@ -1220,7 +1229,7 @@ pub unsafe extern "C" fn sscanf(s: *const c_char, fmt: *const c_char, ap: ...) -
         set_errno(EINVAL);
         return EOF;
     }
-    let bytes = unsafe { crate::stdio::cstr_to_bytes(s) };
+    let bytes = unsafe { crate::stdio::cstr_bytes(s) };
     let mut f = FILE {
         fd: u64::MAX, // 无 fd：本 FILE 是纯内存源（不参与 fd 路径）
         mode: FmMode::Read,
@@ -1249,7 +1258,7 @@ unsafe fn vscan(f: &mut FILE, fmt: *const c_char, mut ap: VaList) -> c_int {
         set_errno(EINVAL);
         return EOF;
     }
-    let fmt_bytes = crate::stdio::cstr_to_bytes(fmt);
+    let fmt_bytes = crate::stdio::cstr_bytes(fmt);
         let mut i = 0usize;
         let mut assigned: c_int = 0;
         // 从流累计消费的字符数（用于 %n）。
