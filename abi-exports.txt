@@ -1,6 +1,9 @@
 {
   global:
+    __assert_fail;
     __errno_location;
+    _exit;
+    abort;
     abs;
     aligned_alloc;
     atexit;
@@ -20,6 +23,7 @@
     cos;
     div;
     endpwent;
+    exit;
     exp;
     fabs;
     fabsf;
@@ -70,6 +74,7 @@
     log;
     log10;
     log2;
+    longjmp;
     lseek;
     malloc;
     malloc_usable_size;

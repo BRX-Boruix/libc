@@ -28,10 +28,16 @@ KEYWORDS = {
     "off_t", "pid_t", "mode_t", "time_t", "clock_t", "div_t", "ldiv_t", "lldiv_t",
     "NULL", "EOF", "errno", "ino_t", "dev_t", "uid_t", "gid_t", "nlink_t",
     "blksize_t", "blkcnt_t", "sighandler_t", "sigset_t", "jmp_buf",
+    "_Noreturn", "noreturn", "inline", "restrict", "volatile",
 }
 
 # 函数声明：行首（可含 extern）的类型串 + 名字 + "("。
 DECL = re.compile(r"^\s*(?:extern\s+)?[A-Za-z_][A-Za-z0-9_ \*]*?\b([a-z_][a-z0-9_]*)\s*\(")
+# 属性前缀必须先剥掉：`__attribute__((noreturn)) void exit(int);` 以 `__attribute__` 开头，
+# 其后紧跟 `(`，DECL 的「类型串 + 名字 + (」形态匹配不到函数名 → **整条声明被漏掉**。
+# 实测漏掉了 exit / _Exit / abort / _exit / longjmp / __assert_fail 六个 C ABI 函数，
+# 后果是 `.so` 不导出它们，动态链接的程序调用 exit() 会链接失败。
+ATTR = re.compile(r"__attribute__\s*\(\(.*?\)\)", re.S)
 # 变量声明（如 extern FILE *stdout;）——libc 的 ABI 里确有导出变量。
 VAR = re.compile(r"^\s*extern\s+[A-Za-z_][A-Za-z0-9_ \*]*?\b([a-z_][a-z0-9_]*)\s*;")
 
@@ -46,6 +52,7 @@ def collect():
             with open(path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.split("/*")[0]
+                    line = ATTR.sub(" ", line)  # 剥掉属性前缀（见 ATTR 处说明）
                     for rx in (DECL, VAR):
                         m = rx.match(line)
                         if m:
