@@ -115,6 +115,41 @@ pub extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> c_int 
 }
 
 /// \`struct timespec\`（C 布局）。
+/// `struct timeval`（C 布局，与 `libc/include/sys/time.h` 同一约定）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Timeval {
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+}
+
+/// `gettimeofday(tv, tz)`：BSD 风格取当前时间。
+///
+/// **`tv_usec` 恒为 0**：本系统墙钟来自内核 RTC（秒级分辨率）。不用单调时钟的亚秒部分去凑
+/// 微秒——那是把两个不同时间源拼在一起，等于伪造数据（S09）。需要亚秒**间隔**测量的程序
+/// 应使用 `clock()`（单调）。`tz` 参数按 POSIX 已废弃语义**忽略**。
+#[unsafe(no_mangle)]
+pub extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut core::ffi::c_void) -> c_int {
+    if tv.is_null() {
+        set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    match libsys::read_wall_clock() {
+        Ok(wc) => {
+            let epoch = wall_clock_to_epoch(&wc);
+            unsafe {
+                (*tv).tv_sec = epoch;
+                (*tv).tv_usec = 0;
+            }
+            0
+        }
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Timespec {

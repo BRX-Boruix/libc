@@ -122,6 +122,53 @@ pub extern "C" fn llabs(n: c_longlong) -> c_longlong {
     n.wrapping_abs()
 }
 
+/// `imaxdiv_t`（C 布局，与 `libc/include/inttypes.h` 同一约定）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ImaxdivT {
+    pub quot: i64,
+    pub rem: i64,
+}
+
+/// `imaxabs(j)`：`intmax_t` 绝对值。
+///
+/// `intmax_t` 在本目标是 `long`（LP64，由探针确认，见 tcc-on-boruix/boruix/_probe_types.c）。
+/// `i64::MIN` 的绝对值在 C 里是 UB，此处按二进制补码回绕而非 panic——库函数不该因为输入取
+/// 极端值就崩掉调用者。
+#[unsafe(no_mangle)]
+pub extern "C" fn imaxabs(j: i64) -> i64 {
+    j.wrapping_abs()
+}
+
+/// `imaxdiv(numer, denom)`：同时给出商与余数（C 语义：向零截断）。
+#[unsafe(no_mangle)]
+pub extern "C" fn imaxdiv(numer: i64, denom: i64) -> ImaxdivT {
+    ImaxdivT {
+        quot: numer.wrapping_div(denom),
+        rem: numer.wrapping_rem(denom),
+    }
+}
+
+/// `strtoimax(...)`：**复用 `strtoll`**（S15 单点——进制/前缀/溢出逻辑只有一份）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtoimax(
+    s: *const crate::ctypes::c_char,
+    endptr: *mut *const crate::ctypes::c_char,
+    base: c_int,
+) -> i64 {
+    unsafe { strtoll(s, endptr, base) }
+}
+
+/// `strtoumax(...)`：**复用 `strtoull`**。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtoumax(
+    s: *const crate::ctypes::c_char,
+    endptr: *mut *const crate::ctypes::c_char,
+    base: c_int,
+) -> u64 {
+    unsafe { strtoull(s, endptr, base) }
+}
+
 /// \`atoi(s)\`：字符串转 int（等价 strtol base=10）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atoi(s: *const crate::ctypes::c_char) -> c_int {
