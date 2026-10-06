@@ -21,4 +21,8 @@ void __boruix_init_environ(long argc, const char *const *argv);
  * 一类问题（实测曾用它将「同一区间被重复交给 buddy」抓出来）。 */
 void boruix_heap_diag(int on);
 
+/* 直接调 brk 系统调用：new == 0 为仅查询。成功返回断点，失败返回 -1 置 errno。
+ * 供需要 sbrk 语义或需要自行观测堆断点的程序使用。 */
+long boruix_brk(unsigned long new_break);
+
 #endif /* _BORUIX_H */

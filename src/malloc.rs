@@ -296,6 +296,24 @@ unsafe fn freelist_take(min: usize) -> *mut u8 {
 }
 
 /// 向内核申请至少 \`need\` 字节的新堆区（brk），返回新区起始地址。
+/// `boruix_brk(new)`：直接调 `brk` 系统调用（C ABI，声明见 libc/include/boruix.h）。
+///
+/// `new == 0` 表示**仅查询**当前断点。成功返回断点，失败返回 -1 并置 errno。
+///
+/// **为什么暴露它**：`brk` 是本系统唯一的堆原语，而它此前只有 Rust 侧（`libsys::brk`）
+/// 可达。诊断"两个分配器共用 brk"一类问题时，C 探针必须能自己查询/推进断点。
+/// 这不是诊断专用后门——`sbrk` 语义的程序本来就该有这个入口。
+#[unsafe(no_mangle)]
+pub extern "C" fn boruix_brk(new: u64) -> i64 {
+    match libsys::brk(new) {
+        Ok(b) => b as i64,
+        Err(e) => {
+            set_errno(crate::errno::from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// 开关堆增长诊断（C ABI，声明见 libc/include/boruix.h）。
 ///
 /// 打开后，libc 的 `malloc` 与 libsys 的 buddy 在每次 `brk` 扩展时各打一行
@@ -324,24 +342,48 @@ unsafe fn heap_extend(need: usize) -> *mut u8 {
     }
     // 堆增长诊断（与 libsys 的 diag_brk 同格式，标签 C）：**默认关闭**，
     // 由 `boruix_heap_diag(1)` 打开。零堆分配：栈缓冲 + write。
+    //
+    // **必须带 pid**：串口日志是多进程交织的，不带 pid 会把「不同进程各自的第一段」
+    // 误读成「同一进程重复」——实测踩过这个坑。
     if libsys::heap_diag_on() {
         const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut buf = [0u8; 40];
+        let mut buf = [0u8; 56];
         buf[0] = b'[';
         buf[1] = b'C';
-        buf[2] = b']';
-        buf[3] = b' ';
+        buf[2] = b'/';
+        let pid = libsys::getpid().unwrap_or(0);
+        let mut tmp = [0u8; 20];
+        let mut n = 0usize;
+        let mut v = pid;
+        if v == 0 {
+            tmp[0] = b'0';
+            n = 1;
+        }
+        while v > 0 && n < tmp.len() {
+            tmp[n] = b'0' + (v % 10) as u8;
+            n += 1;
+            v /= 10;
+        }
+        if n > 4 {
+            n = 4;
+        }
+        for k in 0..n {
+            buf[3 + k] = tmp[n - 1 - k];
+        }
+        buf[3 + n] = b']';
+        buf[4 + n] = b' ';
+        let base = 5 + n;
         let a = cur as u64;
         let b = new_brk;
         for i in 0..16usize {
-            buf[4 + i] = HEX[((a >> (60 - i * 4)) & 0xf) as usize];
+            buf[base + i] = HEX[((a >> (60 - i * 4)) & 0xf) as usize];
         }
-        buf[20] = b' ';
+        buf[base + 16] = b' ';
         for i in 0..16usize {
-            buf[21 + i] = HEX[((b >> (60 - i * 4)) & 0xf) as usize];
+            buf[base + 17 + i] = HEX[((b >> (60 - i * 4)) & 0xf) as usize];
         }
-        buf[37] = b'\n';
-        let _ = libsys::write(1, &buf[..38]);
+        buf[base + 33] = b'\n';
+        let _ = libsys::write(1, &buf[..base + 34]);
     }
     cur as *mut u8
 }
