@@ -20,6 +20,11 @@ ssize_t read(int fd, void *buf, size_t count);
 ssize_t write(int fd, const void *buf, size_t count);
 long lseek(int fd, long offset, int whence);
 int unlink(const char *path);
+
+/* execvp：**本系统不支持**——BORUIX 没有"替换当前进程映像"的系统调用（只有派生）。
+ * 本实现**总是返回 -1**：按 PATH 找不到 → ENOENT（真实查找结果）；找到但做不了 → ENOTSUP。
+ * 详见 libc/src/unistd.rs 的说明（为什么不"派生+等待+退出"来近似）。 */
+int execvp(const char *file, char *const argv[]);
 int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
 int isatty(int fd);

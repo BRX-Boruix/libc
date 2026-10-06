@@ -16,6 +16,9 @@ int boruix_so_abi_version(void);
 extern char **environ;
 char *getenv(const char *name);
 
+/* 路径规范化（POSIX）。`resolved == NULL` 时由本函数 malloc，**调用方负责 free**。 */
+char *realpath(const char *path, char *resolved);
+
 int abs(int n);
 long labs(long n);
 long long llabs(long long n);

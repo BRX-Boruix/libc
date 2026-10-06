@@ -147,6 +147,59 @@ pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     }
 }
 
+/// `execvp(file, argv)`：**本系统不支持——如实失败，不伪造**。
+///
+/// BORUIX **没有"替换当前进程映像"的系统调用**：`SYS_TASK_SPAWN`（0x31）只**派生**新进程
+/// 并返回其 pid（见 libsys::process::exec_path）。而 POSIX `execvp` 的核心契约恰恰是
+/// "成功则不返回、当前进程变成新程序"——这在本系统上**无法成立**。
+///
+/// 因此本实现**总是返回 -1**，但给出**有区分度**的 errno（不把"找不到"与"做不了"混为一谈）：
+/// - 程序按 PATH 找不到 → `ENOENT`（这是**真实**的查找结果）；
+/// - 找到了 → `ENOTSUP`（"找到了，但本系统做不了 exec"）。
+///
+/// **为什么不"派生+等待+退出"来近似**：那会**静默改变**进程语义——pid 变了、父进程与
+/// 观察者的关系变了、调用方的其余线程与资源处理也不同。库函数不该悄悄换语义。
+///
+/// 另注：本 ABI 的"命令行"是**单个字符串**（shell 已剥首词），不是 argv 数组；
+/// 即便将来有了真 exec，argv→cmdline 的拼接也需要先定成文契约。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn execvp(
+    file: *const c_char,
+    argv: *const *const c_char,
+) -> c_int {
+    let _ = argv;
+    if file.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let name = match unsafe { crate::stdio::cstr_to_str(file) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return -1; }
+    };
+    // 含 `/` 的按路径直接查；否则按 PATH 逐目录查（这一步是**真实**的，不是形式）。
+    let found = if name.contains('/') {
+        libsys::stat(name).is_ok()
+    } else {
+        let path = unsafe { crate::stdlib::getenv(c"PATH".as_ptr() as *const c_char) };
+        let mut hit = false;
+        if !path.is_null() {
+            if let Some(p) = unsafe { crate::stdio::cstr_to_str(path) } {
+                for dir in p.split(':') {
+                    let cand = alloc::format!("{}/{}", if dir.is_empty() { "." } else { dir }, name);
+                    if libsys::stat(&cand).is_ok() {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+        }
+        hit
+    };
+    // 找不到 → ENOENT（真实结果）；找到了 → ENOTSUP（本系统没有替换映像的 exec）。
+    set_errno(if found { crate::errno::ENOTSUP } else { crate::errno::ENOENT });
+    -1
+}
+
 /// symlink(target, link_path)：创建软链接（3P4-8）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn symlink(target: *const c_char, link_path: *const c_char) -> c_int {
@@ -176,6 +229,134 @@ pub unsafe extern "C" fn symlink(target: *const c_char, link_path: *const c_char
 /// POSIX 语义写入**不含**终止 NUL 并返回字节数；本实现**不截断**——缓冲不足时
 /// 内核返回 NoSpace，此处如实转成 ERANGE，绝不把不完整目标伪装成完整（S09）。
 #[unsafe(no_mangle)]
+/// `realpath(path, resolved)`：把路径规范化为**绝对、无 `.`/`..`、符号链接已解析**的形式。
+///
+/// 语义（POSIX）：
+/// - `resolved == NULL`：本函数用 `malloc` 分配缓冲区，**调用方负责 `free`**（tcc 正是这样用的）；
+/// - 否则写入调用方提供的缓冲区（调用方须保证足够大，POSIX 的 PATH_MAX）。
+/// 失败返回 NULL 并置 errno。
+///
+/// **实现是真的在做规范化**：逐段处理输入，遇到符号链接就用 `readlink` 取出目标并接回待处理队列，
+/// 而不是把输入原样返回。链接层数有上限（40，与 Linux 的 MAXSYMLINKS 同量级），超限返回 ELOOP。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn realpath(
+    path: *const c_char,
+    resolved: *mut c_char,
+) -> *mut c_char {
+    use alloc::vec::Vec;
+    if path.is_null() {
+        set_errno(EINVAL);
+        return core::ptr::null_mut();
+    }
+    let src = match unsafe { crate::stdio::cstr_to_str(path) } {
+        Some(s) => s,
+        None => { set_errno(EINVAL); return core::ptr::null_mut(); }
+    };
+
+    // `out`：已确认的绝对路径（不含结尾斜杠，根目录除外）；`pend`：尚待处理的字节。
+    let mut out: Vec<u8> = Vec::new();
+    let mut pend: Vec<u8> = Vec::new();
+    if !src.starts_with('/') {
+        // 相对路径：先接上当前工作目录（getcwd 已是绝对路径）。
+        let mut cwdbuf = [0u8; 4096];
+        if unsafe { getcwd(cwdbuf.as_mut_ptr() as *mut c_char, cwdbuf.len()) }.is_null() {
+            return core::ptr::null_mut();
+        }
+        let n = cwdbuf.iter().position(|&b| b == 0).unwrap_or(0);
+        pend.extend_from_slice(&cwdbuf[..n]);
+        pend.push(b'/');
+    }
+    pend.extend_from_slice(src.as_bytes());
+
+    let mut links = 0usize;
+    loop {
+        // 取下一个组件（跳过空段，处理 "//"）。
+        while pend.first() == Some(&b'/') {
+            pend.remove(0);
+        }
+        if pend.is_empty() {
+            break;
+        }
+        let end = pend.iter().position(|&b| b == b'/').unwrap_or(pend.len());
+        let comp: Vec<u8> = pend.drain(..end).collect();
+        let rest: Vec<u8> = core::mem::take(&mut pend);
+
+        if comp == b"." {
+            pend = rest;
+            continue;
+        }
+        if comp == b".." {
+            // 回退一层（已在根则留在根）。
+            while let Some(&b) = out.last() {
+                out.pop();
+                if b == b'/' {
+                    break;
+                }
+            }
+            if out.is_empty() {
+                out.push(b'/');
+            }
+            pend = rest;
+            continue;
+        }
+
+        // 普通组件：接到 out 后面，再看它是不是符号链接。
+        let saved = out.len();
+        if out.last() != Some(&b'/') {
+            out.push(b'/');
+        }
+        out.extend_from_slice(&comp);
+
+        let mut nbuf = [0u8; 4096];
+        let n = unsafe { readlink(
+            out.as_ptr() as *const c_char,
+            nbuf.as_mut_ptr() as *mut c_char,
+            nbuf.len(),
+        ) };
+        if n > 0 {
+            // 是符号链接：把目标接回待处理队列，并撤销刚压入的组件。
+            links += 1;
+            if links > 40 {
+                set_errno(crate::errno::ELOOP);
+                return core::ptr::null_mut();
+            }
+            let target = &nbuf[..n as usize];
+            out.truncate(saved);
+            if target.first() == Some(&b'/') {
+                // 绝对目标：从根重来。
+                out.clear();
+                out.push(b'/');
+            }
+            let mut merged: Vec<u8> = target.to_vec();
+            merged.push(b'/');
+            merged.extend_from_slice(&rest);
+            pend = merged;
+            continue;
+        }
+        pend = rest;
+    }
+
+    if out.is_empty() {
+        out.push(b'/');
+    }
+    let n = out.len();
+    // 输出：调用方缓冲或 malloc（POSIX：NULL 时由调用方 free）。
+    let dst = if resolved.is_null() {
+        crate::malloc::malloc(n + 1) as *mut c_char
+    } else {
+        resolved
+    };
+    if dst.is_null() {
+        set_errno(crate::errno::ENOMEM);
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(out.as_ptr(), dst as *mut u8, n);
+        *dst.add(n) = 0;
+    }
+    dst
+}
+
 pub unsafe extern "C" fn readlink(
     path: *const c_char,
     buf: *mut c_char,
