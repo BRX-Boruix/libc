@@ -16,4 +16,9 @@
  * 使 `environ` / `getenv` 可用。这是**单点**——不要在别处重复注册。 */
 void __boruix_init_environ(long argc, const char *const *argv);
 
+/* 开关堆增长诊断：打开后 libc 的 malloc 与 libsys 的 buddy 在每次 brk 扩展时
+ * 各打一行 [C|L] <cur_brk> <new_brk>。**默认关闭**。用于定位「两个分配器共用 brk」
+ * 一类问题（实测曾用它将「同一区间被重复交给 buddy」抓出来）。 */
+void boruix_heap_diag(int on);
+
 #endif /* _BORUIX_H */

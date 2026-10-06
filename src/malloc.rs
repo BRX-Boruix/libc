@@ -296,6 +296,16 @@ unsafe fn freelist_take(min: usize) -> *mut u8 {
 }
 
 /// 向内核申请至少 \`need\` 字节的新堆区（brk），返回新区起始地址。
+/// 开关堆增长诊断（C ABI，声明见 libc/include/boruix.h）。
+///
+/// 打开后，libc 的 `malloc` 与 libsys 的 buddy 在每次 `brk` 扩展时各打一行
+/// `[C|L] <cur_brk> <new_brk>`（十六进制）。**默认关闭**——诊断不能污染所有程序。
+/// 这是定位「两个分配器共用 brk」类问题的**常驻工具**，不是一次性补丁。
+#[unsafe(no_mangle)]
+pub extern "C" fn boruix_heap_diag(on: crate::ctypes::c_int) {
+    libsys::heap_diag(on != 0);
+}
+
 unsafe fn heap_extend(need: usize) -> *mut u8 {
     let cur = match libsys::brk(0) {
         Ok(b) => b,
@@ -311,6 +321,27 @@ unsafe fn heap_extend(need: usize) -> *mut u8 {
     if new_brk as usize <= cur {
         set_errno(ENOMEM);
         return core::ptr::null_mut();
+    }
+    // 堆增长诊断（与 libsys 的 diag_brk 同格式，标签 C）：**默认关闭**，
+    // 由 `boruix_heap_diag(1)` 打开。零堆分配：栈缓冲 + write。
+    if libsys::heap_diag_on() {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut buf = [0u8; 40];
+        buf[0] = b'[';
+        buf[1] = b'C';
+        buf[2] = b']';
+        buf[3] = b' ';
+        let a = cur as u64;
+        let b = new_brk;
+        for i in 0..16usize {
+            buf[4 + i] = HEX[((a >> (60 - i * 4)) & 0xf) as usize];
+        }
+        buf[20] = b' ';
+        for i in 0..16usize {
+            buf[21 + i] = HEX[((b >> (60 - i * 4)) & 0xf) as usize];
+        }
+        buf[37] = b'\n';
+        let _ = libsys::write(1, &buf[..38]);
     }
     cur as *mut u8
 }
