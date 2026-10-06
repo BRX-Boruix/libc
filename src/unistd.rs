@@ -61,6 +61,10 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_uint) -
 /// \`close(fd)\`：关闭 fd。
 #[unsafe(no_mangle)]
 pub extern "C" fn close(fd: c_int) -> c_int {
+    // 位置表也要清：否则 fd 号被复用时会带着上一个文件的位置。
+    fd_pos_lock();
+    fd_pos_clear(fd);
+    fd_pos_unlock();
     match libsys::close(fd as u64) {
         Ok(_) => 0,
         Err(e) => {
@@ -78,7 +82,24 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssi
         return -1;
     }
     let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
-    match libsys::read(fd as u64, slice) {
+    // 已被 lseek 转入「用户态维护位置」的 fd 用**定位读**并推进位置；否则顺序读（内核维护）。
+    fd_pos_lock();
+    let tracked = fd_pos_get(fd);
+    let r = match tracked {
+        Some(p) if p >= 0 => libsys::pread(fd as u64, slice, p as u64),
+        Some(_) => {
+            // 位置为负：lseek 已拒绝，正常到不了这里；如实报 EINVAL，不拿它当偏移。
+            fd_pos_unlock();
+            set_errno(EINVAL);
+            return -1;
+        }
+        None => libsys::read(fd as u64, slice),
+    };
+    if let (Some(p), Ok(n)) = (tracked, &r) {
+        fd_pos_set(fd, p + *n as i64);
+    }
+    fd_pos_unlock();
+    match r {
         Ok(n) => n as ssize_t,
         Err(e) => {
             set_errno(from_libsys(e));
@@ -95,7 +116,22 @@ pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> 
         return -1;
     }
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count) };
-    match libsys::write(fd as u64, slice) {
+    fd_pos_lock();
+    let tracked = fd_pos_get(fd);
+    let r = match tracked {
+        Some(p) if p >= 0 => libsys::pwrite(fd as u64, slice, p as u64),
+        Some(_) => {
+            fd_pos_unlock();
+            set_errno(EINVAL);
+            return -1;
+        }
+        None => libsys::write(fd as u64, slice),
+    };
+    if let (Some(p), Ok(n)) = (tracked, &r) {
+        fd_pos_set(fd, p + *n as i64);
+    }
+    fd_pos_unlock();
+    match r {
         Ok(n) => n as ssize_t,
         Err(e) => {
             set_errno(from_libsys(e));
@@ -109,41 +145,134 @@ pub const SEEK_SET: c_int = 0;
 pub const SEEK_CUR: c_int = 1;
 pub const SEEK_END: c_int = 2;
 
-/// \`lseek(fd, offset, whence)\`：定位。
+// ---------- 文件位置（POSIX `lseek` 的用户态实现）----------
+//
+// **内核没有 seek 系统调用**：`SYS_STREAM_READ/WRITE` 每次自带偏移，
+// `STREAM_OFFSET_CURRENT` 表示顺序（位置由内核维护），其他值表示定位 I/O 且**不推进**位置。
+// 所以 POSIX 的「文件位置」必须由用户态维护——就是这里。
+//
+// **关键设计取舍**：只有程序**调用过 `lseek`** 之后，该 fd 才转入「定位 I/O」模式；
+// 没调用过的 fd 一切照旧（顺序读，内核维护位置）。这样既有程序的行为**逐字不变**，
+// 而 POSIX 程序也能正确工作——典型例子是 tcc：先读 64 字节判对象类型、再 `lseek` 复位、
+// 再从头读节表；复位若是空操作，后面每一次读都会错位（实测报 `invalid object file`）。
+//
+// 为什么必须按 fd 惰性切换：`read`/`write` 是所有程序的地基，全局改成定位 I/O 会波及每一个
+// 程序；而且管道/终端**不可定位**（内核按节点属性拒绝定位 I/O）。
+
+/// 可跟踪的 fd 上限（fd 是小的非负整数）。
+const MAX_TRACKED_FD: usize = 64;
+
+#[derive(Clone, Copy)]
+struct FdPos {
+    /// 该 fd 是否已转入「用户态维护位置」模式（即被 `lseek` 动过）。
+    tracked: bool,
+    pos: i64,
+}
+
+static mut FD_POS: [FdPos; MAX_TRACKED_FD] =
+    [const { FdPos { tracked: false, pos: 0 } }; MAX_TRACKED_FD];
+
+/// 位置表的锁：`read`/`write` 会被多线程程序调用（本系统有线程）。
+static FD_POS_LOCK: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+fn fd_pos_lock() {
+    use core::sync::atomic::Ordering;
+    while FD_POS_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+fn fd_pos_unlock() {
+    FD_POS_LOCK.store(false, core::sync::atomic::Ordering::Release);
+}
+
+/// 取该 fd 已跟踪的位置；未跟踪或越界返回 `None`。
+fn fd_pos_get(fd: c_int) -> Option<i64> {
+    if fd < 0 || fd as usize >= MAX_TRACKED_FD {
+        return None;
+    }
+    let t = unsafe { &*core::ptr::addr_of!(FD_POS) };
+    let e = t[fd as usize];
+    if e.tracked { Some(e.pos) } else { None }
+}
+
+/// 记录位置——**同时把它标记为已跟踪**，这是「转入定位 I/O」的开关。
+fn fd_pos_set(fd: c_int, p: i64) {
+    if fd < 0 || fd as usize >= MAX_TRACKED_FD {
+        return;
+    }
+    let t = unsafe { &mut *core::ptr::addr_of_mut!(FD_POS) };
+    t[fd as usize] = FdPos { tracked: true, pos: p };
+}
+
+/// 清除位置（`close` 时调用；否则 fd 号被复用时会带着上一个文件的位置）。
+fn fd_pos_clear(fd: c_int) {
+    if fd < 0 || fd as usize >= MAX_TRACKED_FD {
+        return;
+    }
+    let t = unsafe { &mut *core::ptr::addr_of_mut!(FD_POS) };
+    t[fd as usize] = FdPos { tracked: false, pos: 0 };
+}
+
+/// `lseek(fd, offset, whence)`：定位（POSIX 三态齐备）。
 ///
-/// 内核 STREAM read/write 支持绝对偏移（pread/pwrite 语义）与顺序
-/// （STREAM_OFFSET_CURRENT）。本实现用绝对偏移表达 SEEK_SET——**本系统没有"文件位置"**：
-/// 每次读写自带偏移，位置由调用方自己掌握，故 SEEK_SET 只是把 offset 原样返回。
+/// **本系统没有 seek 系统调用**，故「文件位置」由本函数在用户态维护（见上面的位置表说明）：
+/// - `SEEK_SET`：新位置 = `offset`；
+/// - `SEEK_CUR`：新位置 = 当前位置 + `offset`（该 fd 必须已被跟踪过，否则 ENOTSUP）；
+/// - `SEEK_END`：新位置 = 文件大小 + `offset`（大小经 `fstat` 取——本系统没有「位置」，
+///   但**大小是可得的**）。
 ///
-/// `SEEK_END` 经 `fstat` 取文件大小（**文件大小是可得的**，只是不在"位置"里）：
-/// POSIX 的 SEEK_END 语义正是"相对末尾"，故返回 `size + offset`。
-/// `SEEK_CUR` 仍如实返回 ENOTSUP——本系统确实没有"当前位置"可查（S09 不伪造）。
-///
-/// **这条修复是 tcc 移植撞出来的**：tcc 用 `lseek(fd, 0, SEEK_END)` 取对象文件大小，
-/// 拿到 -1 就判 `invalid object file`。实测（探针输出见 tcc-on-boruix/boruix/probe_file.c）：
-/// 盘上那份其实是**完好的 ELF**（头 16 字节正是 ELF 魔数）——所以问题不在文件，在这里。
+/// **一旦调用过本函数，该 fd 就转入「用户态维护位置」模式**：此后 `read`/`write` 走定位 I/O
+/// 并推进位置。这是 POSIX 程序的必需语义——tcc 正是这样读对象文件的（先读 64 字节判类型、
+/// 再复位、再从头读节表）；复位若是空操作，后续每次读都会错位（实测报 `invalid object file`，
+/// 而盘上那份文件其实是完好的 ELF，见 tcc-on-boruix/boruix/probe_file.c）。
 #[unsafe(no_mangle)]
 pub extern "C" fn lseek(
     fd: c_int,
     offset: crate::ctypes::c_long,
     whence: c_int,
 ) -> crate::ctypes::c_long {
-    match whence {
+    let newpos: i64 = match whence {
         SEEK_SET => offset,
+        SEEK_CUR => {
+            // 注意：取位置只碰用户态表，不阻塞；syscall 一律在锁外做。
+            fd_pos_lock();
+            let cur = fd_pos_get(fd);
+            fd_pos_unlock();
+            match cur {
+                Some(p) => p + offset,
+                None => {
+                    // 该 fd 从未被定位过，用户态不知道「当前位置」（内核那侧也不暴露）：如实不支持。
+                    set_errno(crate::errno::ENOTSUP);
+                    return -1;
+                }
+            }
+        }
         SEEK_END => {
             let mut st = core::mem::MaybeUninit::<stat>::uninit();
             if unsafe { fstat(fd, st.as_mut_ptr()) } != 0 {
                 return -1;
             }
-            let st = unsafe { st.assume_init() };
-            st.st_size + offset
+            unsafe { st.assume_init() }.st_size + offset
         }
         _ => {
-            // SEEK_CUR：本系统没有"当前位置"这一概念（无状态偏移模型），如实不支持。
-            set_errno(crate::errno::ENOTSUP);
-            -1
+            set_errno(crate::errno::EINVAL);
+            return -1;
         }
+    };
+    if newpos < 0 {
+        // POSIX：定位到负偏移是 EINVAL。
+        set_errno(crate::errno::EINVAL);
+        return -1;
     }
+    fd_pos_lock();
+    fd_pos_set(fd, newpos);
+    fd_pos_unlock();
+    newpos
 }
 
 /// \`unlink(path)\`：删除文件。
