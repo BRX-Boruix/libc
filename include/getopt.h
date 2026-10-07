@@ -27,6 +27,14 @@ int getopt(int argc, char *const argv[], const char *optstring);
 int getopt_long(int argc, char *const argv[], const char *optstring,
                 const struct option *longopts, int *longindex);
 
+/* _getopt_internal：**glibc 的内部入口**，由 libiberty/getopt1.c 直接调用
+ * （交叉构建实测报 `call to undeclared function '_getopt_internal'`）。
+ * 本实现把它作为 getopt/getopt_long 的**共同核心**（S15 单点）：longopts==NULL ⇒ 短选项语义。
+ * **诚实边界**：long_only != 0（把 -xyz 也当长选项试）是 GNU 扩展，本实现**如实返回 ENOTSUP**，
+ * 不静默按 0 处理——libiberty 传的正是 0。 */
+int _getopt_internal(int argc, char *const argv[], const char *optstring,
+                     const struct option *longopts, int *longind, int long_only);
+
 #ifdef __cplusplus
 }
 #endif

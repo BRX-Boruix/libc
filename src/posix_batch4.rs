@@ -53,6 +53,16 @@ pub const FNM_NOMATCH: c_int = 1;
 pub const FNM_PATHNAME: c_int = 1 << 0;
 pub const FNM_NOESCAPE: c_int = 1 << 1;
 pub const FNM_PERIOD: c_int = 1 << 2;
+/// `FNM_LEADING_DIR`（GNU 扩展）：模式匹配到字符串中某个 `/` 边界即算命中。
+pub const FNM_LEADING_DIR: c_int = 1 << 3;
+/// `FNM_CASEFOLD`（GNU 扩展）：大小写不敏感匹配（**ASCII 折叠**——本系统无 locale 数据，
+/// 非 ASCII 不做折叠，如实声明）。
+pub const FNM_CASEFOLD: c_int = 1 << 4;
+/// `FNM_FILE_NAME`（GNU 扩展）：`FNM_PATHNAME` 的**别名**（glibc 同值同义，故这里是别名而非新位）。
+pub const FNM_FILE_NAME: c_int = FNM_PATHNAME;
+
+/// 本实现认得的全部旗标位（`FNM_FILE_NAME` 与 `FNM_PATHNAME` 同位，故不另计）。
+const FNM_KNOWN: c_int = FNM_PATHNAME | FNM_NOESCAPE | FNM_PERIOD | FNM_LEADING_DIR | FNM_CASEFOLD;
 
 /// 在 `s` 的 `[i..]` 上匹配 `p` 的 `[j..]`（递归回溯）。
 ///
@@ -63,7 +73,9 @@ fn fnm(p: &[u8], s: &[u8], flags: c_int) -> bool {
     let pathname = flags & FNM_PATHNAME != 0;
     let noescape = flags & FNM_NOESCAPE != 0;
     let period = flags & FNM_PERIOD != 0;
-    fnm_at(p, s, flags, pathname, noescape, period, true)
+    let casefold = flags & FNM_CASEFOLD != 0;
+    let leading_dir = flags & FNM_LEADING_DIR != 0;
+    fnm_at(p, s, flags, pathname, noescape, period, casefold, leading_dir, true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -74,14 +86,24 @@ fn fnm_at(
     pathname: bool,
     noescape: bool,
     period: bool,
+    casefold: bool,
+    leading_dir: bool,
     mut at_start: bool,
 ) -> bool {
+    // ASCII 大小写折叠（FNM_CASEFOLD）；无 locale 数据，故只折 ASCII。
+    let fc = |b: u8| if casefold { b.to_ascii_lowercase() } else { b };
     let mut pi = 0usize;
     let mut si = 0usize;
     let mut star: Option<(usize, usize)> = None; // (pattern 位置 after '*', string 位置)
     while si < s.len() {
         let mut matched_len: Option<usize> = None;
-        if pi < p.len() {
+        if pi >= p.len() {
+            // 模式已耗尽但串还有剩：普通情形该分支失败（交给回溯）；
+            // **FNM_LEADING_DIR** 允许在 `/` 边界处提前成功（glibc 同语义）。
+            if leading_dir && s[si] == b'/' {
+                return true;
+            }
+        } else {
             match p[pi] {
                 b'*' => {
                     // 折叠连续的 '*'。
@@ -112,7 +134,7 @@ fn fnm_at(
                     if pathname && s[si] == b'/' {
                         return false;
                     }
-                    if let Some((consumed, hit)) = match_bracket(&p[pi..], s[si], noescape) {
+                    if let Some((consumed, hit)) = match_bracket(&p[pi..], s[si], noescape, casefold) {
                         if hit {
                             matched_len = Some(consumed);
                         } else {
@@ -128,12 +150,12 @@ fn fnm_at(
                     }
                 }
                 b'\\' if !noescape && pi + 1 < p.len() => {
-                    if s[si] == p[pi + 1] {
+                    if fc(s[si]) == fc(p[pi + 1]) {
                         matched_len = Some(2);
                     }
                 }
                 c => {
-                    if s[si] == c {
+                    if fc(s[si]) == fc(c) {
                         matched_len = Some(1);
                     }
                 }
@@ -169,7 +191,9 @@ fn fnm_at(
 
 /// 匹配 `p[0] == '['` 开始的括号表达式。返回 `(消耗的模式字节数, 是否命中)`；
 /// `None` = 表达式未闭合（调用方按字面 '[' 处理）。
-fn match_bracket(p: &[u8], c: u8, noescape: bool) -> Option<(usize, bool)> {
+fn match_bracket(p: &[u8], c: u8, noescape: bool, casefold: bool) -> Option<(usize, bool)> {
+    let fc = |b: u8| if casefold { b.to_ascii_lowercase() } else { b };
+    let c = fc(c);
     let mut i = 1usize;
     let mut negate = false;
     if i < p.len() && (p[i] == b'!' || p[i] == b'^') {
@@ -189,18 +213,18 @@ fn match_bracket(p: &[u8], c: u8, noescape: bool) -> Option<(usize, bool)> {
         }
         first = false;
         // 范围 a-z（转义后的 '-' 或末尾 '-' 不算范围）。
-        let lo = if ch == b'\\' && !noescape && i + 1 < p.len() {
+        let lo = fc(if ch == b'\\' && !noescape && i + 1 < p.len() {
             i += 1;
             p[i]
         } else {
             ch
-        };
+        });
         if i + 2 < p.len() && p[i + 1] == b'-' && p[i + 2] != b']' {
-            let hi = if p[i + 2] == b'\\' && !noescape && i + 3 < p.len() {
+            let hi = fc(if p[i + 2] == b'\\' && !noescape && i + 3 < p.len() {
                 p[i + 3]
             } else {
                 p[i + 2]
-            };
+            });
             if lo <= c && c <= hi {
                 hit = true;
             }
@@ -228,8 +252,7 @@ pub unsafe extern "C" fn fnmatch(pattern: *const c_char, string: *const c_char, 
         set_errno(EINVAL);
         return FNM_NOMATCH;
     }
-    const KNOWN: c_int = FNM_PATHNAME | FNM_NOESCAPE | FNM_PERIOD;
-    if flags & !KNOWN != 0 {
+    if flags & !FNM_KNOWN != 0 {
         set_errno(EINVAL);
         return FNM_NOMATCH;
     }
@@ -400,6 +423,35 @@ pub unsafe extern "C" fn getopt(argc: c_int, argv: *const *mut c_char, optstring
         }
         None => -1,
     }
+}
+
+/// `_getopt_internal(argc, argv, optstring, longopts, longind, long_only)`：**glibc 的内部入口**。
+///
+/// **来路（真实报错驱动，不是预猜）**：GCC 自带的 `libiberty/getopt1.c:71` 直接调它——
+/// 交叉构建报 `call to undeclared function '_getopt_internal'`。
+///
+/// 本实现把它做成 `getopt`/`getopt_long` 的**共同核心**（S15 单点）：
+/// `longopts == NULL` ⇒ 短选项语义，否则长选项语义。
+///
+/// **诚实边界**：`long_only != 0`（把 `-xyz` 也当长选项试）是 GNU 扩展，本实现**如实返回
+/// `ENOTSUP`**，不静默按 0 处理——libiberty 传的正是 0。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _getopt_internal(
+    argc: c_int,
+    argv: *const *mut c_char,
+    optstring: *const c_char,
+    longopts: *const option,
+    longindex: *mut c_int,
+    long_only: c_int,
+) -> c_int {
+    if long_only != 0 {
+        set_errno(crate::errno::ENOTSUP);
+        return -1;
+    }
+    if longopts.is_null() {
+        return unsafe { getopt(argc, argv, optstring) };
+    }
+    unsafe { getopt_long(argc, argv, optstring, longopts, longindex) }
 }
 
 /// `getopt_long(argc, argv, optstring, longopts, longindex)`：长选项 + 短选项。
