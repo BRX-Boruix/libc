@@ -34,6 +34,10 @@ int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
 int isatty(int fd);
 
+/* dup2：把 oldfd 复制到 newfd（POSIX）。副本与原 fd 共享文件偏移。
+ * 3P6-2 第二波：由 GCC 的真实报错驱动补上（libiberty 的 filedescriptor.c 需要它）。 */
+int dup2(int oldfd, int newfd);
+
 /* 进程/线程标识。POSIX 归属 unistd.h（实现在 libc/src/process.rs）：
  * getpid 返回**线程组组长** pid（POSIX 进程 id）；gettid 返回本线程自身 pid。
  * 单线程进程两者相等；多线程时组员 getpid==组长、gettid==自身（见 process.rs 文档）。 */

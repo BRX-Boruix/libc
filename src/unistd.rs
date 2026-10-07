@@ -74,6 +74,40 @@ pub extern "C" fn close(fd: c_int) -> c_int {
     }
 }
 
+/// dup2(oldfd, newfd)：把 oldfd 复制到 newfd（POSIX）。
+///
+/// 来路（3P6-2 第二波，GCC 真实报错驱动，不是预猜）：make all-gcc 编到 libiberty 时报
+///   ../../gcc-14.2.0/libiberty/filedescriptor.c:45:10:
+///   error: call to undeclared function 'dup2'
+/// 而**内核与 libsys 早就有这个能力**（SYS_STREAM_DUP -> sys_dup2、libsys::io::dup2）——
+/// 缺的只是 libc 的 C 包装与 <unistd.h> 声明。
+///
+/// 位置表：本 libc 在用户态维护「每 fd 的文件位置」（内核的流式读写只认显式 offset，见
+/// fd_pos_*）。POSIX 要求 dup2 的副本与原 fd **共享**同一文件偏移，故这里把 oldfd 的位置
+/// 复制到 newfd——与 close 清位置**对偶**（少了这一步，副本会从 0 开始读）。
+#[unsafe(no_mangle)]
+pub extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
+    if oldfd < 0 || newfd < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    match libsys::dup2(oldfd as u64, newfd as u64) {
+        Ok(_) => {
+            fd_pos_lock();
+            match fd_pos_get(oldfd) {
+                Some(v) => fd_pos_set(newfd, v),
+                None => fd_pos_clear(newfd),
+            }
+            fd_pos_unlock();
+            newfd
+        }
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// \`read(fd, buf, count)\`：读取字节。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
