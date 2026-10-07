@@ -101,6 +101,21 @@ uid_t geteuid(void);
 gid_t getgid(void);
 gid_t getegid(void);
 
+/* 身份变更（POSIX 归属 unistd.h；实现在 libc/src/posix_batch3.rs）。
+ * **诚实边界**：本内核只维护一份 uid/gid，没有 real/effective 之分，故 setuid 一次改全部；
+ * 授权按 CAP_SYSTEM 二分——无该能力时只能降权或不变，否则内核如实拒绝（EPERM）。 */
+int setuid(uid_t uid);
+int setgid(gid_t gid);
+
+/* pread/pwrite：显式定位读写，**不改变**文件偏移（POSIX）。底层 libsys 早已导出，只差包装。 */
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
+
+/* readlink：读符号链接目标。返回写入 buf 的字节数（不含 NUL）。
+ * 3P6-2 第二波：实现早就在 libc/src/unistd.rs，漏的是 #[unsafe(no_mangle)]——
+ * 于是 libc.a 里没有该符号（PHANTOM：头文件声明了、库里没有，调用即链接失败）。 */
+ssize_t readlink(const char *path, char *buf, size_t bufsiz);
+
 /* exit/_Exit/abort/atexit 归 <stdlib.h>（POSIX 归属）；unistd.h 只留 _exit。 */
 __attribute__((noreturn)) void _exit(int status);
 

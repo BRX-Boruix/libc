@@ -11,6 +11,9 @@
 #define O_RDONLY  0
 #define O_WRONLY  1
 #define O_RDWR    2
+/* O_EXCL（3P6-2 第二波）：与 O_CREAT 同用时独占创建，文件已存在则失败。
+ * 取值与 Linux 一致（0o200）。原子性由内核 sys_open 保证，非用户态两步近似。 */
+#define O_EXCL    0x80
 #define O_CREAT   0x40
 #define O_TRUNC   0x200
 #define O_APPEND  0x400

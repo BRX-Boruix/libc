@@ -206,6 +206,24 @@ pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_i
     }
 }
 
+/// `wait(status)`：等待**任意**子进程退出（POSIX）。等价于 `waitpid(-1, status, 0)`。
+///
+/// **为什么它是 3P6-2 的必补项（真实报错驱动，不是预猜）**：GCC 的 configure 用
+/// `AC_HEADER_SYS_WAIT` 探测本头文件（日志短语 `sys/wait.h that is POSIX.1 compatible`），
+/// 该探测程序体里调用的正是 `wait(&s)`。缺 `wait` 使探测失败——实测日志：
+///   `checking for sys/wait.h that is POSIX.1 compatible... no`
+/// 于是 `HAVE_SYS_WAIT_H` 未定义，libiberty/pex-unix.c **不包含** <sys/wait.h>，
+/// 紧接着 `pex-unix.c:164` 报 `call to undeclared function 'waitpid'`。
+///
+/// 也就是说：这**一条**缺失同时制造了「头文件不兼容」与「waitpid 未声明」两个报错，
+/// 而 waitpid 的实现一直都在（本文件上面就是）——真正缺的只有 `wait` 本身。
+#[unsafe(no_mangle)]
+pub extern "C" fn wait(status: *mut c_int) -> c_int {
+    // pid = -1（等任意子）与内核能力一致；options = 0（阻塞等待）。
+    // 直接复用 waitpid：不另写一份收尸逻辑（S15 单点），也不伪造 pid 精确匹配。
+    waitpid(-1, status, 0)
+}
+
 /// `fork()`：创建一个子进程（COW 语义）。
 ///
 /// # 为什么这不是 POSIX `fork()` 的逐字复刻（诚实声明，S39）

@@ -47,6 +47,12 @@ unsigned long long strtoull(const char *s, char **endptr, int base);
 double strtod(const char *s, char **endptr);
 /* atof：等价 strtod(s, NULL)。3P6-2 第二波「整项缺失」类，反向对账（audit_posix_surface.py）列出。 */
 double atof(const char *s);
+/* mktemp：POSIX 已标记为不安全（有竞态）；本实现只做最小语义，不声称原子。
+ * 3P6-2 第二波：由 GCC 宿主侧构建的真实报错驱动补上。 */
+char *mktemp(char *template);
+/* random/srandom：与 rand/srand 同一生成器（POSIX 要求两者是同一序列的两个接口）。 */
+long random(void);
+void srandom(unsigned int seed);
 
 /* 环境表修改（3P6-2 第二波「整项缺失」类，反向对账列出）。
  * 诚实边界：环境表是进程全局的，本实现不加锁——并发 setenv/putenv 与 getenv 需调用方自行同步。
@@ -60,6 +66,15 @@ long double strtold(const char *s, char **endptr);
 
 int rand(void);
 void srand(unsigned seed);
+
+/* mkstemp / mkdtemp：**原子独占**创建唯一临时文件/目录（POSIX）。
+ * 模板末尾必须是 6 个 'X'，成功时就地替换。
+ * 原子性来自内核 O_EXCL（open 标志 bit 8，3P6-2 第二波新增）：内核在同一 syscall 内
+ * 完成「存在性判定 + 创建」，没有 TOCTOU 窗口。此前无此位，这两项只能「先 stat 再
+ * create」，两个进程会互相覆盖临时文件——故 docs/TODO/libc-posix-surface.md 曾把它们
+ * 登记为「判定不支持」；内核位落地后该判定**已撤回**。 */
+int mkstemp(char *template);
+char *mkdtemp(char *template);
 
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;

@@ -28,6 +28,11 @@ char *strdup(const char *s);
 /* strndup：复制至多 n 字节（POSIX.1-2008）。3P6-2 第二波「整项缺失」类，由
  * libc/tools/audit_posix_surface.py 的反向对账列出。 */
 char *strndup(const char *s, size_t n);
+/* BSD 传统名（POSIX.1-2008 已移除，但现实代码大量使用）：bzero 清零、bcopy 允许重叠、swab 交换相邻字节对。
+ * 3P6-2 第二波：由 GCC 宿主侧构建的真实报错/缺口清单驱动补上。 */
+void bzero(void *s, size_t n);
+void bcopy(const void *src, void *dst, size_t n);
+void swab(const void *src, void *dst, size_t n);
 size_t strspn(const char *s, const char *accept);
 size_t strcspn(const char *s, const char *reject);
 char *strpbrk(const char *s, const char *accept);

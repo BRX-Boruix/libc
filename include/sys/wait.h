@@ -25,5 +25,10 @@
 #define WIFSTOPPED(s)  (((s) & 0xff) == 0x7f)
 
 int waitpid(int pid, int *status, int options);
+/* wait(status)：等任意子进程，等价 waitpid(-1, status, 0)。
+ * **来路（3P6-2 第二波）**：GCC configure 的 AC_HEADER_SYS_WAIT 探测程序体里调用的就是
+ * wait(&s)；缺它会让本头文件被判为「非 POSIX.1 兼容」，进而 HAVE_SYS_WAIT_H 未定义、
+ * libiberty/pex-unix.c 不包含本头文件，最终报 waitpid 未声明（实测日志已核对）。 */
+pid_t wait(int *status);
 
 #endif /* _SYS_WAIT_H */

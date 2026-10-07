@@ -118,6 +118,8 @@ fn open_flags_for(fm: FmMode) -> libsys::OpenFlags {
             directory: false, pipe: false,
             // 不带 FD_CLOEXEC：C 侧需要时经 fcntl 设置（属后续项）。
             cloexec: false,
+            // 不带 O_EXCL：fopen 的「w」是截断语义，不是独占创建。
+            exclusive: false,
         },
     }
 }

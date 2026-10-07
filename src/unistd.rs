@@ -13,6 +13,9 @@ pub const O_RDONLY: c_int = 0;
 pub const O_WRONLY: c_int = 1;
 pub const O_RDWR: c_int = 2;
 pub const O_CREAT: c_int = 0x40;
+/// O_EXCL（3P6-2 第二波）：与 O_CREAT 同用时**独占创建**——文件已存在则
+/// open 失败（EEXIST）。取值与 Linux 一致（0o200 = 0x80）。
+pub const O_EXCL: c_int = 0x80;
 /// O_CLOEXEC（3P4-3）：exec 时不继承该 fd。取值与 Linux 一致（0o2000000），
 /// 与同处其余 O_* 的取值风格相同。
 pub const O_CLOEXEC: c_int = 0x80000;
@@ -41,6 +44,8 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_uint) -
         directory: false, pipe: false,
         // 3P4-3：把 C 侧 O_CLOEXEC 透传到内核的每-fd 标志（fd 打标后由 exec 过滤）。
         cloexec: flags & O_CLOEXEC != 0,
+        // O_EXCL：独占创建（内核在 sys_open 内原子判定，见该处注释）。
+        exclusive: flags & O_EXCL != 0,
     };
     // 权限：从 mode 取 r/w/x 位（本内核 Permissions 用最低 3 位）。
     let perm = libsys::Permissions {
@@ -415,11 +420,6 @@ pub unsafe extern "C" fn symlink(target: *const c_char, link_path: *const c_char
     }
 }
 
-/// readlink(path, buf, bufsiz)：读软链接目标（3P4-8）。
-///
-/// POSIX 语义写入**不含**终止 NUL 并返回字节数；本实现**不截断**——缓冲不足时
-/// 内核返回 NoSpace，此处如实转成 ERANGE，绝不把不完整目标伪装成完整（S09）。
-#[unsafe(no_mangle)]
 /// `realpath(path, resolved)`：把路径规范化为**绝对、无 `.`/`..`、符号链接已解析**的形式。
 ///
 /// 语义（POSIX）：
@@ -548,6 +548,16 @@ pub unsafe extern "C" fn realpath(
     dst
 }
 
+/// `readlink(path, buf, bufsiz)`：读软链接目标（POSIX）。返回写入字节数（**不含**终止 NUL）。
+///
+/// **不截断**：缓冲不足时内核返回 NoSpace，此处如实转成 ERANGE——绝不把不完整目标
+/// 伪装成完整（S09）。
+///
+/// **来路（3P6-2 第二波，反向对账列出）**：函数体**早就写在这里**，只是漏了
+/// `#[unsafe(no_mangle)]` —— 于是 `libc.a` 里**没有**这个符号（`audit_posix_surface.py`
+/// 的 PHANTOM 类：头文件声明了、库里没有，调用即链接失败）。补上属性即修复；
+/// 这是「名字审计查不出」的一类缺陷：源码里有函数、库里有名字，两回事。
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn readlink(
     path: *const c_char,
     buf: *mut c_char,
@@ -804,6 +814,88 @@ pub unsafe extern "C" fn truncate(path: *const c_char, length: crate::ctypes::of
 /// fcntl 命令常量（x86_64 Linux ABI）。
 /// waitpid 的 options（POSIX 归属 <sys/wait.h>；此处供 Rust 侧引用，单点定义）。
 pub const WNOHANG: c_int = 1;
+
+// ---------- 3P6-2 第二波（GCC 宿主侧构建驱动的一批） ----------
+
+/// `_PC_*`：pathconf 的名字常量（取值与 Linux 一致）。
+pub const _PC_LINK_MAX: c_int = 0;
+pub const _PC_MAX_CANON: c_int = 1;
+pub const _PC_MAX_INPUT: c_int = 2;
+pub const _PC_NAME_MAX: c_int = 3;
+pub const _PC_PATH_MAX: c_int = 4;
+pub const _PC_PIPE_BUF: c_int = 5;
+
+/// getpagesize()：本系统的页大小（4 KiB）。
+///
+/// 来路：GCC 宿主侧构建（libiberty）报 `call to undeclared function 'getpagesize'`。
+/// **诚实边界**：本实现返回**编译期常量 4096**（Boruix 的页大小是 4 KiB，见 mm 的 PageSize），
+/// 不查内核——若将来支持可变页大小，此处需改为查询。
+#[unsafe(no_mangle)]
+pub extern "C" fn getpagesize() -> c_int {
+    4096
+}
+
+/// pathconf(path, name)：按名字返回路径相关限制。
+///
+/// 来路：GCC 宿主侧构建报 `call to undeclared function 'pathconf'` + `_PC_PATH_MAX` 未定义。
+/// **诚实边界（S09）**：本系统没有 per-文件系统的限制表，故只对**确实有定义**的几个名字
+/// 返回常量（路径/名字/管道缓冲上限），其余**如实返回 -1 并置 EINVAL**——不编造数值。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pathconf(path: *const c_char, name: c_int) -> crate::ctypes::c_long {
+    if path.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    match name {
+        _PC_PATH_MAX => 4096,
+        _PC_NAME_MAX => 255,
+        _PC_PIPE_BUF => 4096,
+        _PC_MAX_CANON | _PC_MAX_INPUT => 255,
+        // 无硬链接能力 ⇒ 如实报 1（只有一个名字指向该文件）；这是事实，不是占位。
+        _PC_LINK_MAX => 1,
+        _ => {
+            set_errno(EINVAL);
+            -1
+        }
+    }
+}
+
+/// mktemp(template)：把结尾的 "XXXXXX" 就地替换成一个唯一名，返回 template（失败返回空串）。
+///
+/// 来路：GCC 宿主侧构建报 `call to undeclared function 'mktemp'`。
+/// **诚实边界（S09）**：mktemp 在 POSIX 里**已被标记为不安全**（有竞态，应改用 mkstemp）；
+/// 本实现只做「用 pid + 单调计数器替换 XXXXXX」这一最小语义，**不声称它原子**——
+/// 需要原子独占创建时应走 mkstemp（而那依赖内核的 O_EXCL，尚未支持）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mktemp(template: *mut c_char) -> *mut c_char {
+    static COUNTER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    unsafe {
+        if template.is_null() {
+            return template;
+        }
+        let n = crate::string::strlen(template as *const c_char) as usize;
+        if n < 6 {
+            *template = 0;
+            return template;
+        }
+        let tail = template.add(n - 6);
+        for i in 0..6 {
+            if *tail.add(i) != b'X' as c_char {
+                *template = 0;
+                return template;
+            }
+        }
+        let pid = match libsys::getpid() { Ok(v) => v, Err(_) => 0 };
+        let c = COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed) as u64;
+        let mut v = (pid as u64).wrapping_mul(1_000_003).wrapping_add(c);
+        const ALPHA: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        for i in 0..6 {
+            *tail.add(i) = ALPHA[(v % 36) as usize] as c_char;
+            v /= 36;
+        }
+        template
+    }
+}
 
 pub const F_DUPFD: c_int = 0;
 pub const F_GETFD: c_int = 1;
