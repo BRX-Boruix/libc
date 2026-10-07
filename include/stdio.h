@@ -19,6 +19,9 @@ FILE *fdopen(int fd, const char *mode);
 FILE *freopen(const char *path, const char *mode, FILE *fp);
 /* 删除文件（或空目录）。成功 0，失败 -1 置 errno。 */
 int remove(const char *path);
+/* 重命名/移动（POSIX 归属 <stdio.h>）。实现在 libc/src/unistd.rs，此前没有声明
+ * （头文件覆盖审计列出）。 */
+int rename(const char *oldpath, const char *newpath);
 int sscanf(const char *s, const char *fmt, ...);
 int fclose(FILE *fp);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *fp);

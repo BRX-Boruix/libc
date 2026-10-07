@@ -38,6 +38,19 @@ int isatty(int fd);
  * 3P6-2 第二波：由 GCC 的真实报错驱动补上（libiberty 的 filedescriptor.c 需要它）。 */
 int dup2(int oldfd, int newfd);
 
+/* ---- 以下 5 项由**头文件覆盖审计**（libc/tools/audit_header_coverage.py）一次列出：----
+ * 实现在 libc/src/*.rs 里早已存在，只是此前没有任何头文件声明（与 getpid/dup2/EINTR 同类）。 */
+int chown(const char *path, uid_t owner, gid_t group);
+int ftruncate(int fd, off_t length);
+int symlink(const char *target, const char *linkpath);
+long sysconf(int name);
+/* fork：COW 语义；多线程父进程被内核如实拒绝（ENOTSUP）。三条差异见 libc/src/process.rs 的文档。 */
+pid_t fork(void);
+
+/* sysconf 的 name 取值：本实现只支持 _SC_NPROCESSORS_ONLN（取值与 Linux 一致），
+ * 不支持的名字如实返回 -1 置 EINVAL（**不编造**返回值）。 */
+#define _SC_NPROCESSORS_ONLN 84
+
 /* 进程/线程标识。POSIX 归属 unistd.h（实现在 libc/src/process.rs）：
  * getpid 返回**线程组组长** pid（POSIX 进程 id）；gettid 返回本线程自身 pid。
  * 单线程进程两者相等；多线程时组员 getpid==组长、gettid==自身（见 process.rs 文档）。 */

@@ -58,6 +58,9 @@ int sigismember(const sigset_t *set, int sig);
 
 sighandler_t signal(int sig, sighandler_t handler);
 int raise(int sig);
+/* kill：向进程发信号（POSIX 归属 <signal.h>）。实现在 libc/src/process.rs，此前没有声明
+ * （头文件覆盖审计列出）。 */
+int kill(pid_t pid, int sig);
 int sigaction(int sig, const struct sigaction *act, struct sigaction *oldact);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 

@@ -25,4 +25,12 @@ void boruix_heap_diag(int on);
  * 供需要 sbrk 语义或需要自行观测堆断点的程序使用。 */
 long boruix_brk(unsigned long new_break);
 
+/* 堆分配器的"契约自检已发现损坏"标志（1 = 已损坏）。实现在 libc/src/malloc.rs，
+ * 此前没有声明（头文件覆盖审计列出）。 */
+int boruix_malloc_corrupt(void);
+
+/* yield：主动让出 CPU（Boruix 侧入口名；POSIX 的 sched_yield 语义）。
+ * 实现在 libc/src/process.rs，此前没有声明（头文件覆盖审计列出）。 */
+int yield_sys(void);
+
 #endif /* _BORUIX_H */
