@@ -48,6 +48,7 @@ pub mod float;
 mod float_bigint;
 // long double（x87 80 位）运算：Rust 无 f80 类型，只能走 global_asm。
 pub mod libgen;
+pub mod locale;
 pub mod longdouble;
 pub mod malloc;
 pub mod mman;
