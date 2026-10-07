@@ -76,6 +76,18 @@ void srand(unsigned seed);
 int mkstemp(char *template);
 char *mkdtemp(char *template);
 
+/* memalign / valloc：posix_memalign 的传统别名（POSIX 未收录，现实代码大量使用）。
+ * valloc 等价 memalign(getpagesize(), size)——不硬编码 4096，走内核真实页大小。
+ * **诚实边界**：alignment 不是 2 的幂或不是 sizeof(void*) 的倍数时返回 NULL 置 EINVAL。 */
+void *memalign(size_t alignment, size_t size);
+void *valloc(size_t size);
+
+/* on_exit：登记带参数的退出处理函数（POSIX.1-2008 已标记 obsolescent，但现实代码仍在用）。
+ * **与 atexit 共用同一个 LIFO 表**：POSIX 要求两者按登记顺序逆序执行；分成两张表就会变成
+ * 「先跑完所有 on_exit 再跑 atexit」——那是可观测的语义错误。
+ * 处理函数收到的状态就是 exit(status) 的 status（不是编造的 0）。 */
+int on_exit(void (*function)(int, void *), void *arg);
+
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;
 div_t div(int numer, int denom);

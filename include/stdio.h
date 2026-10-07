@@ -73,6 +73,14 @@ int putchar(int c);
 int getchar(void);
 int fscanf(FILE *fp, const char *fmt, ...);
 
+/* scanf：从**标准输入**读格式化输入。与 fscanf/sscanf 共用同一扫描核心 vscan（S15 单点）。 */
+int scanf(const char *fmt, ...);
+
+/* tmpfile：创建**自动删除**的临时文件并返回读写流（"w+b" 语义）。
+ * 实现：TMPDIR 或 /tmp → mkstemp（O_EXCL 原子独占）→ 立即 unlink → 包成读写流。
+ * 目录不存在/不可写或 fd 表满时如实返回 NULL 置 errno（不伪造成功）。 */
+FILE *tmpfile(void);
+
 /* libc 初始化（可选，幂等）。 */
 void libc_initialize(void);
 

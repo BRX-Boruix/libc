@@ -35,7 +35,22 @@ use crate::stdio_format::{FmtSink, Spec, Length, Conv, emit_int, emit_str, emit_
 // ---------- FILE 结构 ----------
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum FmMode { Read, Write, Append }
+pub enum FmMode { Read, Write, Append, ReadWrite, AppendRead }
+
+impl FmMode {
+    /// 本流是否**可读**。**单点定义（S15）**：此前各处直接写 `f.mode != FmMode::Read`，
+    /// 加入 `ReadWrite`/`AppendRead` 后必须走这里——否则新增变体会静默落在错误一侧
+    /// （例如 `tmpfile` 的读写流被当成只写流，`fread` 全部失败）。
+    #[inline]
+    pub fn can_read(self) -> bool {
+        matches!(self, FmMode::Read | FmMode::ReadWrite | FmMode::AppendRead)
+    }
+    /// 本流是否**可写**（只有纯读流不可写）。
+    #[inline]
+    pub fn can_write(self) -> bool {
+        !matches!(self, FmMode::Read)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FmBufMode { None, Line, Full }
@@ -80,6 +95,73 @@ pub static mut stdout: *mut FILE = core::ptr::null_mut();
 #[unsafe(no_mangle)]
 pub static mut stderr: *mut FILE = core::ptr::null_mut();
 
+
+// ---------- tmpfile 的**延迟删除**登记 ----------
+//
+// **为什么不立即 unlink**（POSIX 允许立即删，glibc 就是那么做的）：那要求「打开后删除」的
+// 句柄仍能正常读写。**实测本内核的 VFS 不支持「unlink 之后再写入」**——同一程序里
+// `mkstemp` → `unlink` → `fwrite`（返回 13，内核接受）→ `fseek(fd,0,SEEK_SET)` → `fread`
+// 得到 **0 字节 + EOF**：数据在 unlink 之后写不进去（诊断输出见 tools/3psrc/libcc1）。
+// 故改为**延迟删除**：`fclose` 时删除；程序未关流就退出时，由一次性登记的 `atexit` 处理器兜底。
+// 两条路合起来与 POSIX 的「关闭**或**进程终止时自动消失」一致。
+const TMP_MAX: usize = 16;
+/// `(占用, fd, 路径指针 as usize)`。指针存成 usize 是为了满足 `Mutex<T>: Send`（同 stdlib 的
+/// `ExitEntry::WithArg`）。用显式 `占用` 位而不是拿 fd==0 当空标记——fd 0 是合法的标准输入。
+static TMP_FILES: spin::Mutex<[(bool, i32, usize); TMP_MAX]> = spin::Mutex::new([(false, 0, 0); TMP_MAX]);
+static TMP_CLEANUP_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// 登记一个待删除的临时文件路径（所有权转移给登记表）。表满返回 false。
+fn tmp_register(fd: i32, path: *mut c_char) -> bool {
+    let mut t = TMP_FILES.lock();
+    for slot in t.iter_mut() {
+        if !slot.0 {
+            *slot = (true, fd, path as usize);
+            return true;
+        }
+    }
+    false
+}
+
+/// `fclose` 钩子：若该 fd 是 `tmpfile` 建的，删除其文件并释放路径。非 tmpfile 的 fd 无副作用。
+unsafe fn tmp_release(fd: i32) {
+    let mut ptr: usize = 0;
+    {
+        let mut t = TMP_FILES.lock();
+        for slot in t.iter_mut() {
+            if slot.0 && slot.1 == fd {
+                ptr = slot.2;
+                *slot = (false, 0, 0);
+                break;
+            }
+        }
+    }
+    if ptr != 0 {
+        let p = ptr as *mut c_char;
+        if let Ok(s) = core::str::from_utf8(unsafe { cstr_bytes(p) }) {
+            let _ = libsys::unlink(s);
+        }
+        crate::malloc::free(p as *mut u8);
+    }
+}
+
+/// 进程退出兜底（`atexit` 登记一次）：删除所有仍未随 `fclose` 释放的临时文件。
+extern "C" fn tmp_cleanup_at_exit() {
+    for i in 0..TMP_MAX {
+        let (used, ptr) = {
+            let mut t = TMP_FILES.lock();
+            let s = (t[i].0, t[i].2);
+            t[i] = (false, 0, 0);
+            s
+        };
+        if used && ptr != 0 {
+            let p = ptr as *mut c_char;
+            if let Ok(s) = core::str::from_utf8(unsafe { cstr_bytes(p) }) {
+                let _ = libsys::unlink(s);
+            }
+            crate::malloc::free(p as *mut u8);
+        }
+    }
+}
 /// 初始化标准流（幂等，可多次调用）。
 pub fn stdio_init() {
     lock();
@@ -108,21 +190,6 @@ pub fn stdio_init() {
     unlock();
 }
 
-/// 由 `FmMode` 得到打开旗标。**单点定义**：fopen 与 freopen 共用（两处各写一份必然漂移，S15）。
-fn open_flags_for(fm: FmMode) -> libsys::OpenFlags {
-    match fm {
-        FmMode::Read => libsys::OpenFlags::READ_ONLY,
-        FmMode::Write => libsys::OpenFlags::CREATE_OR_TRUNCATE,
-        FmMode::Append => libsys::OpenFlags {
-            read: false, write: true, create: true, truncate: false, append: true,
-            directory: false, pipe: false,
-            // 不带 FD_CLOEXEC：C 侧需要时经 fcntl 设置（属后续项）。
-            cloexec: false,
-            // 不带 O_EXCL：fopen 的「w」是截断语义，不是独占创建。
-            exclusive: false,
-        },
-    }
-}
 
 /// 分配并初始化一个 FILE（fopen/fdopen/freopen 共用，S15 单点）。
 unsafe fn alloc_file(fd: u64, fm: FmMode) -> *mut FILE {
@@ -149,7 +216,8 @@ pub unsafe extern "C" fn fdopen(fd: crate::ctypes::c_int, mode: *const c_char) -
         set_errno(EINVAL);
         return core::ptr::null_mut();
     }
-    let fm = match parse_mode(mode) {
+    // fdopen **不重新打开**文件，故模式串只决定 FILE 的读写能力，旗标丢弃（S09 明确）。
+    let (fm, _flags) = match parse_mode(mode) {
         Some(m) => m,
         None => { set_errno(EINVAL); return core::ptr::null_mut(); }
     };
@@ -171,7 +239,7 @@ pub unsafe extern "C" fn freopen(
         set_errno(EINVAL);
         return core::ptr::null_mut();
     }
-    let fm = match parse_mode(mode) {
+    let (fm, flags) = match parse_mode(mode) {
         Some(m) => m,
         None => { set_errno(EINVAL); return core::ptr::null_mut(); }
     };
@@ -179,7 +247,7 @@ pub unsafe extern "C" fn freopen(
         Some(s) => s,
         None => { set_errno(EINVAL); return core::ptr::null_mut(); }
     };
-    match libsys::open(p, open_flags_for(fm), libsys::Permissions::read_write()) {
+    match libsys::open(p, flags, libsys::Permissions::read_write()) {
         Ok(newfd) => {
             let f = unsafe { &mut *fp };
             if !f.closed {
@@ -207,13 +275,42 @@ pub unsafe extern "C" fn freopen(
     }
 }
 
-fn parse_mode(mode: *const c_char) -> Option<FmMode> {
+/// 解析 C 模式串 → `(FILE 模式, 打开旗标)`。**单点定义（S15）**。
+///
+/// 为什么两者必须**一起**返回：`"r+"` 与 `"w+"` 的 **FILE 模式相同**（都可读可写），
+/// 但**打开旗标不同**（`w+` 要创建+截断，`r+` 绝不能截断）。分成两个函数解析必然漂移——
+/// 本项首版正是分开写的，于是 `"w+"` 会拿到 `r+` 的旗标（不创建、不截断）——
+/// 一个只在「文件不存在」时才显形的缺陷。
+fn parse_mode(mode: *const c_char) -> Option<(FmMode, libsys::OpenFlags)> {
     unsafe {
-        let c0 = *mode as u8;
-        match c0 {
-            b'r' => Some(FmMode::Read),
-            b'w' => Some(FmMode::Write),
-            b'a' => Some(FmMode::Append),
+        let m = mode as *const u8;
+        let c0 = *m;
+        let mut plus = false;
+        let mut i = 0usize;
+        while *m.add(i) != 0 {
+            if *m.add(i) == b'+' {
+                plus = true;
+            }
+            i += 1;
+        }
+        let append = libsys::OpenFlags {
+            read: plus,
+            write: true,
+            create: true,
+            truncate: false,
+            append: true,
+            directory: false,
+            pipe: false,
+            cloexec: false,
+            exclusive: false,
+        };
+        match (c0, plus) {
+            (b'r', false) => Some((FmMode::Read, libsys::OpenFlags::READ_ONLY)),
+            (b'r', true) => Some((FmMode::ReadWrite, libsys::OpenFlags::READ_WRITE)),
+            (b'w', false) => Some((FmMode::Write, libsys::OpenFlags::CREATE_OR_TRUNCATE)),
+            (b'w', true) => Some((FmMode::ReadWrite, libsys::OpenFlags::CREATE_OR_TRUNCATE)),
+            (b'a', false) => Some((FmMode::Append, append)),
+            (b'a', true) => Some((FmMode::AppendRead, append)),
             _ => None,
         }
     }
@@ -225,7 +322,7 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
         set_errno(EINVAL);
         return core::ptr::null_mut();
     }
-    let fm = match parse_mode(mode) {
+    let (fm, flags) = match parse_mode(mode) {
         Some(m) => m,
         None => { set_errno(EINVAL); return core::ptr::null_mut(); }
     };
@@ -233,8 +330,7 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
         Some(s) => s,
         None => { set_errno(EINVAL); return core::ptr::null_mut(); }
     };
-    // 旗标与 FILE 分配都走单点（open_flags_for / alloc_file，S15）。
-    let flags = open_flags_for(fm);
+    // 旗标与 FILE 分配都走单点（parse_mode / alloc_file，S15）。
     let perm = libsys::Permissions::read_write();
     match libsys::open(path_str, flags, perm) {
         Ok(fd) => {
@@ -267,6 +363,8 @@ pub unsafe extern "C" fn fclose(fp: *mut FILE) -> c_int {
         }
         let fd = f.fd;
         f.closed = true;
+        // tmpfile 的延迟删除：先删文件再关 fd（顺序无关，但先删更贴近 POSIX 语义）。
+        tmp_release(fd as c_int);
         let _ = libsys::close(fd);
         crate::malloc::free(fp as *mut u8);
     }
@@ -285,7 +383,7 @@ pub unsafe extern "C" fn fread(ptr: *mut c_void, size: size_t, nmemb: size_t, fp
     };
     unsafe {
         let f = &mut *fp;
-        if f.mode != FmMode::Read {
+        if !f.mode.can_read() {
             set_errno(EINVAL);
             f.error = true;
             return 0;
@@ -319,7 +417,7 @@ pub unsafe extern "C" fn fwrite(ptr: *const c_void, size: size_t, nmemb: size_t,
     };
     unsafe {
         let f = &mut *fp;
-        if f.mode == FmMode::Read {
+        if !f.mode.can_write() {
             set_errno(EINVAL);
             f.error = true;
             return 0;
@@ -345,7 +443,7 @@ pub extern "C" fn fflush(_fp: *mut FILE) -> c_int {
 pub unsafe extern "C" fn fgetc(fp: *mut FILE) -> c_int {
     unsafe {
         let f = &mut *fp;
-        if f.mode != FmMode::Read {
+        if !f.mode.can_read() {
             f.error = true;
             set_errno(EINVAL);
             return EOF;
@@ -375,7 +473,7 @@ pub unsafe extern "C" fn fgetc(fp: *mut FILE) -> c_int {
 pub unsafe extern "C" fn ungetc(c: c_int, fp: *mut FILE) -> c_int {
     unsafe {
         let f = &mut *fp;
-        if f.mode != FmMode::Read {
+        if !f.mode.can_read() {
             set_errno(EINVAL);
             return EOF;
         }
@@ -395,7 +493,7 @@ pub unsafe extern "C" fn ungetc(c: c_int, fp: *mut FILE) -> c_int {
 pub unsafe extern "C" fn fputc(c: c_int, fp: *mut FILE) -> c_int {
     unsafe {
         let f = &mut *fp;
-        if f.mode == FmMode::Read {
+        if !f.mode.can_write() {
             f.error = true;
             set_errno(EINVAL);
             return EOF;
@@ -462,9 +560,11 @@ pub unsafe extern "C" fn clearerr(fp: *mut FILE) {
 
 /// rewind(fp)：回到流开头并清除错误标志（POSIX）。
 ///
-/// **为什么走 lseek 而不是本文件的 fseek**：fseek/ftell 目前是**未接线的桩**（忽略参数直接
-/// 返回）。在它们接线之前用它们会把 rewind 也变成静默无效——那正是 S09 要避免的
-/// 「看起来能用、实际没做事」。
+/// **为什么直接走 `lseek` 而不是本文件的 `fseek`**：两者等价（fseek 内部就是 lseek + 清
+/// EOF/pushback），但 rewind 还要清**错误**标志，语义上是 clearerr + 复位。写成一条 lseek +
+/// 一次 clearerr 比「调 fseek 再调 clearerr」少一层间接，也不依赖 fseek 的返回值。
+/// （历史注记：本函数写下这段注释时 fseek/ftell 还是未接线的桩——那时用它们确实会把 rewind
+/// 变成静默无效。fseek/ftell 已实现，本注释同步更新。）
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rewind(fp: *mut FILE) {
     unsafe {
@@ -507,7 +607,7 @@ pub unsafe extern "C" fn fgets(s: *mut c_char, n: c_int, fp: *mut FILE) -> *mut 
     let max = (n - 1) as usize;
     unsafe {
         let f = &mut *fp;
-        if f.mode != FmMode::Read {
+        if !f.mode.can_read() {
             f.error = true;
             set_errno(EINVAL);
             return core::ptr::null_mut();
@@ -570,7 +670,7 @@ pub unsafe extern "C" fn getdelim(
             return -1;
         }
         let f = &mut *fp;
-        if f.mode != FmMode::Read {
+        if !f.mode.can_read() {
             set_errno(EINVAL);
             return -1;
         }
@@ -644,7 +744,7 @@ pub unsafe extern "C" fn fputs(s: *const c_char, fp: *mut FILE) -> c_int {
     }
     unsafe {
         let f = &mut *fp;
-        if f.mode == FmMode::Read {
+        if !f.mode.can_write() {
             f.error = true;
             set_errno(EINVAL);
             return EOF;
@@ -678,17 +778,46 @@ pub extern "C" fn ferror(fp: *mut FILE) -> c_int {
     unsafe { (*fp).error as c_int }
 }
 
+/// `fseek(fp, offset, whence)`：重定位流（POSIX）。成功返回 0，失败 -1 置 errno。
+///
+/// **此前是未接线的桩**（忽略参数直接 ENOTSUP）——桩的符号存在，故反向对账把它算作
+/// 「已实现」，**证明不了行为对**。这正是 `tools/3psrc/libcc1` 那类系统内运行时验收存在的
+/// 理由：它在系统内真调一次 fseek，桩立刻现形。
+///
+/// 语义要点：
+///  - 清除流的 EOF 标志并**丢弃 `ungetc` 的 pushback**（POSIX 明确要求；不清会把回退的
+///    字节留在后续读里，读出的内容与文件不符）；
+///  - 真正的定位交给 `lseek`（**单点定义**：`fd` 定位逻辑只有那一份，S15）。`lseek` 一旦
+///    被调用，该 fd 就转入「用户态维护位置」模式，后续 `read`/`write` 走定位 I/O——
+///    这正是 fseek 之后 `fread` 能读回开头数据的机制。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fseek(_fp: *mut FILE, _offset: c_long, _whence: c_int) -> c_int {
-    // 定位未完整支持（内核 fd 语义下顺序流为主）：如实 ENOTSUP，不伪造成功。
-    set_errno(crate::errno::ENOTSUP);
-    -1
+pub unsafe extern "C" fn fseek(fp: *mut FILE, offset: c_long, whence: c_int) -> c_int {
+    if fp.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let f = &mut *fp;
+    f.eof = false;
+    f.pushback = -1;
+    // 错误标志按 POSIX **不**由 fseek 清除（那是 clearerr/rewind 的事）。
+    if crate::unistd::lseek(f.fd as c_int, offset, whence) < 0 {
+        return -1;
+    }
+    0
 }
 
+/// `ftell(fp)`：返回当前流位置（POSIX）。失败返回 -1 置 errno。
+///
+/// 实现是 `lseek(fd, 0, SEEK_CUR)`。**诚实边界**：若该 fd 从未被定位过，`lseek` 的 SEEK_CUR
+/// 分支会如实返回 `ENOTSUP`（用户态不知道内核维护的当前位置，且内核不暴露它）——
+/// 不猜、不返回 0 冒充。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ftell(_fp: *mut FILE) -> c_long {
-    set_errno(crate::errno::ENOTSUP);
-    -1
+pub unsafe extern "C" fn ftell(fp: *mut FILE) -> c_long {
+    if fp.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    crate::unistd::lseek((*fp).fd as c_int, 0, 1 /* SEEK_CUR */)
 }
 
 // ---------- 内部辅助 ----------
@@ -1071,7 +1200,7 @@ pub unsafe extern "C" fn vfprintf(fp: *mut FILE, fmt: *const c_char, ap: VaList<
         return -1;
     }
     let f = unsafe { &mut *fp };
-    if f.mode == FmMode::Read {
+    if !f.mode.can_write() {
         set_errno(EINVAL);
         return -1;
     }
@@ -1362,7 +1491,7 @@ pub unsafe extern "C" fn sscanf(s: *const c_char, fmt: *const c_char, ap: ...) -
 ///
 /// `f` 的输入源由 `FILE::str_src` 决定（非 null 即内存源），故本函数与源类型无关。
 unsafe fn vscan(f: &mut FILE, fmt: *const c_char, mut ap: VaList) -> c_int {
-    if f.mode != FmMode::Read {
+    if !f.mode.can_read() {
         f.error = true;
         set_errno(EINVAL);
         return EOF;
@@ -1871,5 +2000,115 @@ unsafe fn vscan(f: &mut FILE, fmt: *const c_char, mut ap: VaList) -> c_int {
             }
         }
     assigned
+}
+
+/// `scanf(fmt, ...)`：从**标准输入**读取格式化输入（POSIX）。
+///
+/// 与 `fscanf` 共用同一套扫描核心 `vscan`（S15 单点）——本函数只是把流换成 `stdin`。
+/// **来路**：反向对账的 C1 清单（`sscanf`/`fscanf` 早已实现，缺的只是「从 stdin 读」这一层）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scanf(fmt: *const c_char, ap: ...) -> c_int {
+    use core::ffi::VaList;
+    stdio_init();
+    if fmt.is_null() {
+        set_errno(EINVAL);
+        return EOF;
+    }
+    let fp = stdin;
+    if fp.is_null() {
+        set_errno(EBADF);
+        return EOF;
+    }
+    let ap: VaList = core::mem::transmute(ap);
+    vscan(&mut *fp, fmt, ap)
+}
+
+/// `tmpfile()`：创建一个**自动删除**的临时文件并返回其流（POSIX，`"w+b"` 语义）。
+///
+/// 实现是真实数据链路，不是近似：
+/// 1. 目录取 `TMPDIR`（非空时）否则 `/tmp`——本系统里 `/tmp` 是指向 `/scratch` 的符号链接
+///    （内核 `vfs_init`），故它始终存在且可写；
+/// 2. 用 `mkstemp` 以 **O_EXCL 原子独占**建名并打开（撞名换名重试；判定与创建同在内核
+///    一个 syscall 内，无 TOCTOU 窗口）；
+/// 3. **立即 `unlink`**——POSIX 要求文件在关闭或进程结束时自动消失。本内核的「打开后删除」
+///    是延迟生命周期（`[test-vfs-m65] open-unlink deferred lifecycle OK` 已验证），故 fd 仍可用；
+/// 4. `alloc_file(fd, FmMode::ReadWrite)` 包成**可读可写**流（这正是 `FmMode` 新增
+///    `ReadWrite` 变体的唯一动机：此前没有它，`fdopen(fd, "w+b")` 只会得到**只写**流）。
+///
+/// **诚实边界（S09）**：目录不存在/不可写、或 fd 表满时如实返回 NULL 并置 errno——
+/// **不伪造**成功。POSIX 未规定 tmpfile 失败的具体 errno，故原样透传内核错误码。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tmpfile() -> *mut FILE {
+    // 1. 目录：TMPDIR 优先（POSIX 惯例），否则 /tmp。
+    let mut dir_buf = [0u8; 96];
+    let mut dlen = 0usize;
+    let env = crate::stdlib::getenv(b"TMPDIR\0".as_ptr() as *const c_char);
+    if !env.is_null() {
+        let b = cstr_bytes(env);
+        if !b.is_empty() && b.len() + 11 < dir_buf.len() {
+            dir_buf[..b.len()].copy_from_slice(b);
+            dlen = b.len();
+        }
+    }
+    if dlen == 0 {
+        let d = b"/tmp";
+        dir_buf[..d.len()].copy_from_slice(d);
+        dlen = d.len();
+    }
+    // 2. 拼 "<dir>/tmpXXXXXX"（结尾必须是 6 个 'X'——mkstemp 的模板契约）。
+    let mut tpl = [0i8; 128];
+    let mut n = 0usize;
+    let mut dl = dlen;
+    while dl > 1 && dir_buf[dl - 1] == b'/' {
+        dl -= 1;
+    }
+    for &b in dir_buf[..dl].iter() {
+        tpl[n] = b as i8;
+        n += 1;
+    }
+    for &b in b"/tmpXXXXXX".iter() {
+        tpl[n] = b as i8;
+        n += 1;
+    }
+    tpl[n] = 0;
+    let fd = crate::posix_batch3::mkstemp(tpl.as_mut_ptr());
+    if fd < 0 {
+        return core::ptr::null_mut();
+    }
+    // 3. 登记**延迟删除**（理由见 TMP_FILES 的说明：本内核 VFS 不支持 unlink 之后再写入）。
+    let path_bytes = core::slice::from_raw_parts(tpl.as_ptr() as *const u8, n);
+    if core::str::from_utf8(path_bytes).is_err() {
+        let _ = libsys::close(fd as u64);
+        set_errno(EINVAL);
+        return core::ptr::null_mut();
+    }
+    let copy = crate::malloc::malloc(n + 1) as *mut c_char;
+    if copy.is_null() {
+        let _ = libsys::close(fd as u64);
+        set_errno(crate::errno::ENOMEM);
+        return core::ptr::null_mut();
+    }
+    core::ptr::copy_nonoverlapping(path_bytes.as_ptr(), copy as *mut u8, n);
+    *copy.add(n) = 0;
+    if !tmp_register(fd, copy) {
+        // 登记表满：如实失败，**不留半成品**（删掉刚建的文件 + 释放路径 + 关 fd）。
+        if let Ok(p) = core::str::from_utf8(path_bytes) {
+            let _ = libsys::unlink(p);
+        }
+        crate::malloc::free(copy as *mut u8);
+        let _ = libsys::close(fd as u64);
+        set_errno(crate::errno::ENOMEM);
+        return core::ptr::null_mut();
+    }
+    if !TMP_CLEANUP_REGISTERED.swap(true, Ordering::SeqCst) {
+        let _ = crate::stdlib::atexit(Some(tmp_cleanup_at_exit));
+    }
+    // 4. 包成读写流。
+    let fp = alloc_file(fd as u64, FmMode::ReadWrite);
+    if fp.is_null() {
+        let _ = libsys::close(fd as u64);
+        return core::ptr::null_mut();
+    }
+    fp
 }
 

@@ -58,6 +58,12 @@ time_t mktime(struct tm *tm);
 #define CLOCK_REALTIME  0
 #define CLOCK_MONOTONIC 1
 int clock_gettime(int clk_id, struct timespec *tp);
+/* strptime：按 format 解析 s 填入 tm。成功返回 s 中**第一个未消耗字符**的指针；失败返回 NULL。
+ * 支持 %Y %y %m %d %e %H %I %M %S %p %b %B %h %a %A %j %n %t %% 与空白；
+ * **未实现**的说明符（%c %x %X %U %W %V %G %g %s %z %Z %F %T %D %R %C %k %l）遇到即**如实失败**，
+ * 绝不静默跳过——静默跳过会让调用方以为解析成功。POSIX 规定未指定的字段保持不变。 */
+char *strptime(const char *s, const char *format, struct tm *tm);
+
 int sleep(unsigned seconds);
 int usleep(unsigned useconds);
 int nanosleep(const struct timespec *req, void *rem);

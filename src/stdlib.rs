@@ -33,7 +33,23 @@ const MAX_ATEXIT: usize = 32;
 
 type ExitFn = extern "C" fn();
 
-static ATEXIT_FNS: Mutex<[Option<ExitFn>; MAX_ATEXIT]> = Mutex::new([None; MAX_ATEXIT]);
+/// `on_exit` 的处理函数：`(status, arg)`（POSIX 的 `on_exit` 形态）。
+pub type OnExitFn = extern "C" fn(crate::ctypes::c_int, *mut crate::ctypes::c_void);
+
+/// 退出处理项。
+///
+/// **为什么两种登记共用一个表**：POSIX 要求 `atexit` 与 `on_exit` 登记的处理器在**同一个**
+/// LIFO 栈里、按登记顺序逆序执行。分成两张表就会变成「先跑完所有 on_exit 再跑 atexit」——
+/// 那是**可观测的语义错误**（依赖顺序的清理代码会崩）。故这里用枚举合并。
+#[derive(Clone, Copy)]
+enum ExitEntry {
+    Plain(ExitFn),
+    // 存成 usize 而不是裸指针：`spin::Mutex<T>` 要求 `T: Send`，而 `*mut c_void` 不是
+    // Send（类型系统不区分「本内核单核」与「真跨线程」）。取出时再转回指针。
+    WithArg(OnExitFn, usize),
+}
+
+static ATEXIT_FNS: Mutex<[Option<ExitEntry>; MAX_ATEXIT]> = Mutex::new([None; MAX_ATEXIT]);
 
 /// `atexit(f)`：登记退出处理函数。成功返回 0；表满返回非 0。
 #[unsafe(no_mangle)]
@@ -44,7 +60,29 @@ pub extern "C" fn atexit(f: Option<ExitFn>) -> c_int {
     let mut table = ATEXIT_FNS.lock();
     for slot in table.iter_mut() {
         if slot.is_none() {
-            *slot = Some(f);
+            *slot = Some(ExitEntry::Plain(f));
+            return 0;
+        }
+    }
+    1
+}
+
+/// `on_exit(f, arg)`：登记**带参数**的退出处理函数。成功返回 0；表满或 `f` 为空返回非 0。
+///
+/// 与 `atexit` 共用同一个 LIFO 表（见 [`ExitEntry`] 的说明），故两种登记的执行顺序
+/// 严格按登记顺序逆序——这是 POSIX 的硬要求，不是实现细节。
+#[unsafe(no_mangle)]
+pub extern "C" fn on_exit(
+    f: Option<OnExitFn>,
+    arg: *mut crate::ctypes::c_void,
+) -> crate::ctypes::c_int {
+    let Some(f) = f else {
+        return -1;
+    };
+    let mut table = ATEXIT_FNS.lock();
+    for slot in table.iter_mut() {
+        if slot.is_none() {
+            *slot = Some(ExitEntry::WithArg(f, arg as usize));
             return 0;
         }
     }
@@ -54,7 +92,7 @@ pub extern "C" fn atexit(f: Option<ExitFn>) -> c_int {
 /// 逆序调用全部已登记的退出处理函数（LIFO，POSIX 语义）。由 `exit` 调用；`_exit` 不调用。
 ///
 /// 逐个「取出后释放锁再调用」：处理函数内部可能再次调用 `atexit`/`exit`，持锁调用会自死锁。
-pub fn run_atexit_handlers() {
+pub fn run_atexit_handlers(code: crate::ctypes::c_int) {
     loop {
         let f = {
             let mut table = ATEXIT_FNS.lock();
@@ -68,7 +106,10 @@ pub fn run_atexit_handlers() {
             picked
         };
         match f {
-            Some(f) => f(),
+            Some(ExitEntry::Plain(f)) => f(),
+            // POSIX：`on_exit` 的处理函数收到退出状态。`code` 由 `exit(code)` 一路传入，
+            // 不是编造的 0。
+            Some(ExitEntry::WithArg(f, arg)) => f(code, arg as *mut crate::ctypes::c_void),
             None => break,
         }
     }

@@ -116,6 +116,13 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
  * 于是 libc.a 里没有该符号（PHANTOM：头文件声明了、库里没有，调用即链接失败）。 */
 ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 
+/* getopt：命令行短选项解析（POSIX 归属 unistd.h；实现在 libc/src/posix_batch4.rs）。
+ * **诚实边界**：不做参数置换——遇到第一个非选项即停止（POSIX 允许的经典行为）。
+ * getopt_long 与 struct option 归 <getopt.h>。 */
+extern char *optarg;
+extern int optind, opterr, optopt;
+int getopt(int argc, char *const argv[], const char *optstring);
+
 /* exit/_Exit/abort/atexit 归 <stdlib.h>（POSIX 归属）；unistd.h 只留 _exit。 */
 __attribute__((noreturn)) void _exit(int status);
 

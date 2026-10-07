@@ -15,7 +15,7 @@ use crate::errno::{set_errno, from_libsys};
 /// POSIX：`exit` 先按 LIFO 调用 `atexit` 登记的处理函数，再真正退出；`_exit` 不调用。
 #[unsafe(no_mangle)]
 pub extern "C" fn exit(code: c_int) -> ! {
-    crate::stdlib::run_atexit_handlers();
+    crate::stdlib::run_atexit_handlers(code);
     libsys::exit(code)
 }
 
