@@ -802,6 +802,9 @@ pub unsafe extern "C" fn truncate(path: *const c_char, length: crate::ctypes::of
 }
 
 /// fcntl 命令常量（x86_64 Linux ABI）。
+/// waitpid 的 options（POSIX 归属 <sys/wait.h>；此处供 Rust 侧引用，单点定义）。
+pub const WNOHANG: c_int = 1;
+
 pub const F_DUPFD: c_int = 0;
 pub const F_GETFD: c_int = 1;
 pub const F_SETFD: c_int = 2;

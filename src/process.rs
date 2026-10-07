@@ -158,6 +158,34 @@ pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
     let _ = pid;
+    // WNOHANG：非阻塞轮询（POSIX）。本系统内核支持「有界等待」——`target>0 && timeout>0` 到期时
+    // 子进程仍在运行则如实返回 `WouldBlock`（见 kernel syscall.rs 的 sys_task_wait 文档），
+    // 故这里用 1ns 的超时实现「立即返回」。
+    //
+    // **诚实边界（S09）**：受内核定时器粒度限制，1ns 超时实际可能短暂等待（远小于一次调度片），
+    // 不是严格的「零等待」；但语义正确（没有子进程已退出就返回 0）。
+    //
+    // 来路：目标第 7/8 轮——它是 libc 宽度的合法缺口（此前 options != 0 一律 ENOTSUP），
+    // 同时充当「子进程卡在 _exit」与「父 wait 丢唤醒」的判别器。
+    if options & crate::unistd::WNOHANG != 0 {
+        return match libsys::waitpid_any_timeout(1) {
+            Ok(wr) => {
+                if wr.pid == 0 {
+                    0
+                } else {
+                    if !status.is_null() {
+                        unsafe { *status = ((wr.code & 0xFF) as c_int) << 8; }
+                    }
+                    wr.pid as c_int
+                }
+            }
+            Err(libsys::Error::WouldBlock) => 0,
+            Err(e) => {
+                set_errno(from_libsys(e));
+                -1
+            }
+        };
+    }
     if options != 0 {
         set_errno(crate::errno::ENOTSUP);
         return -1;
