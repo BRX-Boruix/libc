@@ -6,7 +6,7 @@
 //! - \`clock()\` 返回单调纳秒（内核 uptime_ms），换算为 CLOCKS_PER_SEC 单位。
 //! - \`sleep\` 经 libsys \`sleep(ns)\` 阻塞。
 
-use crate::ctypes::{c_int, c_ulong};
+use crate::ctypes::{c_char, c_int, c_ulong, size_t};
 use crate::errno::{set_errno, from_libsys};
 
 /// \`time_t\`：秒级时间类型（64 位）。
@@ -225,4 +225,191 @@ pub unsafe extern "C" fn gmtime(t: *const time_t) -> *mut Tm {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn localtime(t: *const time_t) -> *mut Tm {
     unsafe { gmtime(t) }
+}
+
+// ---------- strftime（3P6-2 第二波：由真实报错驱动补的第一项）----------
+//
+// 来路：tcc-on-boruix/tests/wave2.c 在 BORUIX 内用 tcc 编译时报
+//   wave2.c:48: warning: implicit declaration of function 'strftime'
+//   tcc: error: unresolved reference to 'strftime'
+// 即**头文件没声明、库里也没有实现**。这不是预猜的清单项，是真实程序的真实报错。
+
+/// 追加一段字节。返回 false 表示放不下（调用方按 POSIX 返回 0）。
+///
+/// 容量口径与 POSIX 一致：max 包含留给结尾 NUL 的那一个字节。
+unsafe fn sf_put(s: *mut c_char, max: usize, out: &mut usize, bytes: &[u8]) -> bool {
+    if *out + bytes.len() >= max {
+        return false;
+    }
+    unsafe {
+        for (i, b) in bytes.iter().enumerate() {
+            *s.add(*out + i) = *b as c_char;
+        }
+    }
+    *out += bytes.len();
+    true
+}
+
+/// 追加一个十进制整数，pad 为左填充字符、width 为最小宽度（含负号）。
+unsafe fn sf_num(
+    s: *mut c_char,
+    max: usize,
+    out: &mut usize,
+    val: i64,
+    width: usize,
+    pad: u8,
+) -> bool {
+    let mut buf = [0u8; 20];
+    let neg = val < 0;
+    let mut v = val.unsigned_abs();
+    let mut n = 0usize;
+    if v == 0 {
+        buf[0] = b'0';
+        n = 1;
+    }
+    while v > 0 && n < buf.len() {
+        buf[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+    }
+    let digits = n + if neg { 1 } else { 0 };
+    let mut padn = width.saturating_sub(digits);
+    while padn > 0 {
+        if !unsafe { sf_put(s, max, out, &[pad]) } {
+            return false;
+        }
+        padn -= 1;
+    }
+    if neg && !unsafe { sf_put(s, max, out, &[b'-']) } {
+        return false;
+    }
+    while n > 0 {
+        n -= 1;
+        if !unsafe { sf_put(s, max, out, &[buf[n]]) } {
+            return false;
+        }
+    }
+    true
+}
+
+const SF_WDAY_ABBR: [&[u8]; 7] = [b"Sun", b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat"];
+const SF_WDAY_FULL: [&[u8]; 7] = [
+    b"Sunday", b"Monday", b"Tuesday", b"Wednesday", b"Thursday", b"Friday", b"Saturday",
+];
+const SF_MON_ABBR: [&[u8]; 12] = [
+    b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov",
+    b"Dec",
+];
+const SF_MON_FULL: [&[u8]; 12] = [
+    b"January", b"February", b"March", b"April", b"May", b"June", b"July", b"August",
+    b"September", b"October", b"November", b"December",
+];
+
+/// strftime 的主循环（把 fmt 渲染进 s）。%F/%T/%D/%R 递归调用自身。
+unsafe fn sf_fmt(s: *mut c_char, max: usize, out: &mut usize, fmt: *const c_char, t: &Tm) -> bool {
+    let mut i = 0usize;
+    loop {
+        let c = unsafe { *fmt.add(i) } as u8;
+        if c == 0 {
+            return true;
+        }
+        i += 1;
+        if c != b'%' {
+            if !unsafe { sf_put(s, max, out, &[c]) } {
+                return false;
+            }
+            continue;
+        }
+        let mut d = unsafe { *fmt.add(i) } as u8;
+        if d == 0 {
+            return false;
+        }
+        i += 1;
+        // POSIX 允许忽略 E/O 修饰符（用未修饰的等价形式）。
+        if d == b'E' || d == b'O' {
+            d = unsafe { *fmt.add(i) } as u8;
+            if d == 0 {
+                return false;
+            }
+            i += 1;
+        }
+        let wday = t.tm_wday.clamp(0, 6) as usize;
+        let mon = t.tm_mon.clamp(0, 11) as usize;
+        let year = (t.tm_year as i64) + 1900;
+        let hour12 = {
+            let h = (t.tm_hour as i64).rem_euclid(12);
+            if h == 0 { 12 } else { h }
+        };
+        let ok = match d {
+            b'Y' => unsafe { sf_num(s, max, out, year, 4, b'0') },
+            b'y' => unsafe { sf_num(s, max, out, year.rem_euclid(100), 2, b'0') },
+            b'C' => unsafe { sf_num(s, max, out, year.div_euclid(100), 2, b'0') },
+            b'm' => unsafe { sf_num(s, max, out, (t.tm_mon as i64) + 1, 2, b'0') },
+            b'd' => unsafe { sf_num(s, max, out, t.tm_mday as i64, 2, b'0') },
+            b'e' => unsafe { sf_num(s, max, out, t.tm_mday as i64, 2, b' ') },
+            b'H' => unsafe { sf_num(s, max, out, t.tm_hour as i64, 2, b'0') },
+            b'I' => unsafe { sf_num(s, max, out, hour12, 2, b'0') },
+            b'M' => unsafe { sf_num(s, max, out, t.tm_min as i64, 2, b'0') },
+            b'S' => unsafe { sf_num(s, max, out, t.tm_sec as i64, 2, b'0') },
+            b'j' => unsafe { sf_num(s, max, out, (t.tm_yday as i64) + 1, 3, b'0') },
+            b'w' => unsafe { sf_num(s, max, out, t.tm_wday as i64, 1, b'0') },
+            b'u' => unsafe {
+                let u = t.tm_wday as i64;
+                sf_num(s, max, out, if u == 0 { 7 } else { u }, 1, b'0')
+            },
+            b'a' => unsafe { sf_put(s, max, out, SF_WDAY_ABBR[wday]) },
+            b'A' => unsafe { sf_put(s, max, out, SF_WDAY_FULL[wday]) },
+            b'b' | b'h' => unsafe { sf_put(s, max, out, SF_MON_ABBR[mon]) },
+            b'B' => unsafe { sf_put(s, max, out, SF_MON_FULL[mon]) },
+            b'p' => unsafe { sf_put(s, max, out, if t.tm_hour < 12 { b"AM" } else { b"PM" }) },
+            b'P' => unsafe { sf_put(s, max, out, if t.tm_hour < 12 { b"am" } else { b"pm" }) },
+            // 本系统无时区数据库，恒为 UTC —— 这是事实陈述，不是占位。
+            b'z' => unsafe { sf_put(s, max, out, b"+0000") },
+            b'Z' => unsafe { sf_put(s, max, out, b"UTC") },
+            b'F' => unsafe { sf_fmt(s, max, out, c"%Y-%m-%d".as_ptr(), t) },
+            b'T' => unsafe { sf_fmt(s, max, out, c"%H:%M:%S".as_ptr(), t) },
+            b'D' => unsafe { sf_fmt(s, max, out, c"%m/%d/%y".as_ptr(), t) },
+            b'R' => unsafe { sf_fmt(s, max, out, c"%H:%M".as_ptr(), t) },
+            b'n' => unsafe { sf_put(s, max, out, b"\n") },
+            b't' => unsafe { sf_put(s, max, out, b"\t") },
+            b'%' => unsafe { sf_put(s, max, out, b"%") },
+            // POSIX 允许的兜底：原样输出，绝不静默丢弃。
+            _ => unsafe { sf_put(s, max, out, &[b'%', d]) },
+        };
+        if !ok {
+            return false;
+        }
+    }
+}
+
+/// strftime(s, max, format, tm)：按格式串把日历时间渲染进 s。
+///
+/// 返回写入的字节数（**不含**结尾 NUL）；结果放不下（含 NUL）或参数非法返回 0
+/// （POSIX 语义：0 表示「未写入完整结果」）。
+///
+/// **支持集（诚实声明，S09）**：只实现真实程序常用的那一组——
+/// %Y %y %C %m %d %e %H %I %M %S %p %P %j %w %u %a %A %b %h %B %F %T %D %R %n %t %%
+/// 以及 %z/%Z（本系统无时区数据库，恒为 +0000/UTC）。未列出的说明符按 POSIX
+/// 允许的方式**原样输出**（%X 输出 %X），绝不静默丢弃；E/O 修饰符按 POSIX 允许的
+/// 方式忽略。**未实现**（明确声明，不是遗漏）：%c %x %X %U %W %V %G %g %s。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strftime(
+    s: *mut c_char,
+    max: size_t,
+    format: *const c_char,
+    tm: *const Tm,
+) -> size_t {
+    if s.is_null() || format.is_null() || tm.is_null() || max == 0 {
+        return 0;
+    }
+    let t = unsafe { &*tm };
+    let mut out = 0usize;
+    if !unsafe { sf_fmt(s, max, &mut out, format, t) } {
+        return 0;
+    }
+    if out >= max {
+        return 0;
+    }
+    unsafe { *s.add(out) = 0 };
+    out
 }

@@ -3,6 +3,11 @@
 #define _BORUIX_UNISTD_H
 
 #include "boruix_ctypes.h"
+/* pid_t 由 <sys/types.h> 提供（POSIX 规定 unistd.h 暴露它）。
+ * 3P6-2 第二波：wave2.c 在 BORUIX 内用 tcc 编译时对 getpid 报
+ * "implicit declaration of function 'getpid'"——实现早就在（libc/src/process.rs），
+ * 缺的只是**声明**。真实报错驱动，不是预猜。 */
+#include "sys/types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +33,12 @@ int execvp(const char *file, char *const argv[]);
 int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
 int isatty(int fd);
+
+/* 进程/线程标识。POSIX 归属 unistd.h（实现在 libc/src/process.rs）：
+ * getpid 返回**线程组组长** pid（POSIX 进程 id）；gettid 返回本线程自身 pid。
+ * 单线程进程两者相等；多线程时组员 getpid==组长、gettid==自身（见 process.rs 文档）。 */
+pid_t getpid(void);
+pid_t gettid(void);
 
 /* exit/_Exit/abort/atexit 归 <stdlib.h>（POSIX 归属）；unistd.h 只留 _exit。 */
 __attribute__((noreturn)) void _exit(int status);

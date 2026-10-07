@@ -39,6 +39,12 @@ struct tm *localtime(const time_t *t);
 
 time_t time(time_t *tloc);
 clock_t clock(void);
+
+/* strftime：按格式串把 tm 渲染进 s（最多 max 字节，**含**结尾 NUL 的位置）。
+ * 返回写入的字节数（不含 NUL）；放不下或参数非法返回 0。
+ *
+ * 支持集与"未实现项"的显式清单见 libc/src/time.rs 的 strftime 文档（S09 不夸大）。 */
+size_t strftime(char *s, size_t max, const char *format, const struct tm *tm);
 int sleep(unsigned seconds);
 int usleep(unsigned useconds);
 int nanosleep(const struct timespec *req, void *rem);
