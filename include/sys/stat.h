@@ -61,6 +61,10 @@ struct stat {
 #define st_ctime st_ctim.tv_sec
 
 int stat(const char *path, struct stat *buf);
+/* lstat：不跟随符号链接的 stat。**诚实边界**：本系统无 no-follow 原语，故实现为
+ * 「先 readlink 判链接：是链接则合成 S_IFLNK + st_size=目标长度；否则退回 stat」。
+ * 3P6-2 第二波：由 GCC 宿主侧构建的真实报错驱动补上。 */
+int lstat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);
 int chmod(const char *path, mode_t mode);
 int mkdir(const char *path, mode_t mode);

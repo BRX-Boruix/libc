@@ -63,6 +63,29 @@ pid_t gettid(void);
  * （此前 F_DUPFD 已实现，但 POSIX 的 dup() 本身既没实现也没声明）。 */
 int dup(int fd);
 
+/* getpagesize / pathconf / mktemp：3P6-2 第二波（GCC 宿主侧构建的真实报错驱动）。
+ * pathconf 的 _PC_* 取值与 Linux 一致；无定义的 name 如实返回 -1 置 EINVAL。 */
+int getpagesize(void);
+/* pipe：创建匿名管道（fds[0] 读端、fds[1] 写端）。内核管道早已接线，libc 只差包装。
+ * brk/sbrk：传统断点接口，底层走已有的 boruix_brk。3P6-2 第二波（GCC 驱动）。 */
+int pipe(int fds[2]);
+/* access：可访问性检查。**诚实边界**：F_OK 走 stat；R_OK/W_OK 用 open 探一次（内核真实判定，
+ * 但会真的打开文件）；X_OK 退化为看属主执行位（无原语，近似）。3P6-2 第二波（GCC 驱动）。 */
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
+int access(const char *path, int mode);
+int brk(void *addr);
+void *sbrk(long incr);
+#define _PC_LINK_MAX  0
+#define _PC_MAX_CANON 1
+#define _PC_MAX_INPUT 2
+#define _PC_NAME_MAX  3
+#define _PC_PATH_MAX  4
+#define _PC_PIPE_BUF  5
+long pathconf(const char *path, int name);
+
 /* rmdir / truncate / getppid：3P6-2 第二波「整项缺失」类（反向对账列出）。
  * truncate 走 open+ftruncate+close（内核只有按 fd 的 ftruncate）；rmdir 复用内核 unlink
  * （它同时支持删空目录）；getppid 数据来自 procfs 快照。 */
