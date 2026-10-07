@@ -8,6 +8,15 @@
 extern "C" {
 #endif
 
+/* wint_t / WEOF：C 标准要求 <wchar.h> 提供（宽字符 I/O 的字符类型与文件尾常量）。
+ * 3P6-2 第二波：由 MPFR 的真实编译报错驱动补上——
+ *   vasprintf.c:423:9: error: unknown type name 'wint_t'
+ * 取值与 glibc 一致：wint_t = unsigned int；WEOF = 0xffffffffu（可表示任何 wchar_t 值 + 一个 EOF）。 */
+typedef unsigned int wint_t;
+#ifndef WEOF
+#define WEOF 0xffffffffu
+#endif
+
 size_t wcslen(const wchar_t *s);
 int wcscmp(const wchar_t *a, const wchar_t *b);
 wchar_t *wcscpy(wchar_t *dst, const wchar_t *src);
