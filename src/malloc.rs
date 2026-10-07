@@ -361,6 +361,15 @@ fn check_capacity(tag: u8, cap: usize, want: usize) {
     let _ = libsys::write(1, &buf[..38]);
 }
 
+/// **返回值语义**：返回**整段新堆区的起点**，并已把整段 `[cur, new_brk)` 登记为一个
+/// 空闲块（不是只登记 `need`）。为什么必须整段登记：`grow = need.max(64 KiB)`，
+/// 若只登记 `need`，扩展出来的尾巴 `[cur+need, new_brk)` 就**既不空闲也不可达**
+/// （`brk` 已经推上去了），成为**永久泄漏**。
+///
+/// 实测（3P6-1 内存墙）：tcc 在系统内编译 `hello.c` 时反复申请小块，每次扩展泄漏
+/// 最多 64 KiB，累计把单进程配额吃光后 `tcc_malloc` 返回 NULL → `tcc: memory full`。
+/// **症状特征：与物理内存无关**——256 MiB / 1 GiB / 2 GiB 都失败，因为泄漏量与配额
+/// 同步增长（对照：纯 1 MiB 大块探针在 1 GiB 下能干净地用到 244 MiB 配额上限）。
 unsafe fn heap_extend(need: usize) -> *mut u8 {
     let cur = match libsys::brk(0) {
         Ok(b) => b,
@@ -422,6 +431,11 @@ unsafe fn heap_extend(need: usize) -> *mut u8 {
         buf[base + 33] = b'\n';
         let _ = libsys::write(1, &buf[..base + 34]);
     }
+    // **整段登记**（见函数头注）：把 [cur, new_brk) 全部还给空闲表，而不是只还
+    // `need`。freelist_insert 会与左邻空闲块合并，故反复扩展不会产生碎片。
+    let len = new_brk as usize - cur;
+    set_block_size(cur as *mut u8, len);
+    freelist_insert(cur as *mut u8);
     cur as *mut u8
 }
 
@@ -431,12 +445,10 @@ unsafe fn heap_alloc_block(need_total: usize) -> *mut u8 {
     if !from_list.is_null() {
         return from_list;
     }
-    let base = heap_extend(need_total);
-    if base.is_null() {
+    // 扩展：`heap_extend` 已把**整段**新堆区登记进空闲表，这里直接再取一次即可。
+    if heap_extend(need_total).is_null() {
         return core::ptr::null_mut();
     }
-    set_block_size(base, need_total);
-    freelist_insert(base);
     freelist_take(need_total)
 }
 
