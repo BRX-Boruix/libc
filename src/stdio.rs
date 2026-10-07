@@ -1025,6 +1025,21 @@ pub unsafe extern "C" fn sprintf(buf: *mut c_char, fmt: *const c_char, ap: ...) 
     vsnprintf(buf, usize::MAX, fmt, unsafe { core::mem::transmute::<_, VaList>(ap) }) as c_int
 }
 
+/// vsprintf(buf, fmt, ap)：格式化到字符串（**无长度上限**，由调用方保证缓冲区足够大），
+/// 参数来自 VaList。
+///
+/// **来路（3P6-2 第二波，真实报错驱动，不预猜）**：交叉构建 GMP 时
+///   printf/sprintffuns.c:56:3: error: call to undeclared function 'vsprintf'
+/// ——<stdio.h> 有 vsnprintf/sprintf 但没有 vsprintf。
+///
+/// **实现说明（为什么这样写才对）**：无界语义靠 `vsnprintf(.., usize::MAX, ..)`——
+/// `vformat_mem` 会把 cap 收敛到 `isize::MAX`（满足切片契约，同时实际无界），
+/// 这正是 `sprintf` 走的路。**不**另造一个「很大的 cap」假装无界（那是静默截断，S09 不允许）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vsprintf(buf: *mut c_char, fmt: *const c_char, ap: VaList<'_>) -> c_int {
+    unsafe { vsnprintf(buf, usize::MAX, fmt, ap) }
+}
+
 /// \`snprintf(buf, size, fmt, ...)\`：格式化到有界字符串，恒 NUL 终止（size>0）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn snprintf(buf: *mut c_char, size: size_t, fmt: *const c_char, ap: ...) -> c_int {

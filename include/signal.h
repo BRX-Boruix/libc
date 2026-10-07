@@ -12,6 +12,13 @@
 #ifndef _SIGNAL_H
 #define _SIGNAL_H
 
+/* POSIX 要求 <signal.h> 自带 pid_t（kill 的形参就是它）。
+ * **来路（第 59 轮，GMP 交叉构建暴露的自身缺陷）**：第 57 轮补 kill 声明时只写了
+ * `int kill(pid_t pid, int sig);` 而本头文件当时**不包含任何头**，于是单独 include
+ * <signal.h> 的翻译单元会报 `error: unknown type name 'pid_t'`。
+ * 教训：**头文件必须自洽**——补声明的同时要补它依赖的类型来源；"名字审计"查不出这类问题。 */
+#include "sys/types.h"
+
 typedef void (*sighandler_t)(int);
 
 #define SIG_DFL ((sighandler_t)0)

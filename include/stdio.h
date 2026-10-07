@@ -60,6 +60,9 @@ int vfprintf(FILE *fp, const char *fmt, void *ap);
 int sprintf(char *buf, const char *fmt, ...);
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 int vsnprintf(char *buf, size_t size, const char *fmt, void *ap);
+/* vsprintf：无长度上限的变体（调用方保证缓冲区足够大）。3P6-2 第二波：由交叉构建 GMP 的
+ * 真实报错驱动补上（printf/sprintffuns.c 需要它）。 */
+int vsprintf(char *buf, const char *fmt, void *ap);
 int puts(const char *s);
 int putchar(int c);
 int getchar(void);
