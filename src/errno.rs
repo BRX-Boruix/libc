@@ -69,6 +69,9 @@ pub extern "C" fn __errno_location() -> *mut i32 {
 pub const EINVAL: i32 = 22;
 /// 数值越界 ERANGE。
 pub const ERANGE: i32 = 34;
+/// 功能未实现 ENOSYS（POSIX；用于「本系统没有该能力」的**如实**拒绝，
+/// 例如 `posix_spawnattr_setflags` 的进程组/信号屏蔽/调度优先级旗标）。
+pub const ENOSYS: i32 = 38;
 /// 目标不存在 ENOENT。
 pub const ENOENT: i32 = 2;
 /// 目标已存在 EEXIST。

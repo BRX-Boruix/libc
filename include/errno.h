@@ -18,6 +18,9 @@ int *__errno_location(void);
 #define EINVAL  22
 #define ENOSPC  28
 #define ERANGE  34
+/* ENOSYS：功能未实现（POSIX）。本系统用它做**如实**拒绝——例如 posix_spawnattr_setflags
+ * 的进程组/信号屏蔽/调度优先级旗标（本系统没有那些能力）。 */
+#define ENOSYS  38
 #define EAGAIN  11
 #define EBADF   9
 #define ENOTSUP 95

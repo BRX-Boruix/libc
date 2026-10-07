@@ -45,6 +45,8 @@ CHECKLIST = {
     "进程/身份": ["getpid", "getppid", "getuid", "geteuid", "getgid", "getegid",
                   "setuid", "setgid", "getgroups", "fork", "execv", "execve", "execvp",
                   "waitpid", "wait", "_exit", "atexit", "getpgrp", "setpgid",
+                  # posix_spawn 家族：GCC 宿主端口的解锁项（本系统没有 exec 替换，posix_spawn 本来就不要求它）
+                  "posix_spawn", "posix_spawnp",
                   "setsid", "kill", "raise", "nice", "uname", "getlogin", "getpwnam",
                   "getpwuid", "getgrnam", "getgrgid", "gethostname"],
     "文件/fd": ["open", "close", "read", "write", "pread", "pwrite", "lseek",

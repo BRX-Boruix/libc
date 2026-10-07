@@ -66,6 +66,7 @@ pub mod setjmp;
 pub mod sha256;
 pub mod shadow;
 pub mod signal;
+pub mod spawn;
 pub mod stdio;
 pub mod stdio_format;
 pub mod stdlib;
