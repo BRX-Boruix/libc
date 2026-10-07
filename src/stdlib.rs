@@ -179,6 +179,280 @@ pub unsafe extern "C" fn strtoumax(
 #[unsafe(no_mangle)]
 pub static mut environ: *mut *mut crate::ctypes::c_char = core::ptr::null_mut();
 
+// ---------- 环境表修改（setenv/unsetenv/putenv/clearenv，3P6-2 第二波「整项缺失」类） ----------
+//
+// 设计：入口桥接把 environ 指向**入口栈上的数组**（只读语义、无空位）。要修改就必须换成一个
+// **我们自己拥有**的数组（可 realloc、可 free）——故首次修改前整体复制一份，此后所有修改都在
+// 我们自己的数组上做。这就是 POSIX 允许的实现方式，也避免了往入口栈数组后面写。
+
+/// 我们自己分配的环境数组（NULL 终止）。
+static mut ENV_OWNED: *mut *mut crate::ctypes::c_char = core::ptr::null_mut();
+/// 上面那个数组的**容量**（元素个数，含 NULL 位）。
+static mut ENV_CAP: usize = 0;
+
+unsafe fn env_owned() -> bool {
+    unsafe {
+        if !ENV_OWNED.is_null() {
+            return true;
+        }
+        let cur = *core::ptr::addr_of!(environ);
+        let mut n = 0usize;
+        if !cur.is_null() {
+            while *cur.add(n) != core::ptr::null_mut() {
+                n += 1;
+            }
+        }
+        let cap = n + 8;
+        let arr = crate::malloc::malloc(cap * core::mem::size_of::<*mut crate::ctypes::c_char>())
+            as *mut *mut crate::ctypes::c_char;
+        if arr.is_null() {
+            return false;
+        }
+        if n > 0 {
+            core::ptr::copy_nonoverlapping(cur, arr, n);
+        }
+        *arr.add(n) = core::ptr::null_mut();
+        ENV_OWNED = arr;
+        ENV_CAP = cap;
+        *core::ptr::addr_of_mut!(environ) = arr;
+        true
+    }
+}
+
+/// 环境表里 `name`（长度 nlen）对应的下标；不存在返回 None。
+unsafe fn env_index(name: *const crate::ctypes::c_char, nlen: usize) -> Option<usize> {
+    unsafe {
+        let arr = ENV_OWNED;
+        if arr.is_null() {
+            return None;
+        }
+        let mut i = 0usize;
+        loop {
+            let e = *arr.add(i);
+            if e.is_null() {
+                return None;
+            }
+            let mut same = true;
+            for k in 0..nlen {
+                if *e.add(k) != *name.add(k) {
+                    same = false;
+                    break;
+                }
+            }
+            if same && *e.add(nlen) == b'=' as crate::ctypes::c_char {
+                return Some(i);
+            }
+            i += 1;
+        }
+    }
+}
+
+/// 追加一条 entry（需要环境表已是自有数组）；必要时扩容。
+unsafe fn env_push(entry: *mut crate::ctypes::c_char) -> bool {
+    unsafe {
+        let mut n = 0usize;
+        let arr = ENV_OWNED;
+        while *arr.add(n) != core::ptr::null_mut() {
+            n += 1;
+        }
+        if n + 2 > ENV_CAP {
+            let newcap = if ENV_CAP == 0 { 16 } else { ENV_CAP * 2 };
+            let p = crate::malloc::realloc(
+                arr as *mut u8,
+                newcap * core::mem::size_of::<*mut crate::ctypes::c_char>(),
+            ) as *mut *mut crate::ctypes::c_char;
+            if p.is_null() {
+                return false;
+            }
+            ENV_OWNED = p;
+            ENV_CAP = newcap;
+            *core::ptr::addr_of_mut!(environ) = p;
+        }
+        let arr = ENV_OWNED;
+        *arr.add(n) = entry;
+        *arr.add(n + 1) = core::ptr::null_mut();
+        true
+    }
+}
+
+/// setenv(name, value, overwrite)：写入环境变量（POSIX）。
+///
+/// **来路（3P6-2 第二波「整项缺失」类，反向对账列出）。**
+///
+/// **诚实边界（S09）**：环境表是**进程全局**的，本实现不加密锁保护——并发 setenv/putenv 与
+/// getenv 之间需调用方自行同步（与「返回静态存储」的 getenv 契约一致）。name 为空或含 '=' 时
+/// 如实返回 -1 置 EINVAL；分配失败返回 -1 置 ENOMEM。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setenv(
+    name: *const crate::ctypes::c_char,
+    value: *const crate::ctypes::c_char,
+    overwrite: c_int,
+) -> c_int {
+    unsafe {
+        if name.is_null() || value.is_null() {
+            set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        let nlen = crate::string::strlen(name) as usize;
+        if nlen == 0 {
+            set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        for i in 0..nlen {
+            if *name.add(i) == b'=' as crate::ctypes::c_char {
+                set_errno(crate::errno::EINVAL);
+                return -1;
+            }
+        }
+        if !env_owned() {
+            set_errno(crate::errno::ENOMEM);
+            return -1;
+        }
+        let vlen = crate::string::strlen(value) as usize;
+        let entry = crate::malloc::malloc(nlen + 1 + vlen + 1) as *mut crate::ctypes::c_char;
+        if entry.is_null() {
+            set_errno(crate::errno::ENOMEM);
+            return -1;
+        }
+        core::ptr::copy_nonoverlapping(name, entry, nlen);
+        *entry.add(nlen) = b'=' as crate::ctypes::c_char;
+        core::ptr::copy_nonoverlapping(value, entry.add(nlen + 1), vlen);
+        *entry.add(nlen + 1 + vlen) = 0;
+        match env_index(name, nlen) {
+            Some(i) => {
+                if overwrite == 0 {
+                    crate::malloc::free(entry as *mut u8);
+                    return 0;
+                }
+                let old = *ENV_OWNED.add(i);
+                *ENV_OWNED.add(i) = entry;
+                crate::malloc::free(old as *mut u8);
+                0
+            }
+            None => {
+                if env_push(entry) {
+                    0
+                } else {
+                    crate::malloc::free(entry as *mut u8);
+                    set_errno(crate::errno::ENOMEM);
+                    -1
+                }
+            }
+        }
+    }
+}
+
+/// unsetenv(name)：删除**所有**同名条目（POSIX）。成功 0，name 非法 -1 置 EINVAL。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unsetenv(name: *const crate::ctypes::c_char) -> c_int {
+    unsafe {
+        if name.is_null() {
+            set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        let nlen = crate::string::strlen(name) as usize;
+        if nlen == 0 {
+            set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        for i in 0..nlen {
+            if *name.add(i) == b'=' as crate::ctypes::c_char {
+                set_errno(crate::errno::EINVAL);
+                return -1;
+            }
+        }
+        if !env_owned() {
+            set_errno(crate::errno::ENOMEM);
+            return -1;
+        }
+        let arr = ENV_OWNED;
+        let mut i = 0usize;
+        while *arr.add(i) != core::ptr::null_mut() {
+            let e = *arr.add(i);
+            let mut same = true;
+            for k in 0..nlen {
+                if *e.add(k) != *name.add(k) {
+                    same = false;
+                    break;
+                }
+            }
+            if same && *e.add(nlen) == b'=' as crate::ctypes::c_char {
+                crate::malloc::free(e as *mut u8);
+                // 后续整体前移（保持 NULL 终止）。
+                let mut j = i;
+                loop {
+                    *arr.add(j) = *arr.add(j + 1);
+                    if *arr.add(j) == core::ptr::null_mut() {
+                        break;
+                    }
+                    j += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        0
+    }
+}
+
+/// putenv(str)：把 `name=value` 字符串**直接**放进环境表（POSIX：不复制，调用方不得释放）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn putenv(s: *mut crate::ctypes::c_char) -> c_int {
+    unsafe {
+        if s.is_null() {
+            set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        let mut nlen = 0usize;
+        while *s.add(nlen) != 0 && *s.add(nlen) != b'=' as crate::ctypes::c_char {
+            nlen += 1;
+        }
+        if nlen == 0 {
+            set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        if !env_owned() {
+            set_errno(crate::errno::ENOMEM);
+            return -1;
+        }
+        match env_index(s, nlen) {
+            Some(i) => {
+                *ENV_OWNED.add(i) = s;
+                0
+            }
+            None => {
+                if env_push(s) {
+                    0
+                } else {
+                    set_errno(crate::errno::ENOMEM);
+                    -1
+                }
+            }
+        }
+    }
+}
+
+/// clearenv()：清空环境表（此后 getenv 返回 NULL）。返回 0 成功，-1 置 ENOMEM。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clearenv() -> c_int {
+    unsafe {
+        let arr = crate::malloc::malloc(core::mem::size_of::<*mut crate::ctypes::c_char>())
+            as *mut *mut crate::ctypes::c_char;
+        if arr.is_null() {
+            set_errno(crate::errno::ENOMEM);
+            return -1;
+        }
+        *arr = core::ptr::null_mut();
+        if !ENV_OWNED.is_null() {
+            crate::malloc::free(ENV_OWNED as *mut u8);
+        }
+        ENV_OWNED = arr;
+        ENV_CAP = 1;
+        *core::ptr::addr_of_mut!(environ) = arr;
+        0
+    }
+}
+
 /// 由 C 入口桥接在调用 `main` **之前**调用：把入口 argc/argv 交给 libc。
 ///
 /// 为什么需要这一步：环境（envp）位于**进程初始栈**上，只能从入口的 argc/argv 定位

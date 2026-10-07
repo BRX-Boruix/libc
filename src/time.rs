@@ -26,6 +26,113 @@ pub extern "C" fn difftime(t1: time_t, t0: time_t) -> f64 {
     (t1 as f64) - (t0 as f64)
 }
 
+/// CLOCK_REALTIME / CLOCK_MONOTONIC（取值与 Linux 一致）。
+pub const CLOCK_REALTIME: c_int = 0;
+pub const CLOCK_MONOTONIC: c_int = 1;
+
+/// clock_gettime(clk, tp)：取时钟。
+///
+/// **来路（3P6-2 第二波「整项缺失」类，反向对账列出）。**
+///
+/// **诚实边界（S09）**：本系统只有挂钟（gettimeofday）。故 CLOCK_REALTIME 如实填充；
+/// 其余（含 CLOCK_MONOTONIC）**如实返回 -1 置 EINVAL**（POSIX 允许对不支持的时钟报 EINVAL）。
+/// **不**用挂钟冒充单调钟——那会让「测量耗时」的代码在系统时间被调整时给出错的结果。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clock_gettime(clk: c_int, tp: *mut Timespec) -> c_int {
+    unsafe {
+        if tp.is_null() {
+            set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        if clk != CLOCK_REALTIME {
+            set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        if gettimeofday(&mut tv, core::ptr::null_mut()) != 0 {
+            return -1;
+        }
+        (*tp).tv_sec = tv.tv_sec;
+        (*tp).tv_nsec = tv.tv_usec * 1000;
+        0
+    }
+}
+
+/// asctime(tm)：固定格式 "Www Mmm dd hh:mm:ss yyyy\n"（26 字节，含结尾换行）。
+///
+/// **诚实边界**：返回**静态缓冲**（POSIX 允许；ctime 与它共用），故不可重入、下次调用会覆盖。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asctime(t: *const Tm) -> *mut c_char {
+    static mut ASCTIME_BUF: [c_char; 32] = [0; 32];
+    unsafe {
+        let buf = core::ptr::addr_of_mut!(ASCTIME_BUF) as *mut c_char;
+        if t.is_null() {
+            *buf = 0;
+            return buf;
+        }
+        strftime(
+            buf,
+            26,
+            b"%a %b %e %H:%M:%S %Y\n\0".as_ptr() as *const c_char,
+            t,
+        );
+        buf
+    }
+}
+
+/// ctime(t)：等价 asctime(localtime(t))（POSIX；共用同一个静态缓冲）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ctime(t: *const time_t) -> *mut c_char {
+    unsafe {
+        let lt = localtime(t);
+        if lt.is_null() {
+            return core::ptr::null_mut();
+        }
+        asctime(lt)
+    }
+}
+
+/// mktime(tm)：把本地时间结构转成 epoch 秒（POSIX）。
+///
+/// **诚实边界（S09）**：本系统没有时区数据（见 localtime 的说明），故「本地时间」即 UTC——
+/// 在本系统上 mktime 与 timegm 是同一个函数。
+///
+/// **归一化**：POSIX 允许/要求 mktime 归一化越界字段。下面用的是线性公式（Howard Hinnant 的
+/// days_from_civil），故日/时/分/秒的越界自然进位；月先按 12 进位到年。归一化后的字段用
+/// **localtime 反解**写回（同一事实来源，不另写一套反解）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mktime(t: *mut Tm) -> time_t {
+    unsafe {
+        if t.is_null() {
+            set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        let mut year = (*t).tm_year + 1900;
+        let mut mon = (*t).tm_mon;
+        year += mon.div_euclid(12);
+        mon = mon.rem_euclid(12);
+        let m = mon + 1;
+        let d = (*t).tm_mday;
+        let h = (*t).tm_hour;
+        let mi = (*t).tm_min;
+        let s = (*t).tm_sec;
+        let y = if m <= 2 { year - 1 } else { year };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let mp = if m > 2 { m - 3 } else { m + 9 };
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era as i64 * 146097 + doe as i64 - 719468;
+        let secs = days * 86400 + h as i64 * 3600 + mi as i64 * 60 + s as i64;
+        let tt = secs as time_t;
+        let lt = localtime(&tt);
+        if !lt.is_null() {
+            *t = *lt;
+        }
+        tt
+    }
+}
+
 /// \`time(tloc)\`：返回 Unix epoch 秒；tloc 非空则写入。
 #[unsafe(no_mangle)]
 pub extern "C" fn time(tloc: *mut time_t) -> time_t {

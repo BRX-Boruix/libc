@@ -47,6 +47,14 @@ unsigned long long strtoull(const char *s, char **endptr, int base);
 double strtod(const char *s, char **endptr);
 /* atof：等价 strtod(s, NULL)。3P6-2 第二波「整项缺失」类，反向对账（audit_posix_surface.py）列出。 */
 double atof(const char *s);
+
+/* 环境表修改（3P6-2 第二波「整项缺失」类，反向对账列出）。
+ * 诚实边界：环境表是进程全局的，本实现不加锁——并发 setenv/putenv 与 getenv 需调用方自行同步。
+ * putenv 不复制字符串（POSIX：该字符串成为环境的一部分，调用方不得释放）。 */
+int setenv(const char *name, const char *value, int overwrite);
+int unsetenv(const char *name);
+int putenv(char *string);
+int clearenv(void);
 float strtof(const char *s, char **endptr);
 long double strtold(const char *s, char **endptr);
 

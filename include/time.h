@@ -47,6 +47,17 @@ clock_t clock(void);
 size_t strftime(char *s, size_t max, const char *format, const struct tm *tm);
 /* difftime：两时刻之差（秒，double）。3P6-2 第二波「整项缺失」类，反向对账列出。 */
 double difftime(time_t t1, time_t t0);
+
+/* 3P6-2 第二波「整项缺失」类（反向对账列出）：asctime/ctime/mktime/clock_gettime。 */
+char *asctime(const struct tm *tm);
+char *ctime(const time_t *t);
+time_t mktime(struct tm *tm);
+
+/* clock_gettime：本系统只有挂钟。CLOCK_REALTIME 如实填充；其余（含 CLOCK_MONOTONIC）
+ * **如实返回 -1 置 EINVAL**（POSIX 允许），不用挂钟冒充单调钟。 */
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+int clock_gettime(int clk_id, struct timespec *tp);
 int sleep(unsigned seconds);
 int usleep(unsigned useconds);
 int nanosleep(const struct timespec *req, void *rem);
