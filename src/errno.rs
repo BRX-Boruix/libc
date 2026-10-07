@@ -118,6 +118,13 @@ pub const ELOOP: i32 = 40;
 pub const ESPIPE: i32 = 29;
 /// 只读文件系统 EROFS。
 pub const EROFS: i32 = 30;
+/// 操作不允许 EPERM。
+///
+/// **诚实边界**：内核只有**一个** `PermissionDenied`，本 libc 把它映射到 `EACCES`（文件访问
+/// 语义，见 `from_libsys`）。故**内核错误永远不会产生 `EPERM`**——本常量存在是为了让 C 程序
+/// 能比较（头文件一直有 `#define EPERM`，而 Rust 侧此前没有，两侧不对称，由
+/// `libc/tools/audit_errno_sync.py` 列出）。
+pub const EPERM: i32 = 1;
 /// 资源忙 EBUSY。
 pub const EBUSY: i32 = 16;
 /// 文件系统结构损坏 EUCLEAN。
