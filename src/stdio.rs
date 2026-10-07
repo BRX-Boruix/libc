@@ -465,6 +465,19 @@ pub unsafe extern "C" fn fwrite(ptr: *const c_void, size: size_t, nmemb: size_t,
     }
 }
 
+/// `fflush(fp)`：冲刷流的输出缓冲（POSIX）。
+///
+/// **本实现是刻意的空操作——不是未接线的桩**：本 libc 的 stdio **不做用户态缓冲**，
+/// `fwrite`/`fputc`/`fputs`/`vfprintf` 每次调用都直接把字节交给内核（见 `fio_write` 的说明），
+/// 因此**没有待冲刷的数据**，返回 0 就是事实。`fflush(NULL)`（冲刷全部流）同理。
+///
+/// **边界（S09，必须与缓冲层一起读）**：这条「空操作」与缓冲层是**同一个决定的两面**——
+/// `setvbuf`/`setbuf` 之所以被判定为不支持（`docs/TODO/libc-posix-surface.md` 的 B 类），
+/// 正是因为本 libc 没有缓冲层。一旦实现了缓冲层，`fflush` **必须同时获得真实语义**
+/// （把缓冲写出去 + 复位游标），否则它就从「诚实的空操作」退化成**静默丢数据**。
+///
+/// 此前本函数没有文档注释，于是它在桩符号普查（`libc/tools/audit_stub_symbols.py`）里
+/// 与真正的桩无法区分——「刻意的空操作」必须**写出来**才成立。
 #[unsafe(no_mangle)]
 pub extern "C" fn fflush(_fp: *mut FILE) -> c_int {
     0
