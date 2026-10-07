@@ -50,6 +50,7 @@ mod float_bigint;
 pub mod libgen;
 pub mod locale;
 pub mod longdouble;
+pub mod math_decomp;
 pub mod malloc;
 pub mod mman;
 pub mod process;
