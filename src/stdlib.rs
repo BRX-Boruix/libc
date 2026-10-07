@@ -1041,7 +1041,9 @@ pub struct LDivT {
 }
 // ---------- 排序与二分查找（qsort/bsearch） ----------
 
-type CmpFn = unsafe extern "C" fn(a: *const c_void, b: *const c_void) -> c_int;
+/// 比较器类型（`qsort`/`bsearch` 共用）。**pub**：`scandir`（dirent.rs）要复用它调 `qsort`，
+/// 而不是另写一套排序（S15 单点）。
+pub type CmpFn = unsafe extern "C" fn(a: *const c_void, b: *const c_void) -> c_int;
 
 /// 交换两个 `size` 字节元素（不重叠，逐字节）。
 unsafe fn swap_bytes(a: *mut u8, b: *mut u8, size: usize) {

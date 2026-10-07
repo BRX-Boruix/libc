@@ -28,6 +28,21 @@ typedef struct DIR DIR; /* 不透明：内部结构属实现细节 */
 DIR *opendir(const char *path);
 struct dirent *readdir(DIR *dirp);
 int closedir(DIR *dirp);
-int rewinddir(DIR *dirp);
+/* rewinddir 按 POSIX 返回 void（此前这里误声明为 int——与 POSIX 不符，已改正）。 */
+void rewinddir(DIR *dirp);
+
+/* telldir/seekdir：目录流位置。本系统的目录流是**打开时的快照**，故位置就是项序号；
+ * telldir 的返回值对调用方不透明，只保证可传给同一流的 seekdir（POSIX 契约）。
+ * 3P6-2 第二波 C2 核实：内核/libsys 不需要新能力，纯粹是本层实现——已落地。 */
+long telldir(DIR *dirp);
+void seekdir(DIR *dirp, long loc);
+
+/* scandir：把目录项读成排序后的数组（元素与数组都由 malloc 分配，调用方逐个 free）。
+ * compar 常用 alphasort（本实现用 strcmp：本系统只有 C locale，POSIX 的 strcoll 已判不支持）。 */
+int scandir(const char *dirp,
+            struct dirent ***namelist,
+            int (*filter)(const struct dirent *),
+            int (*compar)(const struct dirent **, const struct dirent **));
+int alphasort(const struct dirent **a, const struct dirent **b);
 
 #endif /* _DIRENT_H */

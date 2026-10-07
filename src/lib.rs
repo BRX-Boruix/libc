@@ -53,6 +53,7 @@ pub mod glob;
 pub mod posix_batch2;
 pub mod posix_batch3;
 pub mod posix_batch4;
+pub mod posix_batch5;
 pub mod regex;
 pub mod longdouble;
 pub mod math_decomp;

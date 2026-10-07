@@ -123,6 +123,12 @@ extern char *optarg;
 extern int optind, opterr, optopt;
 int getopt(int argc, char *const argv[], const char *optstring);
 
+/* 主机名与登录名（POSIX 归属 unistd.h；实现在 libc/src/posix_batch5.rs）。
+ * **诚实边界**：本系统**没有主机名概念**（内核/libsys 均无数据源，已核实）⇒ gethostname 如实
+ * 写空串；getlogin 查 LOGNAME/USER，都没有则如实返回 NULL。两者都**不编造**名字。 */
+int gethostname(char *name, size_t len);
+char *getlogin(void);
+
 /* exit/_Exit/abort/atexit 归 <stdlib.h>（POSIX 归属）；unistd.h 只留 _exit。 */
 __attribute__((noreturn)) void _exit(int status);
 
