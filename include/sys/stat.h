@@ -51,6 +51,15 @@ struct stat {
 #define S_ISFIFO(m) (((m) & S_IFMT) == S_IFIFO)
 #define S_ISSOCK(m) (((m) & S_IFMT) == S_IFSOCK)
 
+/* POSIX/glibc 的便捷访问宏：st_atime/st_mtime/st_ctime 就是对应 timespec 的 tv_sec。
+ *
+ * 来路（3P6-2 第二波，真实报错驱动）：新写的 ls 工具（tools/3psrc/bxls）在系统内用 tcc
+ * 编译时报 `bxls.c:76: error: field not found: st_mtime`——本头文件只暴露了 `st_mtim`，
+ * 而真实程序写的是 POSIX 名字。补上同名宏，**不另造字段**（语义与 glibc 完全一致）。 */
+#define st_atime st_atim.tv_sec
+#define st_mtime st_mtim.tv_sec
+#define st_ctime st_ctim.tv_sec
+
 int stat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);
 int chmod(const char *path, mode_t mode);
