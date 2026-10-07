@@ -63,6 +63,13 @@ pid_t gettid(void);
  * （此前 F_DUPFD 已实现，但 POSIX 的 dup() 本身既没实现也没声明）。 */
 int dup(int fd);
 
+/* rmdir / truncate / getppid：3P6-2 第二波「整项缺失」类（反向对账列出）。
+ * truncate 走 open+ftruncate+close（内核只有按 fd 的 ftruncate）；rmdir 复用内核 unlink
+ * （它同时支持删空目录）；getppid 数据来自 procfs 快照。 */
+int rmdir(const char *path);
+int truncate(const char *path, off_t length);
+pid_t getppid(void);
+
 /* 身份查询（POSIX 归属 unistd.h；实现在 libc/src/process.rs，数据源 libsys::identity_query）。
  * **诚实边界**：本系统内核只维护一份 uid/gid，**没有** real/effective 之分，
  * 故 geteuid()==getuid()、getegid()==getgid()——这是事实陈述，不是占位。 */

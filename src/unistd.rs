@@ -749,6 +749,58 @@ pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
     }
 }
 
+/// rmdir(path)：删除**空目录**（POSIX）。
+///
+/// 来路（3P6-2 第二波「整项缺失」类，反向对账列出）。**实现说明**：内核的 unlink 同时支持
+/// 删文件与空目录（见 remove 的说明），POSIX 的 rmdir 只是「只接受目录」的那一半语义——
+/// 内核在非目录/非空目录上如实报错，故这里复用同一调用，不另造路径。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
+    if path.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let p = match unsafe { crate::stdio::cstr_to_str(path) } {
+        Some(s) => s,
+        None => {
+            set_errno(EINVAL);
+            return -1;
+        }
+    };
+    match libsys::unlink(p) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
+/// truncate(path, length)：把**路径**上的文件截断/扩展到指定长度（POSIX）。
+///
+/// 来路（3P6-2 第二波「整项缺失」类，反向对账列出）。**实现说明**：内核只有按 fd 的
+/// ftruncate（libsys::ftruncate），故这里按 POSIX 允许的方式实现：open(O_WRONLY) + ftruncate
+/// + close。POSIX 的 truncate 本来就要求调用方对文件有写权限，故语义一致。
+/// close 可能覆盖 errno，故先保存 ftruncate 的 errno 再在失败时恢复。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn truncate(path: *const c_char, length: crate::ctypes::off_t) -> c_int {
+    if path.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let fd = unsafe { open(path, O_WRONLY, 0) };
+    if fd < 0 {
+        return -1;
+    }
+    let rc = ftruncate(fd, length);
+    let saved = unsafe { *crate::errno::__errno_location() };
+    close(fd);
+    if rc != 0 {
+        unsafe { *crate::errno::__errno_location() = saved; }
+    }
+    rc
+}
+
 /// fcntl 命令常量（x86_64 Linux ABI）。
 pub const F_DUPFD: c_int = 0;
 pub const F_GETFD: c_int = 1;

@@ -45,6 +45,8 @@ long long strtoll(const char *s, char **endptr, int base);
 unsigned long long strtoull(const char *s, char **endptr, int base);
 
 double strtod(const char *s, char **endptr);
+/* atof：等价 strtod(s, NULL)。3P6-2 第二波「整项缺失」类，反向对账（audit_posix_surface.py）列出。 */
+double atof(const char *s);
 float strtof(const char *s, char **endptr);
 long double strtold(const char *s, char **endptr);
 

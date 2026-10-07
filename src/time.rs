@@ -17,6 +17,15 @@ pub type clock_t = i64;
 /// 每秒时钟滴答数（与 \`clock()\` 返回值换算；本实现用纳秒）。
 pub const CLOCKS_PER_SEC: clock_t = 1_000_000_000;
 
+/// difftime(t1, t0)：两个时刻之差（秒，double）。
+///
+/// 来路（3P6-2 第二波「整项缺失」类，反向对账列出）。**为什么返回 double**：POSIX 规定如此
+/// ——整数减法在 time_t 为 32 位时可能溢出，用浮点差是标准要求的语义。
+#[unsafe(no_mangle)]
+pub extern "C" fn difftime(t1: time_t, t0: time_t) -> f64 {
+    (t1 as f64) - (t0 as f64)
+}
+
 /// \`time(tloc)\`：返回 Unix epoch 秒；tloc 非空则写入。
 #[unsafe(no_mangle)]
 pub extern "C" fn time(tloc: *mut time_t) -> time_t {

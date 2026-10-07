@@ -45,6 +45,8 @@ clock_t clock(void);
  *
  * 支持集与"未实现项"的显式清单见 libc/src/time.rs 的 strftime 文档（S09 不夸大）。 */
 size_t strftime(char *s, size_t max, const char *format, const struct tm *tm);
+/* difftime：两时刻之差（秒，double）。3P6-2 第二波「整项缺失」类，反向对账列出。 */
+double difftime(time_t t1, time_t t0);
 int sleep(unsigned seconds);
 int usleep(unsigned useconds);
 int nanosleep(const struct timespec *req, void *rem);

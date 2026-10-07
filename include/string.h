@@ -25,6 +25,9 @@ char *strchr(const char *s, int c);
 char *strrchr(const char *s, int c);
 char *strstr(const char *hay, const char *needle);
 char *strdup(const char *s);
+/* strndup：复制至多 n 字节（POSIX.1-2008）。3P6-2 第二波「整项缺失」类，由
+ * libc/tools/audit_posix_surface.py 的反向对账列出。 */
+char *strndup(const char *s, size_t n);
 size_t strspn(const char *s, const char *accept);
 size_t strcspn(const char *s, const char *reject);
 char *strpbrk(const char *s, const char *accept);

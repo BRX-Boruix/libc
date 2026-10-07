@@ -262,6 +262,15 @@ pub unsafe extern "C" fn atoll(s: *const crate::ctypes::c_char) -> c_longlong {
     strtoll(s, core::ptr::null_mut(), 10)
 }
 
+/// atof(s)：字符串转 double（等价 strtod(s, NULL)）。
+///
+/// 来路（3P6-2 第二波「整项缺失」类，反向对账列出）：strtod 早已实现，atof 只是它的
+/// 无 endptr 形态——不另写一套解析，避免两份事实来源。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn atof(s: *const crate::ctypes::c_char) -> f64 {
+    strtod(s, core::ptr::null_mut())
+}
+
 /// \`strtol(s, endptr, base)\`：字符串转 long。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtol(

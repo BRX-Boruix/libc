@@ -262,6 +262,30 @@ pub unsafe extern "C" fn strdup(s: *const c_char) -> *mut c_char {
         p
     }
 }
+
+/// strndup(s, n)：复制**至多 n 字节**到新分配内存（POSIX.1-2008）。
+///
+/// 来路（3P6-2 第二波「整项缺失」类，由 libc/tools/audit_posix_surface.py 反向对账列出）：
+/// 与 strdup 同一套分配逻辑，只是长度取 min(strlen(s), n)。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strndup(s: *const c_char, n: size_t) -> *mut c_char {
+    unsafe {
+        if s.is_null() {
+            return core::ptr::null_mut();
+        }
+        let mut len = 0usize;
+        while len < n && *s.add(len) != 0 {
+            len += 1;
+        }
+        let p = crate::malloc::malloc(len + 1) as *mut c_char;
+        if !p.is_null() {
+            core::ptr::copy_nonoverlapping(s, p, len);
+            *p.add(len) = 0;
+        }
+        p
+    }
+}
+
 /// \`strspn(s, accept)\`：返回 s 开头连续由 accept 中字符组成的长度。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strspn(s: *const c_char, accept: *const c_char) -> size_t {

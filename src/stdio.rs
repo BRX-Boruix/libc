@@ -431,6 +431,69 @@ pub unsafe extern "C" fn putc(c: c_int, fp: *mut FILE) -> c_int {
     unsafe { fputc(c, fp) }
 }
 
+/// fileno(fp)：返回 FILE 背后的文件描述符。
+///
+/// 来路（3P6-2 第二波「整项缺失」类，反向对账列出）：本 libc 的 FILE 结构本就带 fd，
+/// 这个访问器只是把它暴露给 C。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fileno(fp: *mut FILE) -> c_int {
+    unsafe {
+        if fp.is_null() {
+            set_errno(EINVAL);
+            return -1;
+        }
+        (*fp).fd as c_int
+    }
+}
+
+/// clearerr(fp)：清除 EOF 与错误标志（POSIX）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clearerr(fp: *mut FILE) {
+    unsafe {
+        if fp.is_null() {
+            return;
+        }
+        (*fp).eof = false;
+        (*fp).error = false;
+    }
+}
+
+/// rewind(fp)：回到流开头并清除错误标志（POSIX）。
+///
+/// **为什么走 lseek 而不是本文件的 fseek**：fseek/ftell 目前是**未接线的桩**（忽略参数直接
+/// 返回）。在它们接线之前用它们会把 rewind 也变成静默无效——那正是 S09 要避免的
+/// 「看起来能用、实际没做事」。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rewind(fp: *mut FILE) {
+    unsafe {
+        if fp.is_null() {
+            return;
+        }
+        let _ = crate::unistd::lseek((*fp).fd as c_int, 0, 0 /* SEEK_SET */);
+        clearerr(fp);
+    }
+}
+
+/// perror(s)：把 `s: <errno 描述>` 打到 stderr（POSIX）。
+///
+/// **实现说明**：不用 fprintf（需要可变参数转发），而是分段落 fputs——输出与 POSIX 规定
+/// 的格式一致（`s` 为空或 NULL 时只打描述）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perror(s: *const c_char) {
+    unsafe {
+        let e = *crate::errno::__errno_location();
+        let msg = crate::string::strerror(e);
+        if !s.is_null() && *s != 0 {
+            fputs(s, stderr);
+            fputs(b": \0".as_ptr() as *const c_char, stderr);
+        }
+        if !msg.is_null() {
+            fputs(msg, stderr);
+        }
+        fputs(b"\n\0".as_ptr() as *const c_char, stderr);
+    }
+}
+
 /// \`fgets(s, n, fp)\`：从 fp 读取至多 n-1 字符，遇换行或 EOF 停止，结果 NUL 终止。
 /// 返回 s；读到 EOF 且无字符时返回 NULL。
 #[unsafe(no_mangle)]

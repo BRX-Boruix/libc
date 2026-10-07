@@ -100,6 +100,40 @@ pub extern "C" fn getegid() -> crate::ctypes::gid_t {
     getgid()
 }
 
+/// getppid()：父进程 pid。
+///
+/// **来路（3P6-2 第二波「整项缺失」类）**：父 pid 由内核经 procfs 暴露
+/// （`vfs/src/procfs.rs` 的 ppid 字段），libsys 已有 `ps_list()` 把它解析成 `PsEntry`——
+/// 缺的只是 libc 这一层。
+///
+/// **诚实边界（S09）**：数据来自 procfs 的**一次快照读**；返回的是快照时刻的真实父子关系，
+/// 不是缓存、不是猜测。POSIX 规定本函数不会失败，故查不到时返回 0（防御性分支；正常进程
+/// 一定在进程表里）。
+#[unsafe(no_mangle)]
+pub extern "C" fn getppid() -> c_int {
+    let me = match libsys::getpid() {
+        Ok(p) => p,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            return 0;
+        }
+    };
+    match libsys::ps_list() {
+        Ok(list) => {
+            for e in list.iter() {
+                if e.pid as u64 == me {
+                    return e.ppid as c_int;
+                }
+            }
+            0
+        }
+        Err(e) => {
+            set_errno(from_libsys(e));
+            0
+        }
+    }
+}
+
 /// `kill(pid, sig)`：向进程发信号。返回 0 或 -1（置 errno）。
 #[unsafe(no_mangle)]
 pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {

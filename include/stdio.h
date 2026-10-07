@@ -50,6 +50,11 @@ ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *fp);
 ssize_t getline(char **lineptr, size_t *n, FILE *fp);
 int feof(FILE *fp);
 int ferror(FILE *fp);
+/* 以下 4 项由 3P6-2 第二波的反向对账（libc/tools/audit_posix_surface.py）列出。 */
+int fileno(FILE *fp);
+void clearerr(FILE *fp);
+void rewind(FILE *fp);
+void perror(const char *s);
 int fseek(FILE *fp, long offset, int whence);
 long ftell(FILE *fp);
 
