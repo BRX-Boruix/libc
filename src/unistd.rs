@@ -773,25 +773,8 @@ pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, args: ...) -> c_int {
     match cmd {
         F_DUPFD => {
             let arg = unsafe { ap.next_arg::<c_int>() };
-            let mut candidate: usize = if arg >= 0 { arg as usize } else { 0 };
-            const MAX_FDS: usize = 1024;
-            loop {
-                if candidate >= MAX_FDS {
-                    set_errno(crate::errno::EMFILE);
-                    return -1;
-                }
-                // 探测 candidate 是否空闲：dup2(candidate,candidate) 恒非破坏。
-                match libsys::dup2(candidate as u64, candidate as u64) {
-                    Ok(_) => { candidate += 1; }
-                    Err(libsys::Error::NotFound) => {
-                        return match libsys::dup2(fd as u64, candidate as u64) {
-                            Ok(_) => candidate as c_int,
-                            Err(e) => { set_errno(from_libsys(e)); -1 }
-                        };
-                    }
-                    Err(e) => { set_errno(from_libsys(e)); return -1; }
-                }
-            }
+            // 与 dup() 共用同一实现（单点）：dup(fd) 按 POSIX 就等价于 F_DUPFD 且 arg=0。
+            return dupfd_from(fd, arg);
         }
         F_GETFD => 0, // 无 fd 标志（无 CLOEXEC 概念）。
         F_SETFD => {
@@ -809,6 +792,58 @@ pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, args: ...) -> c_int {
         }
     }
 }
+/// 把 `fd` 复制到 `>= min` 的最低空闲槽（`fcntl(F_DUPFD)` 与 `dup()` 的**共同实现**）。
+///
+/// 探测手法：`dup2(n, n)` 在 `old == new` 时**仅校验存在性**（内核 sys_dup2 明确如此），
+/// 故它是非破坏性的「该槽是否被占用」探针——这比 `fcntl(F_GETFD)` 更可靠（后者在本系统
+/// 恒返回 0，无法区分占用与否）。
+///
+/// 成功后把用户态维护的「每 fd 文件位置」从 `fd` 复制到新 fd：POSIX 要求 dup/dup2/F_DUPFD
+/// 的副本与原 fd **共享**同一文件偏移（与 close 清位置对偶）。
+fn dupfd_from(fd: c_int, min: c_int) -> c_int {
+    let mut candidate: usize = if min >= 0 { min as usize } else { 0 };
+    const MAX_FDS: usize = 1024;
+    loop {
+        if candidate >= MAX_FDS {
+            set_errno(crate::errno::EMFILE);
+            return -1;
+        }
+        match libsys::dup2(candidate as u64, candidate as u64) {
+            Ok(_) => candidate += 1,
+            Err(libsys::Error::NotFound) => {
+                let newfd = match libsys::dup2(fd as u64, candidate as u64) {
+                    Ok(_) => candidate as c_int,
+                    Err(e) => {
+                        set_errno(from_libsys(e));
+                        return -1;
+                    }
+                };
+                fd_pos_lock();
+                match fd_pos_get(fd) {
+                    Some(v) => fd_pos_set(newfd, v),
+                    None => fd_pos_clear(newfd),
+                }
+                fd_pos_unlock();
+                return newfd;
+            }
+            Err(e) => {
+                set_errno(from_libsys(e));
+                return -1;
+            }
+        }
+    }
+}
+
+/// dup(fd)：复制 fd 到**最低空闲**槽（POSIX）。
+///
+/// **来路（3P6-2 第二波，「整项缺失」类）**：`fcntl(F_DUPFD)` 里早已有这套非破坏探测逻辑，
+/// 但 POSIX 的 `dup()` 本身既没实现也没声明（`libc/tools/audit_posix_surface.py` 的反向对账
+/// 把它列了出来）。复用同一实现，故语义与 `fcntl(fd, F_DUPFD, 0)` 逐字一致。
+#[unsafe(no_mangle)]
+pub extern "C" fn dup(fd: c_int) -> c_int {
+    dupfd_from(fd, 0)
+}
+
 // ---------- struct stat / stat / fstat / chmod / rename ----------
 
 /// struct timespec (stat 时间戳用)。

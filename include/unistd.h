@@ -57,6 +57,20 @@ pid_t fork(void);
 pid_t getpid(void);
 pid_t gettid(void);
 
+/* dup：复制 fd 到最低空闲槽（POSIX）。与 fcntl(fd, F_DUPFD, 0) 同实现、同语义，
+ * 副本与原 fd 共享文件偏移。
+ * 3P6-2 第二波「整项缺失」类：由 libc/tools/audit_posix_surface.py 的反向对账列出
+ * （此前 F_DUPFD 已实现，但 POSIX 的 dup() 本身既没实现也没声明）。 */
+int dup(int fd);
+
+/* 身份查询（POSIX 归属 unistd.h；实现在 libc/src/process.rs，数据源 libsys::identity_query）。
+ * **诚实边界**：本系统内核只维护一份 uid/gid，**没有** real/effective 之分，
+ * 故 geteuid()==getuid()、getegid()==getgid()——这是事实陈述，不是占位。 */
+uid_t getuid(void);
+uid_t geteuid(void);
+gid_t getgid(void);
+gid_t getegid(void);
+
 /* exit/_Exit/abort/atexit 归 <stdlib.h>（POSIX 归属）；unistd.h 只留 _exit。 */
 __attribute__((noreturn)) void _exit(int status);
 

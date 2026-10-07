@@ -45,6 +45,61 @@ pub extern "C" fn getpid() -> c_int {
     }
 }
 
+/// 查询本进程真实身份（uid/gid/caps）的**单一入口**。
+///
+/// 四项 get*id 的 POSIX 语义完全一致（查不到才置 errno），故只在这里查一次、只写一份错误路径。
+/// 失败时返回 None（**不**返回 0——0 是 root 的合法 uid，兜底就等于伪造身份，S09 不允许）。
+fn query_identity() -> Option<libsys::IdentityInfo> {
+    match libsys::identity_query() {
+        Ok(i) => Some(i),
+        Err(e) => {
+            set_errno(from_libsys(e));
+            None
+        }
+    }
+}
+
+/// getuid()：本进程的**真实** uid。
+///
+/// **来路（3P6-2 第二波，「整项缺失」类）**：内核早有 identity_query
+/// （IdentityInfo 12 字节，uid@0 / gid@4 / caps@8，编译期断言钉死），libsys 也已公开
+/// re-export（libsys::identity_query）——缺的只是 libc 这一层。这类「能力已存在、C 面没暴露」
+/// 的缺口是**查不出来**的（名字审计只看已导出项），故新增 libc/tools/audit_posix_surface.py
+/// 做反向对账（清单 vs 实现）。
+///
+/// **诚实边界（S09）**：本系统内核只维护**一份** uid/gid，**没有** real/effective 之分，
+/// 故 geteuid() 与 getuid() 返回同一值（gid 同理）——这是事实陈述，不是偷懒。
+/// POSIX 规定本函数不会失败；内核仅在「无当前进程」的内核上下文返回 PermissionDenied，
+/// 用户进程走不到，故此处的 (uid_t)-1 是**防御性**分支而非正常返回。
+#[unsafe(no_mangle)]
+pub extern "C" fn getuid() -> crate::ctypes::uid_t {
+    match query_identity() {
+        Some(i) => i.uid,
+        None => (-1i32) as crate::ctypes::uid_t,
+    }
+}
+
+/// geteuid()：有效 uid。本系统无 real/effective 之分，故与 getuid() 同值（见其说明）。
+#[unsafe(no_mangle)]
+pub extern "C" fn geteuid() -> crate::ctypes::uid_t {
+    getuid()
+}
+
+/// getgid()：本进程的**真实** gid。
+#[unsafe(no_mangle)]
+pub extern "C" fn getgid() -> crate::ctypes::gid_t {
+    match query_identity() {
+        Some(i) => i.gid,
+        None => (-1i32) as crate::ctypes::gid_t,
+    }
+}
+
+/// getegid()：有效 gid。本系统无 real/effective 之分，故与 getgid() 同值。
+#[unsafe(no_mangle)]
+pub extern "C" fn getegid() -> crate::ctypes::gid_t {
+    getgid()
+}
+
 /// `kill(pid, sig)`：向进程发信号。返回 0 或 -1（置 errno）。
 #[unsafe(no_mangle)]
 pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {

@@ -62,12 +62,37 @@ def exported_functions():
     return out
 
 
+def strip_comments(text):
+    """去掉 C 注释。
+
+    **为什么必须去注释（第 60 轮的假阴性教训）**：本审计的判据是"名字出现过即算声明"，
+    于是**只出现在注释里**的名字会被误判为已声明——实测 `fcntl` 就是这样漏掉的：
+    实现在 unistd.rs、<fcntl.h> 里只在别处的注释中提到，而 wave2.c 在系统内编译时
+    报 `implicit declaration of function 'fcntl'`。
+    """
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
 def header_text():
     chunks = []
     for root, _dirs, files in os.walk(INC):
         for f in files:
             if f.endswith(".h"):
-                chunks.append(open(os.path.join(root, f), encoding="utf-8", errors="replace").read())
+                raw = open(os.path.join(root, f), encoding="utf-8", errors="replace").read()
+                chunks.append(strip_comments(raw))
     return "\n".join(chunks)
 
 
