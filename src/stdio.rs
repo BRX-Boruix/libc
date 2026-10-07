@@ -251,7 +251,9 @@ pub unsafe extern "C" fn freopen(
         Ok(newfd) => {
             let f = unsafe { &mut *fp };
             if !f.closed {
-                let _ = libsys::close(f.fd);
+                // 同 fclose：必须经 libc 的 close 清掉该 fd 的位置表条目，否则新绑定的流会
+                // 带着旧文件的位置（fd 号复用是常态）。
+                let _ = crate::unistd::close(f.fd as c_int);
             }
             f.fd = newfd;
             f.mode = fm;
@@ -337,7 +339,7 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
             let fp = unsafe { alloc_file(fd, fm) };
             if fp.is_null() {
                 // 分配失败：关掉刚打开的 fd，避免泄漏。
-                let _ = libsys::close(fd);
+                let _ = crate::unistd::close(fd as c_int);
                 return core::ptr::null_mut();
             }
             fp
@@ -365,10 +367,39 @@ pub unsafe extern "C" fn fclose(fp: *mut FILE) -> c_int {
         f.closed = true;
         // tmpfile 的延迟删除：先删文件再关 fd（顺序无关，但先删更贴近 POSIX 语义）。
         tmp_release(fd as c_int);
-        let _ = libsys::close(fd);
+        // **必须经 libc 的 close**（不是 libsys::close）：libc 的 close 会 `fd_pos_clear` 清掉
+        // 用户态 fd 位置表里的条目。直接用 libsys::close 会**留下陈旧位置**——fd 号被复用时
+        // 新流会带着上一个文件的位置，`fwrite` 于是走 `pwrite` 写到错误偏移。
+        // 实测（tools/3psrc/libcc1 的对照实验）：tmpfile 读到 13 后关闭，同一 fd 号被
+        // `fopen("w+")` 复用，写入落在偏移 13 ⇒ 文件大小 25（13+12）而开头 13 字节是 0。
+        let _ = crate::unistd::close(fd as c_int);
         crate::malloc::free(fp as *mut u8);
     }
     0
+}
+
+/// FILE 层读写**单点**：所有流式 I/O 都经 libc 的 `read`/`write`，而不是直接调 `libsys`。
+///
+/// **为什么必须这样**（本轮实测的缺陷根因，不是风格问题）：`fseek`/`rewind` 把位置记在
+/// **用户态的 fd 位置表**（libc/src/unistd.rs 的 `FD_POS`），而 libc 的 `read`/`write` 在
+/// 该表已跟踪该 fd 时会改走**定位 I/O**（`pread`/`pwrite`）。此前 stdio 直接调
+/// `libsys::read`/`libsys::write`（内核维护的**顺序**偏移）——**完全绕过那张表**，于是
+/// `fseek(f, 0, SEEK_SET)` 之后再 `fread` 读到的仍是内核偏移处的数据：顺序写 12 字节后
+/// 内核偏移已是 12 ⇒ 读到 **EOF（0 字节）**。实测普通文件与 `tmpfile` 都一样；
+/// 对照实验（`tools/3psrc/libcc1`）把它与「unlink 之后写入不可见」明确区分开。
+///
+/// 统一走这里之后，FILE 流的位置语义与 `read`/`lseek` **同源**（S15）——
+/// 也顺带让 `fseek` 之后 `fwrite` 真的从新位置写。
+///
+/// 返回 `isize`（同 POSIX `read`/`write`）：`< 0` 表示失败，**errno 已由 libc 的
+/// `read`/`write` 设好**，故调用方**不得**再 `set_errno` 覆盖它。
+#[inline]
+fn fio_read(fd: u64, buf: &mut [u8]) -> isize {
+    unsafe { crate::unistd::read(fd as c_int, buf.as_mut_ptr() as *mut c_void, buf.len()) }
+}
+#[inline]
+fn fio_write(fd: u64, buf: &[u8]) -> isize {
+    unsafe { crate::unistd::write(fd as c_int, buf.as_ptr() as *const c_void, buf.len()) }
 }
 
 #[unsafe(no_mangle)]
@@ -389,15 +420,16 @@ pub unsafe extern "C" fn fread(ptr: *mut c_void, size: size_t, nmemb: size_t, fp
             return 0;
         }
         let buf = core::slice::from_raw_parts_mut(ptr as *mut u8, total);
-        match libsys::read(f.fd, buf) {
-            Ok(n) => {
+        match fio_read(f.fd, buf) {
+            n if n >= 0 => {
+                let n = n as usize;
                 if n < total {
                     f.eof = true;
                 }
                 n / size
             }
-            Err(e) => {
-                set_errno(from_libsys(e));
+            _ => {
+                // errno 已由 libc 的 read 设好，不覆盖。
                 f.error = true;
                 0
             }
@@ -423,10 +455,9 @@ pub unsafe extern "C" fn fwrite(ptr: *const c_void, size: size_t, nmemb: size_t,
             return 0;
         }
         let buf = core::slice::from_raw_parts(ptr as *const u8, total);
-        match libsys::write(f.fd, buf) {
-            Ok(n) => n / size,
-            Err(e) => {
-                set_errno(from_libsys(e));
+        match fio_write(f.fd, buf) {
+            n if n >= 0 => n as usize / size,
+            _ => {
                 f.error = true;
                 0
             }
@@ -455,11 +486,10 @@ pub unsafe extern "C" fn fgetc(fp: *mut FILE) -> c_int {
             return c as c_int;
         }
         let mut b = [0u8; 1];
-        match libsys::read(f.fd, &mut b) {
-            Ok(0) => { f.eof = true; EOF }
-            Ok(_) => b[0] as c_int,
-            Err(e) => {
-                set_errno(from_libsys(e));
+        match fio_read(f.fd, &mut b) {
+            0 => { f.eof = true; EOF }
+            n if n > 0 => b[0] as c_int,
+            _ => {
                 f.error = true;
                 EOF
             }
@@ -499,10 +529,9 @@ pub unsafe extern "C" fn fputc(c: c_int, fp: *mut FILE) -> c_int {
             return EOF;
         }
         let b = [(c & 0xFF) as u8; 1];
-        match libsys::write(f.fd, &b) {
-            Ok(_) => c & 0xFF,
-            Err(e) => {
-                set_errno(from_libsys(e));
+        match fio_write(f.fd, &b) {
+            n if n >= 0 => c & 0xFF,
+            _ => {
                 f.error = true;
                 EOF
             }
@@ -624,20 +653,19 @@ pub unsafe extern "C" fn fgets(s: *mut c_char, n: c_int, fp: *mut FILE) -> *mut 
                 continue;
             }
             let mut b = [0u8; 1];
-            match libsys::read(f.fd, &mut b) {
-                Ok(0) => {
+            match fio_read(f.fd, &mut b) {
+                0 => {
                     f.eof = true;
                     break;
                 }
-                Ok(_) => {
+                n if n > 0 => {
                     *s.add(i) = b[0] as c_char;
                     i += 1;
                     if b[0] == b'\n' {
                         break;
                     }
                 }
-                Err(e) => {
-                    set_errno(from_libsys(e));
+                _ => {
                     f.error = true;
                     return core::ptr::null_mut();
                 }
@@ -757,10 +785,9 @@ pub unsafe extern "C" fn fputs(s: *const c_char, fp: *mut FILE) -> c_int {
             return 0;
         }
         let buf = core::slice::from_raw_parts(s as *const u8, len);
-        match libsys::write(f.fd, buf) {
-            Ok(_) => 0,
-            Err(e) => {
-                set_errno(from_libsys(e));
+        match fio_write(f.fd, buf) {
+            n if n >= 0 => 0,
+            _ => {
                 f.error = true;
                 EOF
             }
@@ -1153,9 +1180,10 @@ impl FdSink {
         if bytes.is_empty() {
             return;
         }
-        match libsys::write(self.fd, bytes) {
-            Ok(n) => self.wrote += n as ssize_t,
-            Err(e) => { set_errno(from_libsys(e)); }
+        // 经 FILE 层的同一条 I/O 单点（printf 家族也必须认 fd 位置表）。
+        let n = fio_write(self.fd, bytes);
+        if n >= 0 {
+            self.wrote += n as ssize_t;
         }
     }
 }
@@ -1295,10 +1323,9 @@ pub unsafe extern "C" fn puts(s: *const c_char) -> c_int {
 pub unsafe extern "C" fn putchar(c: c_int) -> c_int {
     stdio_init();
     let b = [(c & 0xFF) as u8; 1];
-    match libsys::write(1, &b) {
-        Ok(_) => c & 0xFF,
-        Err(e) => {
-            set_errno(from_libsys(e));
+    match fio_write(1, &b) {
+        n if n >= 0 => c & 0xFF,
+        _ => {
             EOF
         }
     }
@@ -1309,11 +1336,10 @@ pub unsafe extern "C" fn putchar(c: c_int) -> c_int {
 pub unsafe extern "C" fn getchar() -> c_int {
     stdio_init();
     let mut b = [0u8; 1];
-    match libsys::read(0, &mut b) {
-        Ok(0) => EOF,
-        Ok(_) => b[0] as c_int,
-        Err(e) => {
-            set_errno(from_libsys(e));
+    match fio_read(0, &mut b) {
+        0 => EOF,
+        n if n > 0 => b[0] as c_int,
+        _ => {
             EOF
         }
     }
@@ -1340,10 +1366,10 @@ unsafe fn fscan_getc(f: &mut FILE) -> i32 {
         return c as i32;
     }
     let mut b = [0u8; 1];
-    match libsys::read(f.fd, &mut b) {
-        Ok(0) => { f.eof = true; -1 }
-        Ok(_) => b[0] as i32,
-        Err(e) => { set_errno(from_libsys(e)); f.error = true; -1 }
+    match fio_read(f.fd, &mut b) {
+        0 => { f.eof = true; -1 }
+        n if n > 0 => b[0] as i32,
+        _ => { f.error = true; -1 }
     }
 }
 
@@ -2078,13 +2104,13 @@ pub unsafe extern "C" fn tmpfile() -> *mut FILE {
     // 3. 登记**延迟删除**（理由见 TMP_FILES 的说明：本内核 VFS 不支持 unlink 之后再写入）。
     let path_bytes = core::slice::from_raw_parts(tpl.as_ptr() as *const u8, n);
     if core::str::from_utf8(path_bytes).is_err() {
-        let _ = libsys::close(fd as u64);
+        let _ = crate::unistd::close(fd);
         set_errno(EINVAL);
         return core::ptr::null_mut();
     }
     let copy = crate::malloc::malloc(n + 1) as *mut c_char;
     if copy.is_null() {
-        let _ = libsys::close(fd as u64);
+        let _ = crate::unistd::close(fd);
         set_errno(crate::errno::ENOMEM);
         return core::ptr::null_mut();
     }
@@ -2096,7 +2122,7 @@ pub unsafe extern "C" fn tmpfile() -> *mut FILE {
             let _ = libsys::unlink(p);
         }
         crate::malloc::free(copy as *mut u8);
-        let _ = libsys::close(fd as u64);
+        let _ = crate::unistd::close(fd);
         set_errno(crate::errno::ENOMEM);
         return core::ptr::null_mut();
     }
@@ -2106,7 +2132,7 @@ pub unsafe extern "C" fn tmpfile() -> *mut FILE {
     // 4. 包成读写流。
     let fp = alloc_file(fd as u64, FmMode::ReadWrite);
     if fp.is_null() {
-        let _ = libsys::close(fd as u64);
+        let _ = crate::unistd::close(fd);
         return core::ptr::null_mut();
     }
     fp
