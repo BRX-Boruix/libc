@@ -18,6 +18,11 @@ int ispunct(int c);
 int iscntrl(int c);
 int isgraph(int c);
 int isblank(int c);
+/* isascii：POSIX.1-2008 已移出标准，但现实代码大量使用。glibc 同型：**宏优先**，
+ * 真函数也存在（写 (isascii)(c) 或取地址时用得到）。
+ * 3P6-2 第二波：由交叉构建 GMP 的真实报错驱动补上（printf/doprnt.c 需要它）。 */
+int isascii(int c);
+#define isascii(c) (((c) & ~0x7F) == 0)
 int tolower(int c);
 int toupper(int c);
 

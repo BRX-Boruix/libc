@@ -19,6 +19,17 @@ pub extern "C" fn isalpha(c: c_int) -> c_int {
     ((c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z')) as c_int
 }
 
+/// isascii(c)：c 是否为 7 位 ASCII（0..=127）。
+///
+/// **来路（3P6-2 第二波，真实报错驱动，不预猜）**：交叉构建 GMP 时报
+///   printf/doprnt.c:592:17: error: call to undeclared function 'isascii'
+/// 本 libc 此前**既没实现也没声明**它（属「整项缺失」，与 getc/putc/getuid 同类）。
+/// POSIX.1-2008 已把它移出标准，但现实代码大量使用；语义就是「高位全 0」。
+#[unsafe(no_mangle)]
+pub extern "C" fn isascii(c: c_int) -> c_int {
+    ((c & !0x7F) == 0) as c_int
+}
+
 /// \`isdigit(c)\`：十进制数字。
 #[unsafe(no_mangle)]
 pub extern "C" fn isdigit(c: c_int) -> c_int {

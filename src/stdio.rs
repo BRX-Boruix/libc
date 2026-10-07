@@ -411,6 +411,26 @@ pub unsafe extern "C" fn fputc(c: c_int, fp: *mut FILE) -> c_int {
 }
 
 
+/// getc(fp)：等价于 fgetc(fp)。
+///
+/// **来路（3P6-2 第二波，真实报错驱动，不预猜）**：交叉构建 GMP（宿主 = Boruix）时
+///   mpz/inp_str.c:58: error: call to undeclared function 'getc'
+/// ——本 libc 此前**既没实现也没声明** getc/putc（属「整项缺失」；头文件覆盖审计只覆盖
+/// 「已导出但未声明」，故没列出它们）。
+///
+/// POSIX 允许把 getc/putc 实现为宏；本实现提供**真函数**（取地址、当回调传递都可用），
+/// 语义与 fgetc/fputc 完全一致（不另造缓冲语义）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getc(fp: *mut FILE) -> c_int {
+    unsafe { fgetc(fp) }
+}
+
+/// putc(c, fp)：等价于 fputc(c, fp)。见 getc 的来路说明。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn putc(c: c_int, fp: *mut FILE) -> c_int {
+    unsafe { fputc(c, fp) }
+}
+
 /// \`fgets(s, n, fp)\`：从 fp 读取至多 n-1 字符，遇换行或 EOF 停止，结果 NUL 终止。
 /// 返回 s；读到 EOF 且无字符时返回 NULL。
 #[unsafe(no_mangle)]

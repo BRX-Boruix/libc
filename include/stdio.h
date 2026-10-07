@@ -2,6 +2,16 @@
 #ifndef _BORUIX_STDIO_H
 #define _BORUIX_STDIO_H
 
+/* 兼容性：第三方代码常按「stdio 的包含卫哨宏」判断 FILE 是否可用——GMP 的
+ * _GMP_H_HAVE_FILE 就检查 _STDIO_H/_STDIO_H_/_STDIO_H_INCLUDED/... 这一串（见 gmp-h.in）。
+ * 故除本 libc 自己的 _BORUIX_STDIO_H 外，**再定义**业界惯用的 _STDIO_H。
+ *
+ * 来路（3P6-2 第二波，真实报错驱动）：交叉构建 GMP 时报
+ *   mpz/inp_str.c:63: error: call to undeclared function '__gmpz_inp_str_nowhite'
+ * 根因**不是** GMP 缺声明（gmp-impl.h:1784 有），而是它没认出自家的 FILE，
+ * 于是那句声明被 #ifdef _GMP_H_HAVE_FILE 挡掉了。 */
+#define _STDIO_H 1
+
 #include "boruix_ctypes.h"
 
 #ifdef __cplusplus
@@ -29,6 +39,10 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *fp);
 int fflush(FILE *fp);
 int fgetc(FILE *fp);
 int fputc(int c, FILE *fp);
+/* getc/putc：POSIX 里常是宏，本实现提供真函数（取地址/当回调都可用）。
+ * 3P6-2 第二波：由交叉构建 GMP 的真实报错驱动补上（mpz/inp_str.c 需要 getc）。 */
+int getc(FILE *fp);
+int putc(int c, FILE *fp);
 int ungetc(int c, FILE *fp);
 char *fgets(char *s, int n, FILE *fp);
 int fputs(const char *s, FILE *fp);
