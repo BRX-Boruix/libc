@@ -126,6 +126,12 @@ int getopt(int argc, char *const argv[], const char *optstring);
 /* 主机名与登录名（POSIX 归属 unistd.h；实现在 libc/src/posix_batch5.rs）。
  * **诚实边界**：本系统**没有主机名概念**（内核/libsys 均无数据源，已核实）⇒ gethostname 如实
  * 写空串；getlogin 查 LOGNAME/USER，都没有则如实返回 NULL。两者都**不编造**名字。 */
+/* exec* 家族（本系统**无法忠实实现**：没有替换进程映像的 syscall）。
+ * 提供符号是为了让引用它们的代码能编译/链接（如 libgcc 的 libgcov-interface.c）；
+ * **运行时如实返回 -1 并置 ENOTSUP**，绝不假装成功。详见 docs/TODO/libc-posix-surface.md 的 B 类。 */
+int execv(const char *path, char *const argv[]);
+int execve(const char *path, char *const argv[], char *const envp[]);
+
 int gethostname(char *name, size_t len);
 char *getlogin(void);
 
