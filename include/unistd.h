@@ -142,4 +142,15 @@ __attribute__((noreturn)) void _exit(int status);
 }
 #endif
 
+
+/* ---- 大文件接口（LFS64）别名 ----
+ * **Boruix 是 LP64**：`off_t`/`ino_t` 本就是 64 位 ⇒ `*64` 名是**纯别名**（glibc 在 64 位平台同样如此）。
+ * 来路：libstdc++ 的 configure 探测 `fseeko64`/`ftello64`/`lseek64`/`stat64`（实测），
+ * 缺它们会让 `checking for the value of SEEK_CUR... failed` 而整段 configure 失败。 */
+#define lseek64  lseek
+#define truncate64 truncate
+#define ftruncate64 ftruncate
+#define pread64  pread
+#define pwrite64 pwrite
+
 #endif /* _BORUIX_UNISTD_H */

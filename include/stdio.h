@@ -88,4 +88,16 @@ void libc_initialize(void);
 }
 #endif
 
+
+/* ---- 大文件接口（LFS64）别名 ----
+ * **Boruix 是 LP64**：`off_t`/`ino_t` 本就是 64 位 ⇒ `*64` 名是**纯别名**（glibc 在 64 位平台同样如此）。
+ * 来路：libstdc++ 的 configure 探测 `fseeko64`/`ftello64`/`lseek64`/`stat64`（实测），
+ * 缺它们会让 `checking for the value of SEEK_CUR... failed` 而整段 configure 失败。 */
+#define fseeko64 fseek
+#define ftello64 ftell
+#define fopen64  fopen
+#define freopen64 freopen
+#define off64_t  off_t
+#define fpos64_t fpos_t
+
 #endif /* _BORUIX_STDIO_H */
