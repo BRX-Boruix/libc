@@ -153,4 +153,19 @@ __attribute__((noreturn)) void _exit(int status);
 #define pread64  pread
 #define pwrite64 pwrite
 
+
+/* ---- SEEK_* 与 fseeko/ftello（POSIX）----
+ * `SEEK_*` 是 `<stdio.h>`/`<unistd.h>` 的基础宏；`fseeko`/`ftello` 是 `off_t` 版。
+ * **Boruix 是 LP64**（`off_t` == `long`）⇒ 二者与 `fseek`/`ftell` 语义等价，故为别名。
+ * 来路：libstdc++ 的 configure 检查 `fseeko and ftello`（实测报 'SEEK_CUR' was not declared）。 */
+#ifndef SEEK_SET
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+#endif
+#ifndef fseeko
+#define fseeko fseek
+#define ftello ftell
+#endif
+
 #endif /* _BORUIX_UNISTD_H */
