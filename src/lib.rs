@@ -1,4 +1,4 @@
-﻿//! BORUIX libc —— 用户态 C 标准库（Rust 实现 + C ABI，构建于 libsys 之上）。
+//! BORUIX libc —— 用户态 C 标准库（Rust 实现 + C ABI，构建于 libsys 之上）。
 //!
 //! 架构（ADR-001：Rust 实现 + C ABI）：
 //! ```text
@@ -58,6 +58,8 @@ pub mod posix_batch5;
 pub mod posix_batch6;
 pub mod math_core;
 pub mod math_core2;
+// 数学函数的 C ABI 导出层（核心保持纯函数，便于宿主对照验证器 include!）。
+pub mod math_exports;
 pub mod regex;
 pub mod longdouble;
 pub mod math_decomp;

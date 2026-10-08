@@ -1,4 +1,4 @@
-﻿// 数学函数**纯计算核心**（无 syscall、无 crate 依赖）——为的是能在**宿主上用真实 libm 对照验证**。
+// 数学函数**纯计算核心**（无 syscall、无 crate 依赖）——为的是能在**宿主上用真实 libm 对照验证**。
 //
 // ## 精度目标（B 档，≤1 ulp）与验证方式
 //
@@ -109,26 +109,49 @@ pub fn core_fmod(x: f64, y: f64) -> f64 {
     core_copysign(r, x)
 }
 
-/// `sqrt`：牛顿迭代（初值用位技巧，3 次迭代后达到 ≤1 ulp；再做一次舍入修正）。
+/// `sqrt`：**整数算法**，正确舍入（≤0.5 ulp）。
+///
+/// 旧实现（牛顿 + ±1 位邻域比较）实测 1 ulp：邻域比较用 `z*z - x` 的 double 值判断，
+/// 而 `z*z`、`y*y` 各自带一次舍入，判据本身就含 1 ulp 噪声；而 asin/hypot/cbrt
+/// 都把 sqrt 放在最后一环，1 ulp 会被放大成 2 ulp。
+///
+/// 现改为：把 x 写成 `M·2^E`（M 为 53 位整数，E = 无偏指数-52），
+///   E 偶：S = round(√(M·2^52))，结果 = S·2^(E/2-26)
+///   E 奇：S = round(√(M·2^53))，结果 = S·2^((E-1)/2-26)
+/// 用 u128 整数二分开方得到 S（约 53 位，余数 > S 即进位），再按位拼回 f64。
+/// S 与指数都是精确整数运算 ⇒ 结果是**正确舍入**的平方根。
+fn isqrt_u128(n: u128) -> u128 {
+    let mut lo: u128 = 0;
+    let mut hi: u128 = 1u128 << 53;
+    while lo < hi {
+        let mid = (lo + hi + 1) >> 1;
+        if mid * mid <= n { lo = mid } else { hi = mid - 1; }
+    }
+    lo
+}
+
 pub fn core_sqrt(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
     if x < 0.0 { return f64::NAN; }
     if x == 0.0 || x.is_infinite() { return x; }
-    // 初值：位技巧 y ≈ 2^(e/2) * 1.m 的近似（经典 0x5fe6eb50c7b537a9 逆平方根法简化）
-    let mut y = f64::from_bits((x.to_bits() >> 1) + 0x1ff8_0000_0000_0000);
-    // 牛顿迭代 y = (y + x/y)/2，5 次足够收敛到 ulp 级
-    for _ in 0..5 {
-        y = 0.5 * (y + x / y);
+    let bits = x.to_bits();
+    if bits & 0x7ff0_0000_0000_0000 == 0 {
+        // 次正规数：先乘 2^54 变正规，开方后乘 2^-27（都是 2 的幂 ⇒ 精确，且不产生次正规结果）
+        return core_sqrt(x * f64::from_bits(0x4350_0000_0000_0000))
+            * f64::from_bits(0x3e40_0000_0000_0000);
     }
-    // 舍入修正：确保返回最接近真值的可表示数
-    let y2 = y * y;
-    if y2 > x {
-        let z = f64::from_bits(y.to_bits() - 1);
-        if core_fabs(z * z - x) < core_fabs(y2 - x) { z } else { y }
-    } else if y2 < x {
-        let z = f64::from_bits(y.to_bits() + 1);
-        if core_fabs(z * z - x) < core_fabs(y2 - x) { z } else { y }
+    let e = ((bits >> 52) & 0x7ff) as i64 - 1023 - 52;
+    let m = (bits & 0x000f_ffff_ffff_ffff) | 0x0010_0000_0000_0000;
+    let (n, shift) = if e.rem_euclid(2) == 0 {
+        ((m as u128) << 52, e / 2 - 26)
     } else {
-        y
-    }
+        ((m as u128) << 53, (e - 1) / 2 - 26)
+    };
+    let s0 = isqrt_u128(n);
+    let mut s = s0;
+    if n - s0 * s0 > s0 { s += 1; }        // 最近舍入（无平局：中点 s+0.5 不可表示）
+    let mut sh = shift;
+    if s == (1u128 << 53) { s = 1u128 << 52; sh += 1; }
+    let e_biased = (1075 + sh) as u64;
+    f64::from_bits((e_biased << 52) | ((s as u64) & 0x000f_ffff_ffff_ffff))
 }
