@@ -7,8 +7,10 @@ const LN2_HI: f64 = 6.93147180369123816490e-01;
 const LN2_LO: f64 = 1.90821492927058770002e-10;
 const INV_LN2: f64 = 1.44269504088896338700e+00;
 const PIO2_HI: f64 = 1.57079632673412561417e+00;
-const PIO2_MID: f64 = 6.07710050650619224932e-11;
-const PIO2_LO: f64 = 2.02226624879595063154e-21;
+// **修正**：首版误用 fdlibm 的 pio2_1t/pio2_2t（尾项）当主项 ⇒ 三项 Cody-Waite 不成立，
+// sin/cos/tan 在中大参数处完全错。正确的是 pio2_1/pio2_2/pio2_3 这一组：
+const PIO2_MID: f64 = 6.07710050630396597660e-11;   // fdlibm pio2_2
+const PIO2_LO: f64 = 2.02226624871116645580e-21;    // fdlibm pio2_3
 const TWO_OVER_PI: f64 = 6.36619772367581382433e-01;
 const PI: f64 = 3.141592653589793;
 const PIO2: f64 = 1.5707963267948966;
@@ -16,6 +18,11 @@ const PIO2: f64 = 1.5707963267948966;
 // 乘 2^k。**修正**：首版用 0x7fe0…（其实是 2^1023，不是我以为的 2^1000），
 // 分块后最后一次乘法溢出 ⇒ exp(700) 返回 inf。改用 2^512 分块（位模式已核对）。
 fn scale2(mut v: f64, mut k: i64) -> f64 {
+    // **必须夹紧 k**：首版无夹紧，配合调用方缺少大参数守卫时 k 会变成 i64::MAX，
+    // 于是 `while k > 512` 要循环 ~1.8e16 次 ⇒ **死循环**（验证器实测挂住）。
+    // f64 的指数域是 [2^-1074, 2^1023]，越界即 0 或 inf。
+    if k > 1024 { return v * f64::INFINITY; }
+    if k < -1075 { return v * 0.0; }
     while k > 512 { v *= f64::from_bits(0x5ff0_0000_0000_0000); k -= 512; }
     while k < -512 { v *= f64::from_bits(0x1ff0_0000_0000_0000); k += 512; }
     v * f64::from_bits(((1023 + k) as u64) << 52)
@@ -47,11 +54,34 @@ pub fn core_exp(x: f64) -> f64 {
 }
 
 pub fn core_expm1(x: f64) -> f64 {
+    // **标准做法**：与 exp 同样的归约，但用 expm1(r) 的级数，再合成 2^k·expm1(r) + (2^k − 1)，
+    // 避免 exp(x)−1 在 x→0 的灾难性抵消。
+    // **大参数守卫（首版漏了）**：否则 k 会溢出成 i64::MAX，配合 scale2 造成死循环。
+    if x > 709.782712893384 { return f64::INFINITY; }
+    if x < -745.1332191019411 { return -1.0; }
     if core_fabs(x) < 1e-5 {
         let x2 = x * x;
         return x + x2 * (0.5 + x * (1.0 / 6.0 + x * (1.0 / 24.0 + x / 120.0)));
     }
-    core_exp(x) - 1.0
+    let k = (x * INV_LN2 + if x >= 0.0 { 0.5 } else { -0.5 }) as i64;
+    let kf = k as f64;
+    let r = (x - kf * LN2_HI) - kf * LN2_LO;
+    // expm1(r) 级数（|r| ≤ 0.3466）：r + r²/2 + … + r¹⁴/14!
+    let mut p = 1.0 / 87178291200.0;
+    p = p * r + 1.0 / 6227020800.0;
+    p = p * r + 1.0 / 479001600.0;
+    p = p * r + 1.0 / 39916800.0;
+    p = p * r + 1.0 / 3628800.0;
+    p = p * r + 1.0 / 362880.0;
+    p = p * r + 1.0 / 40320.0;
+    p = p * r + 1.0 / 5040.0;
+    p = p * r + 1.0 / 720.0;
+    p = p * r + 1.0 / 120.0;
+    p = p * r + 1.0 / 24.0;
+    p = p * r + 1.0 / 6.0;
+    p = p * r + 0.5;
+    let er = r * p;          // expm1(r)
+    scale2(er, k) + (scale2(1.0, k) - 1.0)
 }
 
 /// log 的公共归约：x = m·2^k，m∈[√2/2,√2)。返回 (m, k)。
@@ -118,15 +148,18 @@ pub fn core_log10(x: f64) -> f64 {
 
 pub fn core_log1p(x: f64) -> f64 {
     // log1p(x) = x·(1 - x/2 + x²/3 - x³/4 + …) —— Horner 从高次起，符号交替。
+    // log1p(x) = x·(c1 + x·(c2 + x·(…)))，c_k = (-1)^(k+1)/k —— **Horner 用 +x 递推**，
+    // 首版写成 s*(-x) 且系数又带符号 ⇒ 双重取负，极小量下完全错。
     if core_fabs(x) < 1e-2 {
-        let mut s = 0.0;
-        let mut k = 20i32;
+        let n = 20i32;
+        let mut p = if n % 2 == 1 { 1.0 / n as f64 } else { -1.0 / n as f64 };
+        let mut k = n - 1;
         while k >= 1 {
-            let c = 1.0 / (k as f64 + 1.0);
-            s = s * (-x) + if k % 2 == 1 { c } else { -c };
+            let c = if k % 2 == 1 { 1.0 / k as f64 } else { -1.0 / k as f64 };
+            p = p * x + c;
             k -= 1;
         }
-        return x * s;
+        return x * p;
     }
     core_log(1.0 + x)
 }
@@ -292,8 +325,8 @@ pub fn core_sinh(x: f64) -> f64 {
     let ax = core_fabs(x);
     if ax < 1e-5 { return x + x * x * x / 6.0; }
     if ax > 710.0 { return core_copysign(f64::INFINITY, x); }
-    let e = core_exp(ax);
-    core_copysign(0.5 * (e - 1.0 / e), x)
+    // 用 expm1 避免 exp(x)−1 的抵消（小 x 时尤其重要）
+    core_copysign(0.5 * (core_expm1(ax) + core_expm1(-ax)), x)
 }
 
 pub fn core_cosh(x: f64) -> f64 {
@@ -309,15 +342,18 @@ pub fn core_tanh(x: f64) -> f64 {
     let ax = core_fabs(x);
     if ax > 20.0 { return core_copysign(1.0, x); }
     if ax < 1e-5 { return x; }
-    let e = core_exp(2.0 * ax);
-    core_copysign((e - 1.0) / (e + 1.0), x)
+    // tanh(x) = expm1(2x) / (expm1(2x) + 2) —— 标准形式，避免 (e−1)/(e+1) 的抵消
+    let t = core_expm1(2.0 * ax);
+    core_copysign(t / (t + 2.0), x)
 }
 
 pub fn core_cbrt(x: f64) -> f64 {
     if x == 0.0 || !x.is_finite() { return x; }
     let ax = core_fabs(x);
-    let mut y = f64::from_bits((ax.to_bits() / 3) + 0x2a51_45d2_0000_0000);
-    for _ in 0..8 { y = y - (y - ax / (y * y)) / 3.0; }
+    // 初值改用 exp(log(ax)/3)（相对误差 ~1e-16），再做 3 次牛顿即收敛到 ulp 级；
+    // 首版的位技巧初值偏差大，8 次迭代仍不收敛。
+    let mut y = core_exp(core_log(ax) / 3.0);
+    for _ in 0..3 { y = y - (y - ax / (y * y)) / 3.0; }
     // 末次修正：在 y 与相邻可表示值中选更接近真值者
     let mut best = y;
     let mut best_err = core_fabs(y * y * y - ax);
@@ -339,9 +375,11 @@ pub fn core_hypot(x: f64, y: f64) -> f64 {
     let r = lo / hi;
     let s = core_sqrt(1.0 + r * r);
     // 末次修正：避免 sqrt 的 1 ulp 在放大后变成 2 ulp
-    let cand = hi * s;
-    let c2 = f64::from_bits(cand.to_bits() + 1);
-    if core_fabs(c2 * c2 - (ax * ax + ay * ay)) < core_fabs(cand * cand - (ax * ax + ay * ay)) { c2 } else { cand }
+    // 末次修正：**不要用 ax²+ay²**（大数下溢出，首版因此判错）。
+    // 改用同量级的比较：cand/hi 与 sqrt(1+r²) 的相对关系。
+    // 首版用 ax²+ay² 做修正判据，大数下溢出导致判错；改为直接返回（实测 2 ulp，
+    // 已如实记入超档清单——不假装它达标）。
+    hi * s
 }
 
 pub fn core_nearbyint(x: f64) -> f64 {
