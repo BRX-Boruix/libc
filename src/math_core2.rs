@@ -447,7 +447,9 @@ pub fn core_asin(x: f64) -> f64 {
     let ax = core_fabs(x);
     if ax > 1.0 { return f64::NAN; }
     if ax == 1.0 { return core_copysign(PIO2, x); }
-    core_asin_fd(x)
+    // fdlibm 的 pS/qS 移植实测更差（2 -> 10 ulp，我的移植有 bug）⇒ 回退 atan2 路径（2 ulp）。
+    // core_asin_fd 保留在文件里供后续修正，但**不接**进 core_asin。
+    core_atan2(x, core_sqrt((1.0 - ax) * (1.0 + ax)))
 }
 
 pub fn core_acos(x: f64) -> f64 {
