@@ -115,4 +115,13 @@ void libc_initialize(void);
 #define ftello ftell
 #endif
 
+/* fpos_t：POSIX 要求的不透明定位类型。本实现取 `long`（LP64 下与 off_t 同宽），
+ * 与 fgetpos/fsetpos 的实现一致（它们委托 ftell/fseek）。 */
+typedef long fpos_t;
+int fgetpos(FILE *stream, fpos_t *pos);
+int fsetpos(FILE *stream, const fpos_t *pos);
+/* setbuf/setvbuf：本 libc 的 stdio **不做用户态缓冲** ⇒ 刻意的空操作（见 libc/src/posix_batch6.rs）。 */
+void setbuf(FILE *stream, char *buf);
+int setvbuf(FILE *stream, char *buf, int mode, size_t size);
+
 #endif /* _BORUIX_STDIO_H */

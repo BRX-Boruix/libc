@@ -51,4 +51,8 @@ char *strerror(int errnum);
 }
 #endif
 
+/* strcoll/strxfrm：本系统只有 C locale ⇒ 与 strcmp/strncpy 等价（POSIX 在 C locale 下的定义）。 */
+int strcoll(const char *s1, const char *s2);
+size_t strxfrm(char *dest, const char *src, size_t n);
+
 #endif /* _BORUIX_STRING_H */
