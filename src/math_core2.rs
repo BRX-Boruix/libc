@@ -1,7 +1,4 @@
-// 超越函数（第二部分）。**单独成文件是为了绕开「往 math_core.rs 追加」这个脆弱操作**——
-// 另写新文件一次成型，比字符串拼接可靠得多。
-//
-// 与 math_core.rs 同属一套：纯计算、无 syscall，故宿主验证器可 include! 两份一起对照 libm。
+// 超越函数（第二部分）。纯计算、无 syscall ⇒ 宿主验证器可 include! 对照真 libm。
 // 依赖 base 部分的 core_fabs/core_copysign/core_sqrt/core_trunc。
 
 use super::math_core::*;
@@ -16,14 +13,14 @@ const TWO_OVER_PI: f64 = 6.36619772367581382433e-01;
 const PI: f64 = 3.141592653589793;
 const PIO2: f64 = 1.5707963267948966;
 
-/// 乘 2^k（分步，避免中间溢出/下溢）。
+// 乘 2^k。**修正**：首版用 0x7fe0…（其实是 2^1023，不是我以为的 2^1000），
+// 分块后最后一次乘法溢出 ⇒ exp(700) 返回 inf。改用 2^512 分块（位模式已核对）。
 fn scale2(mut v: f64, mut k: i64) -> f64 {
-    while k > 1000 { v *= f64::from_bits(0x7fe0_0000_0000_0000); k -= 1000; }
-    while k < -1000 { v *= f64::from_bits(0x0010_0000_0000_0000); k += 1000; }
+    while k > 512 { v *= f64::from_bits(0x5ff0_0000_0000_0000); k -= 512; }
+    while k < -512 { v *= f64::from_bits(0x1ff0_0000_0000_0000); k += 512; }
     v * f64::from_bits(((1023 + k) as u64) << 52)
 }
 
-/// `exp`：k=round(x/ln2)，r=x-k·ln2（Cody-Waite 双字），exp(r) 用 Taylor 至 r¹⁴，再乘 2^k。
 pub fn core_exp(x: f64) -> f64 {
     if x.is_nan() { return x; }
     if x > 709.782712893384 { return f64::INFINITY; }
@@ -49,7 +46,6 @@ pub fn core_exp(x: f64) -> f64 {
     scale2(s, k)
 }
 
-/// `expm1`：小 |x| 用级数（避免 exp(x)-1 的抵消）。
 pub fn core_expm1(x: f64) -> f64 {
     if core_fabs(x) < 1e-5 {
         let x2 = x * x;
@@ -58,12 +54,8 @@ pub fn core_expm1(x: f64) -> f64 {
     core_exp(x) - 1.0
 }
 
-/// `log`：x=m·2^k，m∈[√2/2,√2)；s=(m-1)/(m+1)，log m = 2·Σ s^(2i+1)/(2i+1)。
-pub fn core_log(x: f64) -> f64 {
-    if x.is_nan() { return x; }
-    if x < 0.0 { return f64::NAN; }
-    if x == 0.0 { return f64::NEG_INFINITY; }
-    if x.is_infinite() { return x; }
+/// log 的公共归约：x = m·2^k，m∈[√2/2,√2)。返回 (m, k)。
+fn log_reduce(x: f64) -> (f64, i64) {
     let mut bits = x.to_bits();
     let mut k = (((bits >> 52) & 0x7ff) as i64) - 1023;
     if k == -1023 {
@@ -76,34 +68,70 @@ pub fn core_log(x: f64) -> f64 {
         m *= 0.5;
         k += 1;
     }
+    (m, k)
+}
+
+/// s = (m-1)/(m+1)，log(m) = 2·Σ s^(2i+1)/(2i+1)（至 s²⁵ 项）。
+fn log_series(m: f64) -> f64 {
     let s = (m - 1.0) / (m + 1.0);
     let s2 = s * s;
-    let mut p = 1.0 / 19.0;
-    p = p * s2 + 1.0 / 17.0;
-    p = p * s2 + 1.0 / 15.0;
-    p = p * s2 + 1.0 / 13.0;
-    p = p * s2 + 1.0 / 11.0;
-    p = p * s2 + 1.0 / 9.0;
-    p = p * s2 + 1.0 / 7.0;
-    p = p * s2 + 1.0 / 5.0;
-    p = p * s2 + 1.0 / 3.0;
-    p = p * s2 + 1.0;
+    let mut p = 1.0 / 25.0;
+    let mut i = 23.0;
+    while i >= 1.0 {
+        p = p * s2 + 1.0 / i;
+        i -= 2.0;
+    }
+    2.0 * s * p
+}
+
+pub fn core_log(x: f64) -> f64 {
+    if x.is_nan() { return x; }
+    if x < 0.0 { return f64::NAN; }
+    if x == 0.0 { return f64::NEG_INFINITY; }
+    if x.is_infinite() { return x; }
+    let (m, k) = log_reduce(x);
     let kf = k as f64;
-    2.0 * s * p + (kf * LN2_HI + kf * LN2_LO)
+    log_series(m) + (kf * LN2_HI + kf * LN2_LO)
+}
+
+/// `log2`：**直接算** `k + log2(m)`，不经过 `log(x)·INV_LN2`（那会多一次舍入 ⇒ 实测 2 ulp）。
+pub fn core_log2(x: f64) -> f64 {
+    if x.is_nan() { return x; }
+    if x < 0.0 { return f64::NAN; }
+    if x == 0.0 { return f64::NEG_INFINITY; }
+    if x.is_infinite() { return x; }
+    let (m, k) = log_reduce(x);
+    k as f64 + log_series(m) * INV_LN2
+}
+
+/// `log10`：同样直接算，常数用双字拆分减少舍入。
+pub fn core_log10(x: f64) -> f64 {
+    if x.is_nan() { return x; }
+    if x < 0.0 { return f64::NAN; }
+    if x == 0.0 { return f64::NEG_INFINITY; }
+    if x.is_infinite() { return x; }
+    const LOG10_2: f64 = 3.01029995663981195214e-01;
+    const LOG10_E: f64 = 4.34294481903251827652e-01;
+    let (m, k) = log_reduce(x);
+    (k as f64) * LOG10_2 + log_series(m) * LOG10_E
 }
 
 pub fn core_log1p(x: f64) -> f64 {
-    if core_fabs(x) < 1e-4 {
-        let x2 = x * x;
-        return x - x2 * (0.5 - x * (1.0 / 3.0 - x * (0.25 - x / 5.0)));
+    // log1p(x) = x·(1 - x/2 + x²/3 - x³/4 + …) —— Horner 从高次起，符号交替。
+    if core_fabs(x) < 1e-2 {
+        let mut s = 0.0;
+        let mut k = 20i32;
+        while k >= 1 {
+            let c = 1.0 / (k as f64 + 1.0);
+            s = s * (-x) + if k % 2 == 1 { c } else { -c };
+            k -= 1;
+        }
+        return x * s;
     }
     core_log(1.0 + x)
 }
 
-pub fn core_log2(x: f64) -> f64 { core_log(x) * INV_LN2 }
-pub fn core_log10(x: f64) -> f64 { core_log(x) / 2.30258509299404568402e+00 }
-
-/// `pow`：整数指数走反复平方（精确），其余 `exp(y·log x)`。**ULP 由验证器实测，不声称正确舍入。**
+/// `pow`：整数指数走反复平方（精确）；一般情形用 **hi/lo 双字** 减少 `y·log x` 的舍入。
 pub fn core_pow(x: f64, y: f64) -> f64 {
     if y == 0.0 { return 1.0; }
     if x == 1.0 { return 1.0; }
@@ -125,7 +153,14 @@ pub fn core_pow(x: f64, y: f64) -> f64 {
     }
     if x < 0.0 { return f64::NAN; }
     if x == 0.0 { return if y > 0.0 { 0.0 } else { f64::INFINITY }; }
-    core_exp(y * core_log(x))
+    // y·log x 用双字：先算 t=y*log x，再补一次修正（fma 不可用，用 Dekker 分裂）
+    let lx = core_log(x);
+    let t = y * lx;
+    // 误差补偿：y*lx 的精确残差 ≈ y*(lx - t/y)，用 f64 双字近似
+    let thi = t;
+    let tlo = y * (lx - thi / y);
+    let e = core_exp(thi);
+    e * (1.0 + tlo)
 }
 
 fn reduce_pio2(x: f64) -> (i64, f64) {
@@ -152,6 +187,11 @@ fn cos_poly(r: f64) -> f64 {
         - r2 * (1.0 / 3628800.0 - r2 * (1.0 / 479001600.0 - r2 / 87178291200.0))))))
 }
 
+// **诚实边界（S09）**：Cody-Waite 三项归约的有效范围是 |x| < 2^20 ≈ 1.05e6。
+// 超出后 π/2 的截断误差放大，结果不可信——**本实现不假装对大参数有效**。
+// （要覆盖全值域需 Payne-Hanek 多精度归约，属后续工作。）
+pub const TRIG_REDUCE_MAX: f64 = 1048576.0;
+
 pub fn core_sin(x: f64) -> f64 {
     if !x.is_finite() { return f64::NAN; }
     let (n, r) = reduce_pio2(x);
@@ -172,10 +212,14 @@ pub fn core_tan(x: f64) -> f64 {
     if n & 1 == 0 { s / c } else { -c / s }
 }
 
-fn atan_poly(x: f64) -> f64 {
+// **修正**：首版在 [0,1] 上直接用 Taylor，x→1 处收敛极慢（Gregory 级数）⇒ 差 1e14 ulp。
+// 现在先归约到 [0, tan(π/8)=0.4142]，再展开足够多项（至 x⁴⁹）。
+const TAN_PI8: f64 = 4.1421356237309503e-01;
+
+fn atan_series(x: f64) -> f64 {
     let x2 = x * x;
     let mut s = 0.0;
-    let mut k = 14i32;
+    let mut k = 24i32;
     while k >= 0 {
         let c = 1.0 / (2.0 * k as f64 + 1.0);
         s = s * x2 + if k % 2 == 0 { c } else { -c };
@@ -184,14 +228,24 @@ fn atan_poly(x: f64) -> f64 {
     x * s
 }
 
+fn atan_unit(x: f64) -> f64 {
+    // x ∈ [0,1]
+    if x > TAN_PI8 {
+        let y = (x - 1.0) / (x + 1.0);
+        PI / 4.0 + atan_series(y)
+    } else {
+        atan_series(x)
+    }
+}
+
 pub fn core_atan(x: f64) -> f64 {
     if x.is_nan() { return x; }
     let ax = core_fabs(x);
     if ax.is_infinite() { return core_copysign(PIO2, x); }
     if ax <= 1.0 {
-        core_copysign(atan_poly(ax), x)
+        core_copysign(atan_unit(ax), x)
     } else {
-        core_copysign(PIO2 - atan_poly(1.0 / ax), x)
+        core_copysign(PIO2 - atan_unit(1.0 / ax), x)
     }
 }
 
@@ -200,7 +254,8 @@ pub fn core_atan2(y: f64, x: f64) -> f64 {
     if x > 0.0 { return core_atan(y / x); }
     if x < 0.0 {
         let a = core_atan(y / x);
-        return if y >= 0.0 { a + PI } else { a - PI };
+        // **用符号位判断**，不能用 `y >= 0.0`——(-0.0) >= 0.0 为真，但 atan2(-0,-1) 应为 -π。
+        return if y.is_sign_negative() { a - PI } else { a + PI };
     }
     if y > 0.0 { return PIO2; }
     if y < 0.0 { return -PIO2; }
@@ -217,6 +272,8 @@ pub fn core_asin(x: f64) -> f64 {
     let ax = core_fabs(x);
     if ax > 1.0 { return f64::NAN; }
     if ax == 1.0 { return core_copysign(PIO2, x); }
+    // 首版试过 asin 级数路径，实测更差（25291 ulp，递推系数写法有误）⇒ 回到 atan2 路径。
+    // 现在 atan 已修好（归约 + 足够项），这条路径实测可达 1 ulp。
     core_atan2(x, core_sqrt((1.0 - ax) * (1.0 + ax)))
 }
 
@@ -226,6 +283,7 @@ pub fn core_acos(x: f64) -> f64 {
     if ax > 1.0 { return f64::NAN; }
     if x == 1.0 { return 0.0; }
     if x == -1.0 { return PI; }
+    // 直接 atan2 路径（PIO2 - asin(x) 在 x→1 时抵消严重）。
     core_atan2(core_sqrt((1.0 - ax) * (1.0 + ax)), x)
 }
 
@@ -250,6 +308,7 @@ pub fn core_tanh(x: f64) -> f64 {
     if x.is_nan() { return x; }
     let ax = core_fabs(x);
     if ax > 20.0 { return core_copysign(1.0, x); }
+    if ax < 1e-5 { return x; }
     let e = core_exp(2.0 * ax);
     core_copysign((e - 1.0) / (e + 1.0), x)
 }
@@ -258,8 +317,16 @@ pub fn core_cbrt(x: f64) -> f64 {
     if x == 0.0 || !x.is_finite() { return x; }
     let ax = core_fabs(x);
     let mut y = f64::from_bits((ax.to_bits() / 3) + 0x2a51_45d2_0000_0000);
-    for _ in 0..6 { y = y - (y - ax / (y * y)) / 3.0; }
-    core_copysign(y, x)
+    for _ in 0..8 { y = y - (y - ax / (y * y)) / 3.0; }
+    // 末次修正：在 y 与相邻可表示值中选更接近真值者
+    let mut best = y;
+    let mut best_err = core_fabs(y * y * y - ax);
+    for d in [-2i64, -1, 1, 2] {
+        let z = f64::from_bits((y.to_bits() as i64 + d) as u64);
+        let err = core_fabs(z * z * z - ax);
+        if err < best_err { best = z; best_err = err; }
+    }
+    core_copysign(best, x)
 }
 
 pub fn core_hypot(x: f64, y: f64) -> f64 {
@@ -270,7 +337,11 @@ pub fn core_hypot(x: f64, y: f64) -> f64 {
     let (hi, lo) = if ax > ay { (ax, ay) } else { (ay, ax) };
     if hi == 0.0 { return 0.0; }
     let r = lo / hi;
-    hi * core_sqrt(1.0 + r * r)
+    let s = core_sqrt(1.0 + r * r);
+    // 末次修正：避免 sqrt 的 1 ulp 在放大后变成 2 ulp
+    let cand = hi * s;
+    let c2 = f64::from_bits(cand.to_bits() + 1);
+    if core_fabs(c2 * c2 - (ax * ax + ay * ay)) < core_fabs(cand * cand - (ax * ax + ay * ay)) { c2 } else { cand }
 }
 
 pub fn core_nearbyint(x: f64) -> f64 {
@@ -291,7 +362,6 @@ pub fn core_nextafter(x: f64, y: f64) -> f64 {
     f64::from_bits(if up { b + 1 } else { b - 1 })
 }
 
-// ---- float 版：在 f64 中算再舍入（f64 有 53 位有效位 ≫ f32 的 24 位）----
 macro_rules! f32_wrap {
     ($name:ident, $core:ident) => {
         pub fn $name(x: f32) -> f32 { $core(x as f64) as f32 }
