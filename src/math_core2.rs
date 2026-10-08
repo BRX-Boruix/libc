@@ -176,8 +176,10 @@ pub fn core_log10(x: f64) -> f64 {
 }
 
 pub fn core_log1p(x: f64) -> f64 {
-    if core_fabs(x) < 1e-2 {
-        let n = 24i32;
+    // 阈值从 1e-2 放宽到 0.5：级数在 |x| ≤ 0.5 上仍收敛良好，
+    // 而走 core_log(1+x) 会先形成 1+x（引入舍入）——实测 5 ulp 就是这条路径。
+    if core_fabs(x) < 0.5 {
+        let n = 40i32;
         let mut p = if n % 2 == 1 { 1.0 / n as f64 } else { -1.0 / n as f64 };
         let mut k = n - 1;
         while k >= 1 {
@@ -404,7 +406,7 @@ pub fn core_cbrt(x: f64) -> f64 {
     for _ in 0..3 { y = y - (y - ax / (y * y)) / 3.0; }
     let mut best = y;
     let mut best_err = core_fabs(y * y * y - ax);
-    for d in [-2i64, -1, 1, 2] {
+    for d in [-4i64, -3, -2, -1, 1, 2, 3, 4] {
         let z = f64::from_bits((y.to_bits() as i64 + d) as u64);
         let err = core_fabs(z * z * z - ax);
         if err < best_err { best = z; best_err = err; }
@@ -420,7 +422,13 @@ pub fn core_hypot(x: f64, y: f64) -> f64 {
     let (hi, lo) = if ax > ay { (ax, ay) } else { (ay, ax) };
     if hi == 0.0 { return 0.0; }
     let r = lo / hi;
-    hi * core_sqrt(1.0 + r * r)
+    let t = 1.0 + r * r;
+    let s = core_sqrt(t);
+    // 末次补偿：在 cand 与相邻可表示值中选更接近 t 者。
+    // **用归一化比较（cand/hi 与 sqrt(t) 同量级）**，不用 hi² 那类会溢出的量。
+    let cand = hi * s;
+    let s2 = f64::from_bits(s.to_bits() + 1);
+    if (s2 * s2 - t).abs() < (s * s - t).abs() { hi * s2 } else { cand }
 }
 
 pub fn core_nearbyint(x: f64) -> f64 {
