@@ -49,7 +49,10 @@ double strtod(const char *s, char **endptr);
 double atof(const char *s);
 /* mktemp：POSIX 已标记为不安全（有竞态）；本实现只做最小语义，不声称原子。
  * 3P6-2 第二波：由 GCC 宿主侧构建的真实报错驱动补上。 */
-char *mktemp(char *template);
+/* 参数名从 POSIX 的 `template` 改为 `tmpl`：**`template` 是 C++ 关键字**，
+ * 而本头会被 <cstdlib> 引入 ⇒ C++ 编译报 "expected ',' or '...' before 'template'"（实测）。
+ * 参数名不影响 ABI/API，改名是唯一正确做法。 */
+char *mktemp(char *tmpl);
 /* random/srandom：与 rand/srand 同一生成器（POSIX 要求两者是同一序列的两个接口）。 */
 long random(void);
 void srandom(unsigned int seed);
@@ -61,6 +64,10 @@ int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);
 int putenv(char *string);
 int clearenv(void);
+
+/* system：C 标准要求；本系统无 /bin/sh 约定且 libc 不硬编码 shell 路径 ⇒ 如实 ENOTSUP。
+ * 提供符号是为让 C++ 标准库的 <cstdlib> 能编译（实测 'system' has not been declared in '::'）。 */
+int system(const char *command);
 float strtof(const char *s, char **endptr);
 long double strtold(const char *s, char **endptr);
 
@@ -73,8 +80,8 @@ void srand(unsigned seed);
  * 完成「存在性判定 + 创建」，没有 TOCTOU 窗口。此前无此位，这两项只能「先 stat 再
  * create」，两个进程会互相覆盖临时文件——故 docs/TODO/libc-posix-surface.md 曾把它们
  * 登记为「判定不支持」；内核位落地后该判定**已撤回**。 */
-int mkstemp(char *template);
-char *mkdtemp(char *template);
+int mkstemp(char *tmpl);
+char *mkdtemp(char *tmpl);
 
 /* memalign / valloc：posix_memalign 的传统别名（POSIX 未收录，现实代码大量使用）。
  * valloc 等价 memalign(getpagesize(), size)——不硬编码 4096，走内核真实页大小。
