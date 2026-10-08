@@ -303,9 +303,95 @@ pub fn core_cos(x: f64) -> f64 {
 pub fn core_tan(x: f64) -> f64 {
     if !x.is_finite() { return f64::NAN; }
     let (n, y0, y1) = rem_pio2(x);
-    let s = k_sin(y0, y1, true);
-    let c = k_cos(y0, y1);
-    if n & 1 == 0 { s / c } else { -c / s }
+    let t = k_tan(y0, y1, 1);
+    if n & 1 == 0 { t } else { -1.0 / t }
+}
+// ---- fdlibm __kernel_tan（T[] 系数 + pio4 归约）----
+const T0: f64 = 3.33333333333334091986e-01;
+const T1: f64 = 1.33333333333201242699e-01;
+const T2: f64 = 5.39682539762260521377e-02;
+const T3: f64 = 2.18694882948595424599e-02;
+const T4: f64 = 8.86323982359930005737e-03;
+const T5: f64 = 3.59207910759131235356e-03;
+const T6: f64 = 1.45620945432529025516e-03;
+const T7: f64 = 5.88041240820264096874e-04;
+const T8: f64 = 2.46463134818469906812e-04;
+const T9: f64 = 7.81794442939557092300e-05;
+const T10: f64 = 7.14072491382608190305e-05;
+const T11: f64 = -1.85586374855275456654e-05;
+const T12: f64 = 2.59073051863633712884e-05;
+const PIO4: f64 = 7.85398163397448278999e-01;
+const PIO4LO: f64 = 3.06161699786838301793e-17;
+
+fn k_tan(mut x: f64, mut y: f64, iy: i64) -> f64 {
+    let hx = (x.to_bits() >> 32) as u32;
+    let ix = hx & 0x7fff_ffff;
+    if ix >= 0x3FE5_9428 {
+        if (hx as i32) < 0 { x = -x; y = -y; }
+        let z = PIO4 - x;
+        let w = PIO4LO - y;
+        x = z + w;
+        y = 0.0;
+    }
+    let z = x * x;
+    let w = z * z;
+    let r = T1 + w * (T3 + w * (T5 + w * (T7 + w * (T9 + w * T11))));
+    let v = z * (T2 + w * (T4 + w * (T6 + w * (T8 + w * (T10 + w * T12)))));
+    let s = z * x;
+    let mut r2 = y + z * (s * (r + v) + y);
+    r2 += T0 * s;
+    let w2 = x + r2;
+    if ix >= 0x3FE5_9428 {
+        let vv = iy as f64;
+        let sign = 1.0 - (((hx >> 30) & 2) as f64);
+        return sign * (vv - 2.0 * (x - (w2 * w2 / (w2 + vv) - r2)));
+    }
+    if iy == 1 { w2 } else { -1.0 / (x + r2) }
+}
+
+// ---- fdlibm asin 的 pS/qS 系数 ----
+const PS0: f64 = 1.66666666666666657415e-01;
+const PS1: f64 = -3.25565818622400915405e-01;
+const PS2: f64 = 2.01212532134862925881e-01;
+const PS3: f64 = -4.00555345006794114027e-02;
+const PS4: f64 = 7.91534994289814532176e-04;
+const PS5: f64 = 3.47933107596021167570e-05;
+const QS1: f64 = -2.40339491173441421878e+00;
+const QS2: f64 = 2.02094576023350569471e+00;
+const QS3: f64 = -6.88283971605453293030e-01;
+const QS4: f64 = 7.70381505559019352791e-02;
+const PIO2_HI: f64 = 1.57079632679489655800e+00;
+const PIO2_LO: f64 = 6.12323399573676603587e-17;
+
+/// `asin`：fdlibm 路径（|x|<0.5 有理逼近；否则 sqrt + 双字补偿）。
+pub fn core_asin_fd(x: f64) -> f64 {
+    let hx = (x.to_bits() >> 32) as u32;
+    let ix = hx & 0x7fff_ffff;
+    if ix < 0x3FDC_0000 {
+        if ix < 0x3E40_0000 { return x; }
+        let t = x * x;
+        let p = t * (PS0 + t * (PS1 + t * (PS2 + t * (PS3 + t * (PS4 + t * PS5)))));
+        let q = 1.0 + t * (QS1 + t * (QS2 + t * (QS3 + t * QS4)));
+        let w = p / q;
+        return x + x * w;
+    }
+    let w = 1.0 - core_fabs(x);
+    let t = w * 0.5;
+    let p = t * (PS0 + t * (PS1 + t * (PS2 + t * (PS3 + t * (PS4 + t * PS5)))));
+    let q = 1.0 + t * (QS1 + t * (QS2 + t * (QS3 + t * QS4)));
+    let s = core_sqrt(t);
+    let out = if ix >= 0x3FEF_3333 {
+        let w2 = p / q;
+        PIO2_HI - (2.0 * (s + s * w2) - PIO2_LO)
+    } else {
+        let w2 = f64::from_bits(s.to_bits() & 0xffff_ffff_0000_0000);
+        let c = (t - w2 * w2) / (s + w2);
+        let r = p / q;
+        let p2 = 2.0 * s * r - (PIO2_LO - 2.0 * c);
+        let q2 = PIO4 - 2.0 * w2;
+        PIO4 - (p2 - q2)
+    };
+    if (hx as i32) > 0 { out } else { -out }
 }
 
 const TAN_PI8: f64 = 4.1421356237309503e-01;
@@ -361,7 +447,7 @@ pub fn core_asin(x: f64) -> f64 {
     let ax = core_fabs(x);
     if ax > 1.0 { return f64::NAN; }
     if ax == 1.0 { return core_copysign(PIO2, x); }
-    core_atan2(x, core_sqrt((1.0 - ax) * (1.0 + ax)))
+    core_asin_fd(x)
 }
 
 pub fn core_acos(x: f64) -> f64 {
