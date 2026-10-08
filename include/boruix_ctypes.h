@@ -17,7 +17,13 @@ typedef unsigned long c_ulong;
 typedef long long c_longlong;
 typedef unsigned long long c_ulonglong;
 typedef signed char c_char;
-typedef int wchar_t; /* x86_64 LP64：32 位宽字符 */
+/* wchar_t：**C++ 里是内建类型**（`typedef int wchar_t;` 会报
+ * "cannot combine with previous 'int' declaration specifier"）。故只在 C 里 typedef；
+ * C++ 用编译器的内建 wchar_t（本目标同为 32 位 int，见 libc/src/wchar.rs 的同一事实）。
+ * 来路（2026-10，host=boruix 的 cc1 构建）：libstdc++ 的 <cwchar> 拉进本头文件后立即报错。 */
+#ifndef __cplusplus
+typedef int wchar_t;
+#endif
 typedef unsigned c_uint;
 
 /* NULL：C 里用 `((void*)0)` 是惯例，**C++ 里不行**——`(void*)0` 不能隐式转成有类型指针。
