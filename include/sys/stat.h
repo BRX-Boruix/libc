@@ -15,6 +15,10 @@
 #include "types.h"
 #include "../time.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct stat {
     unsigned long   st_dev;
     unsigned long   st_ino;
@@ -88,6 +92,11 @@ int lstat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);
 int chmod(const char *path, mode_t mode);
 int mkdir(const char *path, mode_t mode);
+
+#ifdef __cplusplus
+}
+#endif
+
 
 
 /* ---- 大文件接口（LFS64）别名 ----

@@ -4,6 +4,13 @@
 
 #include "boruix_ctypes.h"
 
+/* EXIT_SUCCESS / EXIT_FAILURE：C 标准要求 <stdlib.h> 提供（exit 的实参）。
+ * 来路（2026-10，host=boruix 的 cc1 构建）：GCC 的若干源文件用 EXIT_FAILURE，报
+ * `'EXIT_FAILURE' was not declared in this scope`。C 标准只保证"0 与非 0"，
+ * 这里取 POSIX 惯例（EXIT_FAILURE = 1）。 */
+#define EXIT_SUCCESS 0
+#define EXIT_FAILURE 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif

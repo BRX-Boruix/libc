@@ -15,6 +15,10 @@
 
 #include "types.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define WNOHANG   1
 #define WUNTRACED 2
 
@@ -30,5 +34,9 @@ int waitpid(int pid, int *status, int options);
  * wait(&s)；缺它会让本头文件被判为「非 POSIX.1 兼容」，进而 HAVE_SYS_WAIT_H 未定义、
  * libiberty/pex-unix.c 不包含本头文件，最终报 waitpid 未声明（实测日志已核对）。 */
 pid_t wait(int *status);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SYS_WAIT_H */

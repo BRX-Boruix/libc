@@ -8,6 +8,10 @@
 
 #include "../boruix_ctypes.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned int mode_t;   /* u32 */
 typedef unsigned long ino_t;   /* u64 */
 typedef unsigned long dev_t;   /* u64 */
@@ -17,5 +21,9 @@ typedef long blkcnt_t;         /* i64 */
 typedef int pid_t;
 typedef unsigned int uid_t;
 typedef unsigned int gid_t;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SYS_TYPES_H */
