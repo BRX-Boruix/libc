@@ -19,6 +19,10 @@
  * 教训：**头文件必须自洽**——补声明的同时要补它依赖的类型来源；"名字审计"查不出这类问题。 */
 #include "sys/types.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef void (*sighandler_t)(int);
 
 #define SIG_DFL ((sighandler_t)0)
@@ -70,5 +74,9 @@ int raise(int sig);
 int kill(pid_t pid, int sig);
 int sigaction(int sig, const struct sigaction *act, struct sigaction *oldact);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SIGNAL_H */

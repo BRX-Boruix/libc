@@ -14,6 +14,35 @@
 
 #include "boruix_ctypes.h"
 
+/* ---- 标准宏（3P6-3：libstdc++ 的**真实报错**驱动，不是"看起来该有"）----
+ *   bits/fstream.tcc:83            error: 'BUFSIZ' was not declared in this scope（19 处）
+ *   src/c++98/basic_file.cc:246    error: '_IONBF' was not declared in this scope
+ * 取值取 glibc 同值：它们是编译期常量（无 ABI 含义），但保持一致便于对照。 */
+#ifndef BUFSIZ
+#define BUFSIZ 8192
+#endif
+#ifndef FOPEN_MAX
+#define FOPEN_MAX 16
+#endif
+#ifndef FILENAME_MAX
+#define FILENAME_MAX 4096
+#endif
+#ifndef L_tmpnam
+#define L_tmpnam 20
+#endif
+#ifndef TMP_MAX
+#define TMP_MAX 238328
+#endif
+#ifndef P_tmpdir
+#define P_tmpdir "/tmp"
+#endif
+
+/* setvbuf 的 mode 取值（POSIX）。本 libc 的 stdio **不做用户态缓冲**，故三者行为等价；
+ * 宏必须存在，否则 libstdc++ 的 basic_file.cc 编不过。 */
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+
 #ifdef __cplusplus
 extern "C" {
 #endif

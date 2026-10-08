@@ -22,8 +22,16 @@ struct group {
     char **gr_mem;
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct group *getgrnam(const char *name);
 struct group *getgrgid(gid_t gid);
 void endgrent(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _GRP_H */

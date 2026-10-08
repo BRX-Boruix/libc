@@ -18,10 +18,18 @@ struct passwd {
     char  *pw_shell;
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct passwd *getpwnam(const char *name);
 struct passwd *getpwuid(uid_t uid);
 void setpwent(void);
 void endpwent(void);
 struct passwd *getpwent(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _PWD_H */

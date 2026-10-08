@@ -15,6 +15,10 @@
 typedef long jmp_buf[8];
 typedef long sigjmp_buf[10];
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int setjmp(jmp_buf env);
 __attribute__((noreturn)) void longjmp(jmp_buf env, int val);
 
@@ -23,5 +27,9 @@ __attribute__((noreturn)) void longjmp(jmp_buf env, int val);
  * 保存的会是那个函数的帧，longjmp 回去时它已不存在。 */
 int sigsetjmp(sigjmp_buf env, int savemask);
 __attribute__((noreturn)) void siglongjmp(sigjmp_buf env, int val);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SETJMP_H */

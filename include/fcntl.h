@@ -32,9 +32,17 @@
 /* FD_CLOEXEC：fd 标志。本内核无 exec 关闭语义 → F_SETFD 非 0 时如实拒绝（见 unistd.rs）。 */
 #define FD_CLOEXEC 1
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int open(const char *path, int flags, ...);
 /* fcntl(fd, cmd, ...)：fd 控制。真实支持 F_DUPFD（复制到 >= arg 的最低空闲槽）；
  * F_GETFD 恒 0、F_SETFD(0) 恒 0，其余命令如实返回 -1 置 ENOTSUP（**不伪造**）。 */
 int fcntl(int fd, int cmd, ...);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _FCNTL_H */

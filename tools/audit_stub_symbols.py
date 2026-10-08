@@ -43,6 +43,10 @@ LIBC = os.path.dirname(HERE)
 # 不允许只写「已知」（那样等于把糊涂账固化）。
 # ---------------------------------------------------------------------------
 TRIAGED = {
+    "execv": "B 类：本系统没有替换进程映像的 syscall（只有派生）——如实 ENOTSUP，不伪造",
+    "execve": "同上（execv 的 envp 版）：无替换进程映像的 syscall ⇒ 如实 ENOTSUP，不伪造",
+    "system": "B 类：system 需要 shell + exec 替换，本系统两者都没有 ⇒ cmd==NULL 返回 1（无命令处理器，POSIX 允许），否则 -1/ENOTSUP",
+    "setvbuf": "刻意的空操作：本 libc 的 stdio 不做用户态缓冲，无缓冲可设——与 fflush 判空操作同一决定（函数文档已写明）",
     "execvp": "B 类：本系统没有替换进程映像的 syscall（只有派生）——详见 docs/TODO/libc-posix-surface.md",
     "fcntl": "部分实现：F_DUPFD 真实支持（含位置表复制）；其余命令如实 ENOTSUP，不伪造",
     "fflush": "刻意的空操作：本 libc 无用户态缓冲，无数据可冲——函数文档已写明，且与 setvbuf 判不支持同一决定",

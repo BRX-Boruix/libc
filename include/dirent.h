@@ -10,10 +10,22 @@
 
 #include "sys/types.h"
 
-/* d_type 取值（与 glibc 对齐）。 */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* d_type 取值（与 glibc 对齐）。3P6-3：libstdc++ 用到 DT_LNK/DT_SOCK/DT_FIFO/DT_CHR/DT_BLK，
+ * 只定义 UNKNOWN/DIR/REG 会报 'DT_SOCK' was not declared。这里补成**完整一套**（一次补完，
+ * 不留"下次再缺一个"的口子）。 */
 #define DT_UNKNOWN 0
+#define DT_FIFO    1
+#define DT_CHR     2
 #define DT_DIR     4
+#define DT_BLK     6
 #define DT_REG     8
+#define DT_LNK     10
+#define DT_SOCK    12
+#define DT_WHT     14
 
 struct dirent {
     ino_t          d_ino;
@@ -44,5 +56,9 @@ int scandir(const char *dirp,
             int (*filter)(const struct dirent *),
             int (*compar)(const struct dirent **, const struct dirent **));
 int alphasort(const struct dirent **a, const struct dirent **b);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _DIRENT_H */

@@ -17,10 +17,27 @@
 #ifndef _MATH_H
 #define _MATH_H
 
+/* extern "C"：这些都是 **C 符号**。缺了这层保护，C++ 程序（含 libstdc++）看到的是
+ * C++ 名字修饰的声明 ⇒ 一是链接期找不到符号，二是与 libstdc++ 自己的 `extern "C"`
+ * 定义**冲突**。3P6-3 实测：`math_stubs_float.cc` 报
+ * `conflicting declaration of 'float fabsf(float)' with 'C' linkage`，一次 60+ 条。 */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define HUGE_VAL (__builtin_huge_val())
 #define HUGE_VALF (__builtin_huge_valf())
 #define INFINITY (__builtin_inff())
 #define NAN (__builtin_nanf(""))
+
+/* 浮点分类常量（C99）。3P6-3：libstdc++ 的 src/c++17/floating_to_chars.cc 用
+ * __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, x)，
+ * 缺一个就报 'FP_NAN' was not declared。取值取 glibc 同值。 */
+#define FP_NAN       0
+#define FP_INFINITE  1
+#define FP_ZERO      2
+#define FP_SUBNORMAL 3
+#define FP_NORMAL    4
 
 /* ---- double：取整 / 分解 ---- */
 double fabs(double x);
@@ -101,5 +118,9 @@ float tanhf(float x);
 
 /* long double 版：本目标 long double 是 x87 80 位（实测 16 字节），实现见 libc/src/longdouble.rs。 */
 long double ldexpl(long double x, int exp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _MATH_H */

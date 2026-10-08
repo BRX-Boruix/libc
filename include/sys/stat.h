@@ -43,6 +43,26 @@ struct stat {
 #define S_IFCHR  0020000
 #define S_IFIFO  0010000
 
+/* 权限位（POSIX）。**诚实边界**：内核只有 owner 的 r/w/x 三个布尔，**不存在**
+ * owner/group/other 权限矩阵（见本文件头）。这些宏存在是为了让程序能**比较与构造** mode 值；
+ * st_mode 的填法是"owner 为真值、组/其他镜像 owner"。3P6-3：libstdc++ 报
+ * 'S_IWUSR' was not declared。一次补完整套，不留"下次再缺一个"的口子。 */
+#define S_ISUID 04000
+#define S_ISGID 02000
+#define S_ISVTX 01000
+#define S_IRWXU 00700
+#define S_IRUSR 00400
+#define S_IWUSR 00200
+#define S_IXUSR 00100
+#define S_IRWXG 00070
+#define S_IRGRP 00040
+#define S_IWGRP 00020
+#define S_IXGRP 00010
+#define S_IRWXO 00007
+#define S_IROTH 00004
+#define S_IWOTH 00002
+#define S_IXOTH 00001
+
 #define S_ISDIR(m)  (((m) & S_IFMT) == S_IFDIR)
 #define S_ISREG(m)  (((m) & S_IFMT) == S_IFREG)
 #define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)

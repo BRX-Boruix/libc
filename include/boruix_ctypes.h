@@ -20,7 +20,18 @@ typedef signed char c_char;
 typedef int wchar_t; /* x86_64 LP64：32 位宽字符 */
 typedef unsigned c_uint;
 
-#define NULL ((void *)0)
+/* NULL：C 里用 `((void*)0)` 是惯例，**C++ 里不行**——`(void*)0` 不能隐式转成有类型指针。
+ * 真实触发（3P6-3，libstdc++）：`atexit_thread.cc` 的 `single_thread = NULL;` 与
+ * `eh_alloc.cc` 的 `first_free_entry->next = NULL;` 都报
+ * `invalid conversion from 'void*' to '…*'`——两个"看不懂的 C++ 错"其实都只是这一行宏。
+ * C++ 用 `0`（标准做法，可移植）。 */
+#ifndef NULL
+# ifdef __cplusplus
+#  define NULL 0
+# else
+#  define NULL ((void *)0)
+# endif
+#endif
 #define EOF (-1)
 #define RAND_MAX 0x7FFFFFFF
 
