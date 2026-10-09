@@ -16,6 +16,10 @@ use crate::errno::{set_errno, from_libsys};
 #[unsafe(no_mangle)]
 pub extern "C" fn exit(code: c_int) -> ! {
     crate::stdlib::run_atexit_handlers(code);
+    // **必须冲刷 stdio 缓冲**（2026-10 起 stdio 有缓冲层）：不冲刷就是**静默丢数据**——
+    // 程序用 printf/fwrite 写的东西会留在用户态缓冲里随进程消失。_exit 按 POSIX
+    // 语义**不**冲刷，那是调用方明确要求的"立即终止"。
+    let _ = crate::stdio::fflush_all();
     libsys::exit(code)
 }
 

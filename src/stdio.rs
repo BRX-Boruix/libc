@@ -18,7 +18,7 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::c_char;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// 使 `UnsafeCell<FILE>` 可作为 Sync static（单进程模型 + STREAM_LOCK 保护）。
 struct SyncStream(UnsafeCell<FILE>);
@@ -172,7 +172,7 @@ pub fn stdio_init() {
             str_src: core::ptr::null(), str_len: 0, str_pos: 0,
         });
         static STREAM_STDOUT: SyncStream = SyncStream::new(FILE {
-            fd: 1, mode: FmMode::Write, buf_mode: FmBufMode::None, eof: false, error: false,
+            fd: 1, mode: FmMode::Write, buf_mode: FmBufMode::Line, eof: false, error: false,
             buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false, pushback: -1,
             str_src: core::ptr::null(), str_len: 0, str_pos: 0,
         });
@@ -200,11 +200,18 @@ unsafe fn alloc_file(fd: u64, fm: FmMode) -> *mut FILE {
     }
     unsafe {
         core::ptr::write(fp, FILE {
-            fd, mode: fm, buf_mode: FmBufMode::None, eof: false, error: false,
+            fd, mode: fm,
+            // 写流默认**全缓冲**（2026-10 实测驱动：内核写直通 8.9ms/次）。
+            // 读流本轮不缓冲（读侧要处理与 lseek/fseek 的位置语义，另案）。
+            buf_mode: if fm.can_write() { FmBufMode::Full } else { FmBufMode::None },
+            eof: false, error: false,
             buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false,
             pushback: -1,
             str_src: core::ptr::null(), str_len: 0, str_pos: 0,
         });
+        // 登记以便 fflush(NULL) 与 exit 冲刷全部流。表满则如实放弃（该流仍可用，
+        // 只是不会被 exit 自动冲刷——返回 false 不假装登记成功）。
+        let _ = stream_register(fp);
     }
     fp
 }
@@ -363,6 +370,9 @@ pub unsafe extern "C" fn fclose(fp: *mut FILE) -> c_int {
             set_errno(EBADF);
             return EOF;
         }
+        // **先冲刷再关**（有缓冲后这是数据不丢的唯一保证）。
+        let _ = wflush(f);
+        stream_unregister(fp);
         let fd = f.fd;
         f.closed = true;
         // tmpfile 的延迟删除：先删文件再关 fd（顺序无关，但先删更贴近 POSIX 语义）。
@@ -402,6 +412,133 @@ fn fio_write(fd: u64, buf: &[u8]) -> isize {
     unsafe { crate::unistd::write(fd as c_int, buf.as_ptr() as *const c_void, buf.len()) }
 }
 
+// ---------- 用户态缓冲层（2026-10 实测驱动的实现） ----------
+//
+// **为什么现在必须有**：此前本 libc 的 stdio **不做任何缓冲**，`fwrite`/`fputc`/`fputs`/
+// `vfprintf` 每次调用直接把字节交给内核。而本内核的文件系统是**写直通**（`CachingByteDevice`
+// 注释自陈"先落盘、成功后才更新缓存"），故每次 `write` 系统调用真的同步落盘一次——
+// 机内实测 **8.9 毫秒/次**（正常系统 1~2 微秒）。
+//
+// 后果（全部有硬数据）：tcc 链接 `libc.a` 后节数 **4049**，写 ELF 时每节一次 `fwrite` ⇒
+// 4049 × 8.9ms = **36 秒**（实测 "section headers" 35 秒）。整条链接 ~150 秒。
+//
+// **边界（必须与 `fflush`/`exit` 一起读）**：一旦有缓冲，"进程退出时缓冲里的数据"就成了
+// 真实的数据丢失面。故本实现同时保证：`fflush` 获得**真实语义**（不再是空操作）、
+// `fclose` 先冲刷再关、**`exit` 必须冲刷所有流**（`_exit` 按 POSIX 语义不冲刷）。
+
+/// 缓冲容量（POSIX `BUFSIZ` 的常见取值）。
+const WBUF_CAP: usize = 4096;
+/// 同时打开的流上限（供 `fflush(NULL)` 与 `exit` 冲刷全部流）。
+const MAX_OPEN_STREAMS: usize = 64;
+static OPEN_STREAMS: [AtomicUsize; MAX_OPEN_STREAMS] =
+    [const { AtomicUsize::new(0) }; MAX_OPEN_STREAMS];
+
+/// 登记一个打开的流（`fopen`/`fdopen` 调用）。表满则如实放弃登记（返回 false）。
+fn stream_register(fp: *mut FILE) -> bool {
+    for s in OPEN_STREAMS.iter() {
+        if s.load(Ordering::Relaxed) == 0
+            && s.compare_exchange(0, fp as usize, Ordering::AcqRel, Ordering::Relaxed).is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+/// 注销一个流（`fclose` 调用）。
+fn stream_unregister(fp: *mut FILE) {
+    for s in OPEN_STREAMS.iter() {
+        if s.load(Ordering::Relaxed) == fp as usize {
+            s.store(0, Ordering::Release);
+            return;
+        }
+    }
+}
+
+/// 惰性分配写缓冲。返回 false = 分配失败（**如实退回无缓冲**，绝不假装有缓冲）。
+unsafe fn wbuf_ensure(f: &mut FILE) -> bool {
+    unsafe {
+        if !f.buf_ptr.is_null() {
+            return true;
+        }
+        let p = crate::malloc::malloc(WBUF_CAP) as *mut u8;
+        if p.is_null() {
+            return false;
+        }
+        f.buf_ptr = p;
+        f.buf_len = 0;
+        f.buf_pos = 0;
+        true
+    }
+}
+
+/// 把写缓冲里的内容**全部**落盘（短写循环，如实失败）。返回 false = 出错（已置 `error`）。
+unsafe fn wflush(f: &mut FILE) -> bool {
+    unsafe {
+        if f.buf_ptr.is_null() || f.buf_len == 0 {
+            f.buf_len = 0;
+            return true;
+        }
+        let mut done = 0usize;
+        while done < f.buf_len {
+            let slice = core::slice::from_raw_parts(f.buf_ptr.add(done), f.buf_len - done);
+            let n = fio_write(f.fd, slice);
+            if n <= 0 {
+                f.error = true;
+                f.buf_len = 0;
+                return false;
+            }
+            done += n as usize;
+        }
+        f.buf_len = 0;
+        true
+    }
+}
+
+/// 把字节交给写缓冲（必要时先冲刷）。`line_flush` = 行缓冲模式下遇到 '\n' 时的立即冲刷。
+unsafe fn wbuf_put(f: &mut FILE, bytes: &[u8], line_flush: bool) -> bool {
+    unsafe {
+        // 无缓冲（stderr / 分配失败退回 / 显式 None）：直接落盘，语义与改造前一致。
+        if f.buf_mode == FmBufMode::None || !wbuf_ensure(f) {
+            let mut done = 0usize;
+            while done < bytes.len() {
+                let n = fio_write(f.fd, &bytes[done..]);
+                if n <= 0 { f.error = true; return false; }
+                done += n as usize;
+            }
+            return true;
+        }
+        let mut off = 0usize;
+        while off < bytes.len() {
+            let space = WBUF_CAP - f.buf_len;
+            if space == 0 {
+                if !wflush(f) { return false; }
+                continue;
+            }
+            let take = core::cmp::min(space, bytes.len() - off);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr().add(off), f.buf_ptr.add(f.buf_len), take);
+            f.buf_len += take;
+            off += take;
+        }
+        if line_flush && f.buf_mode == FmBufMode::Line && !wflush(f) {
+            return false;
+        }
+        true
+    }
+}
+
+/// 冲刷**所有**已登记的流（`fflush(NULL)` 与 `exit` 用）。返回 0 = 全部成功。
+pub fn fflush_all() -> c_int {
+    let mut rc = 0;
+    for s in OPEN_STREAMS.iter() {
+        let p = s.load(Ordering::Acquire) as *mut FILE;
+        if !p.is_null() {
+            unsafe {
+                if !wflush(&mut *p) { rc = EOF; }
+            }
+        }
+    }
+    rc
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fread(ptr: *mut c_void, size: size_t, nmemb: size_t, fp: *mut FILE) -> size_t {
     if fp.is_null() || ptr.is_null() {
@@ -455,12 +592,13 @@ pub unsafe extern "C" fn fwrite(ptr: *const c_void, size: size_t, nmemb: size_t,
             return 0;
         }
         let buf = core::slice::from_raw_parts(ptr as *const u8, total);
-        match fio_write(f.fd, buf) {
-            n if n >= 0 => n as usize / size,
-            _ => {
-                f.error = true;
-                0
-            }
+        // 经用户态缓冲层（2026-10：见 wbuf_put 的说明——内核写直通 8.9ms/次，
+        // 4049 次 fwrite 就是 36 秒）。无缓冲时 wbuf_put 内部直接落盘，语义不变。
+        if wbuf_put(f, buf, false) {
+            total / size
+        } else {
+            f.error = true;
+            0
         }
     }
 }
@@ -479,8 +617,17 @@ pub unsafe extern "C" fn fwrite(ptr: *const c_void, size: size_t, nmemb: size_t,
 /// 此前本函数没有文档注释，于是它在桩符号普查（`libc/tools/audit_stub_symbols.py`）里
 /// 与真正的桩无法区分——「刻意的空操作」必须**写出来**才成立。
 #[unsafe(no_mangle)]
-pub extern "C" fn fflush(_fp: *mut FILE) -> c_int {
-    0
+pub unsafe extern "C" fn fflush(fp: *mut FILE) -> c_int {
+    // **真实语义**（2026-10 起）：此前 stdio 无缓冲，空操作是诚实的；现在有缓冲层，
+    // 空操作会变成**静默丢数据**，故必须真的把缓冲落盘。
+    // fflush(NULL) = 冲刷所有已登记的流（POSIX）。
+    if fp.is_null() {
+        return fflush_all();
+    }
+    unsafe {
+        let f = &mut *fp;
+        if wflush(f) { 0 } else { EOF }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -542,12 +689,13 @@ pub unsafe extern "C" fn fputc(c: c_int, fp: *mut FILE) -> c_int {
             return EOF;
         }
         let b = [(c & 0xFF) as u8; 1];
-        match fio_write(f.fd, &b) {
-            n if n >= 0 => c & 0xFF,
-            _ => {
-                f.error = true;
-                EOF
-            }
+        // 行缓冲流遇换行符立即冲刷（保持交互可见性，同时仍把同行的多次写合并）。
+        let line_flush = (c & 0xFF) as u8 == b'\n';
+        if wbuf_put(f, &b, line_flush) {
+            c & 0xFF
+        } else {
+            f.error = true;
+            EOF
         }
     }
 }
@@ -798,6 +946,9 @@ pub unsafe extern "C" fn fputs(s: *const c_char, fp: *mut FILE) -> c_int {
             return 0;
         }
         let buf = core::slice::from_raw_parts(s as *const u8, len);
+        if wbuf_put(f, buf, false) {
+            return 0;
+        }
         match fio_write(f.fd, buf) {
             n if n >= 0 => 0,
             _ => {
