@@ -29,6 +29,12 @@ long boruix_brk(unsigned long new_break);
  * 此前没有声明（头文件覆盖审计列出）。 */
 int boruix_malloc_corrupt(void);
 
+/* 底层写调用计数 / 累计字节（stdio 缓冲层是否生效的**可观察真值**，2026-10）。
+ * 用法：两次采样之间做 N 次 fwrite，看计数增量是否远小于 N——
+ * 缓冲生效时应约为 N*size/4096 次。 */
+unsigned long boruix_stdio_write_calls(void);
+unsigned long boruix_stdio_write_bytes(void);
+
 /* yield：主动让出 CPU（Boruix 侧入口名；POSIX 的 sched_yield 语义）。
  * 实现在 libc/src/process.rs，此前没有声明（头文件覆盖审计列出）。 */
 int yield_sys(void);

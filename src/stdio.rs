@@ -407,9 +407,31 @@ pub unsafe extern "C" fn fclose(fp: *mut FILE) -> c_int {
 fn fio_read(fd: u64, buf: &mut [u8]) -> isize {
     unsafe { crate::unistd::read(fd as c_int, buf.as_mut_ptr() as *mut c_void, buf.len()) }
 }
+/// **底层写调用计数**（诊断用，常驻、零成本：一次 Relaxed 自增）。
+///
+/// 存在的理由（S09 可观察）：判断"stdio 缓冲是否真的生效"**不能靠推测**——
+/// 只要看这个计数就能判定"每次 fwrite 是否仍在做系统调用"。实测（2026-10）：
+/// 2000 次 64 字节 fwrite 经 4 KiB 缓冲后**本应只有 ~32 次**底层写。
+pub static FIO_WRITE_CALLS: AtomicUsize = AtomicUsize::new(0);
+/// 底层写累计字节数（诊断用）。
+pub static FIO_WRITE_BYTES: AtomicUsize = AtomicUsize::new(0);
+
 #[inline]
 fn fio_write(fd: u64, buf: &[u8]) -> isize {
+    FIO_WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
+    FIO_WRITE_BYTES.fetch_add(buf.len(), Ordering::Relaxed);
     unsafe { crate::unistd::write(fd as c_int, buf.as_ptr() as *const c_void, buf.len()) }
+}
+
+/// 读底层写计数（诊断 ABI，C 侧声明见 libc/include/boruix.h）。
+#[unsafe(no_mangle)]
+pub extern "C" fn boruix_stdio_write_calls() -> usize {
+    FIO_WRITE_CALLS.load(Ordering::Relaxed)
+}
+/// 读底层写累计字节（诊断 ABI）。
+#[unsafe(no_mangle)]
+pub extern "C" fn boruix_stdio_write_bytes() -> usize {
+    FIO_WRITE_BYTES.load(Ordering::Relaxed)
 }
 
 // ---------- 用户态缓冲层（2026-10 实测驱动的实现） ----------
