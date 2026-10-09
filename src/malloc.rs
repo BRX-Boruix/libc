@@ -173,8 +173,22 @@ impl SpinLock {
         self.held.store(false, Ordering::Release);
     }
 }
+/// 小尺寸的**精确**分档步进（字节）。
+///
+/// **为什么必须是精确档**（2026-10 实测的两次教训）：
+/// - 幂档（1 KiB 以上按 2 的幂）会让**一个桶覆盖一个区间**（如 1025..2048），
+///   于是桶里可能有比请求 `min` **小**的块。
+/// - 第一次修法（桶内线性找 `sz >= min`）保证了**正确性**，但在**无合并**的碎片化堆里，
+///   偏小的块会不断在桶里堆积，扫描退化成 O(n)：实测同一份输入，干净堆链接 5.8 秒，
+///   而碎片化堆（前面刚跑过 heapstress/cxxstress/fuzz/forkrace）链接 **137.6 秒**。
+/// - 精确档下**同桶块大小全相等** ⇒ `sz >= min` 恒成立、扫描立即命中，退化消失。
+const SMALL_STEP: usize = 16;
+/// 精确档覆盖的上限（64 KiB）。再大的块少而大，用 2 的幂分档即可。
+const SMALL_MAX: usize = 64 * 1024;
+/// 精确档数量：32, 48, …, 65536。
+const SMALL_BINS: usize = (SMALL_MAX - MIN_BLOCK) / SMALL_STEP + 1;
 
-/// 空闲桶数量：小尺寸按 16 字节步进（32..=1024 → 63 桶），更大尺寸按 2 的幂。
+/// 空闲桶数量：精确档 + 大块（2 的幂）档 + 余量。
 ///
 /// 为什么分桶（2026-10 实测的根因修复）：原实现是**单条按地址升序的空闲表**，
 /// `freelist_take`（first-fit）/`freelist_insert`（有序插入）/`freelist_contains`
@@ -182,27 +196,29 @@ impl SpinLock {
 ///   - `heapstress` 的 19,200 次操作耗时 **25.7 秒**（≈1.3 毫秒/次，正常约 50 纳秒）；
 ///   - 系统内 `tcc <1.5KB .s> -o <out>` 的**链接**一步耗时 **183.9 秒**（同一次汇编只要 6.6 秒）；
 ///   - 宿主上 GCC 自身构建单文件 70+ 分钟编不完。
-/// 分桶后 take/push 都是 **O(1)**（take 最坏扫 96 个桶头）。
+/// 分桶后 take/push 都是 **O(1)**。
 ///
 /// **代价（如实声明）**：**不再做相邻块合并（coalescing）**——块落在尺寸桶里，
 /// 不再按地址排序，故找不到"地址相邻"的另一半。碎片换速度；本系统有 1 GiB 量级
 /// 可增长堆，且实测的分配模式（大量同尺寸小块）天然复用同一桶，故这是划算的取舍。
-const NBINS: usize = 96;
+const NBINS: usize = SMALL_BINS + 64;
 
 /// 尺寸 → 桶号。`size` 恒 >= `MIN_BLOCK`(32) 且为 16 的倍数。
 #[inline]
 fn bin_of(size: usize) -> usize {
-    if size <= 1024 {
-        (size >> 4) - 2 // 32→0, 48→1, …, 1024→62
+    if size <= SMALL_MAX {
+        (size - MIN_BLOCK) / SMALL_STEP // 精确档：同桶块大小全相等
     } else {
-        // 1025..2048→63, 2049..4096→64, …（按 2 的幂分档）
-        63 + (usize::BITS - 1 - (size - 1).leading_zeros()) as usize
+        // 大块按 2 的幂分档；逐块 `sz >= min` 校验仍在（见 bin_take），此处只保证桶号不越界。
+        let b = SMALL_BINS + (usize::BITS - 1 - (size - 1).leading_zeros()) as usize;
+        if b >= NBINS { NBINS - 1 } else { b }
     }
 }
 
 /// 每个尺寸桶的空闲块栈顶（地址 0 = 空桶）。块之间用块头的 next 字段串成单链。
 static BINS: [SyncUnsafe<*mut u8>; NBINS] =
     [const { SyncUnsafe::new(core::ptr::null_mut()) }; NBINS];
+
 /// 保护 BINS 与堆元数据的锁。
 static ALLOC_LOCK: SpinLock = SpinLock::new();
 
@@ -299,36 +315,47 @@ unsafe fn bin_push(block: *mut u8) {
     }
 }
 
-/// 取一个 **size >= min** 的块（从 min 的桶起向上找第一个非空桶），必要时分裂。
+/// 取一个 **size >= min** 的块（从 min 的桶起向上找），必要时分裂。
 ///
-/// 返回块起始指针（已 mark_used）；无足够块返回 null。最坏扫 NBINS 个桶头 = O(1)。
+/// **必须逐块校验 `sz >= min`**（2026-10 实测的缺陷）：幂档桶**覆盖一个区间**
+/// （如 1025..2048 同属一桶），故桶里可能有比 `min` 小的块。原实现直接取桶头 ⇒
+/// 当 `min = 2048` 而桶头是 1025 字节时 `sz - min` **下溢**成天文数字 ⇒
+/// `set_block_size(rest, 巨大值)` 写坏块头 ⇒ 之后 `bin_of(巨大值)` 数组越界 panic
+/// （实测：机内 `tcc syscallfuzz.c` 直接 `userspace panic: malloc.rs:296`）。
+/// 现在在本桶内线性找第一个 `sz >= min`（桶很小，代价可接受），找不到才升桶。
 unsafe fn bin_take(min: usize) -> *mut u8 {
     unsafe {
         let mut b = bin_of(min);
         while b < NBINS {
-            let head = *BINS[b].get();
-            if !head.is_null() {
-                *BINS[b].get() = block_next(head);
-                mark_used(head);
-                let sz = block_size(head);
-                // 分裂：剩余 >= MIN_BLOCK 时，把尾部放回**它自己尺寸**的桶。
-                if sz - min >= MIN_BLOCK {
-                    let rest = head.add(min);
-                    set_block_size(rest, sz - min);
-                    bin_push(rest);
-                    set_block_size(head, min);
+            let mut prev: *mut u8 = core::ptr::null_mut();
+            let mut cur: *mut u8 = *BINS[b].get();
+            while !cur.is_null() {
+                let sz = block_size(cur);
+                if sz >= min {
+                    let nxt = block_next(cur);
+                    if prev.is_null() {
+                        *BINS[b].get() = nxt;
+                    } else {
+                        set_block_next(prev, nxt);
+                    }
+                    mark_used(cur);
+                    // 分裂：剩余 >= MIN_BLOCK 时，把尾部放回**它自己尺寸**的桶。
+                    if sz - min >= MIN_BLOCK {
+                        let rest = cur.add(min);
+                        set_block_size(rest, sz - min);
+                        bin_push(rest);
+                        set_block_size(cur, min);
+                    }
+                    return cur;
                 }
-                return head;
+                prev = cur;
+                cur = block_next(cur);
             }
             b += 1;
         }
         core::ptr::null_mut()
     }
 }
-
-/// 向内核申请至少 \`need\` 字节的新堆区（brk），返回新区起始地址。
-/// `boruix_brk(new)`：直接调 `brk` 系统调用（C ABI，声明见 libc/include/boruix.h）。
-///
 /// `new == 0` 表示**仅查询**当前断点。成功返回断点，失败返回 -1 并置 errno。
 ///
 /// **为什么暴露它**：`brk` 是本系统唯一的堆原语，而它此前只有 Rust 侧（`libsys::brk`）
