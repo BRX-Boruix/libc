@@ -107,42 +107,65 @@ pub unsafe fn core_qsort(base: *mut u8, nmemb: usize, size: usize, cmp: QCmp) {
             swap_bytes(elem(base, mid, size), elem(base, hi, size), size);
             let pivot = elem(base, hi, size) as *const c_void;
 
-            // Lomuto：只扫 [lo, hi-1]，主元位置不动。
-            let mut i = lo;
-            let mut j = lo;
-            while j < hi {
-                if cmp(elem(base, j, size) as *const c_void, pivot) < 0 {
-                    if i != j {
-                        swap_bytes(elem(base, i, size), elem(base, j, size), size);
+            // **3 路划分（Dutch national flag）**：分成 <pivot / ==pivot / >pivot 三段。
+            // 主元在 `hi` 全程不动——循环条件是 `i < gt`，而 `gt` 从 `hi` 起只减不加。
+            //
+            // **为什么必须 3 路**（2026-10 实测的根因）：2 路 Lomuto 在**大量相等键**上
+            // 退化 O(n²)。宿主实测（n=160k）：全相等键 **6.469 秒**、2 个键 3.254 秒，
+            // 而随机输入只要 **13.8 毫秒**（慢 470 倍）。ELF 的**局部符号名字为空**，
+            // `tcc` 的 `sort_syms` 正是这种输入 ⇒ 系统内 `tcc g.o -o g` 的链接一步
+            // 实测 **176 秒**，瓶颈就在这里。
+            let pivot = elem(base, hi, size) as *const c_void;
+            let mut lt = lo; // [lo, lt) 全 < pivot
+            let mut i = lo;  // [lt, i) 全 == pivot
+            let mut gt = hi; // [gt, hi] 全 > pivot，且 **a[hi] 本身不动**
+            while i < gt {
+                let c = cmp(elem(base, i, size) as *const c_void, pivot);
+                if c < 0 {
+                    if lt != i {
+                        swap_bytes(elem(base, lt, size), elem(base, i, size), size);
                     }
+                    lt += 1;
+                    i += 1;
+                } else if c > 0 {
+                    gt -= 1;
+                    swap_bytes(elem(base, i, size), elem(base, gt, size), size);
+                    // 换进来的元素**尚未检查**，故 i 不前进。
+                } else {
                     i += 1;
                 }
-                j += 1;
             }
-            if i != hi {
-                swap_bytes(elem(base, i, size), elem(base, hi, size), size);
+            // **把主元从 hi 归位到 gt**：循环结束时 [lt, gt) == pivot 而 [gt, hi-1] > pivot，
+            // 但 a[hi] 仍是 pivot（== pivot）——它排在那些 > pivot 的元素**之后**，是错的。
+            // 与 a[gt] 交换后：[lt, gt] == pivot、[gt+1, hi] > pivot，两段才各自连续。
+            // （首版漏了这一步，宿主对照立刻报"随机/已升序 有序=false"。）
+            if gt != hi {
+                swap_bytes(elem(base, gt, size), elem(base, hi, size), size);
             }
-            // 主元落位 i：左 [lo, i-1]，右 [i+1, hi]。
+            // 现在：[lo, lt) < pivot；[lt, gt] == pivot（**整段跳过，不递归**）；[gt+1, hi] > pivot。
+            // 等键段不递归 ⇒ 全相等输入是 O(n)（这正是修掉的那个退化）。
+            let l_n = lt - lo;
+            let r_n = hi - gt;
             // **先处理较小的一侧**，把较大的一侧压栈（栈深 ≤ log2 n）。
-            if i - lo < hi - i {
-                if i < hi {
-                    stack_lo[sp] = i + 1;
+            if l_n < r_n {
+                if r_n > 0 {
+                    stack_lo[sp] = gt + 1;
                     stack_hi[sp] = hi;
                     sp += 1;
                 }
-                if i > lo {
-                    hi = i - 1;
+                if l_n > 0 {
+                    hi = lt - 1;
                 } else {
                     break;
                 }
             } else {
-                if i > lo {
+                if l_n > 0 {
                     stack_lo[sp] = lo;
-                    stack_hi[sp] = i - 1;
+                    stack_hi[sp] = lt - 1;
                     sp += 1;
                 }
-                if i < hi {
-                    lo = i + 1;
+                if r_n > 0 {
+                    lo = gt + 1;
                 } else {
                     break;
                 }
