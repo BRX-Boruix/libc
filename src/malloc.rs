@@ -39,7 +39,7 @@
 //! （锁获取顺序：仅本锁，无嵌套锁序，S21）。
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// 包一层使内部可变指针可作为 Sync static（单进程模型 + 锁保护下安全）。
 // SAFETY: 单进程模型下所有经 FREELIST 的访问都持有 ALLOC_LOCK 互斥；
@@ -173,24 +173,9 @@ impl SpinLock {
         self.held.store(false, Ordering::Release);
     }
 }
-/// 小尺寸的**精确**分档步进（字节）。
+/// 空闲桶数量：小块 16 字节步进（32..=1024 → 63 桶）+ 大块按 2 的幂。
 ///
-/// **为什么必须是精确档**（2026-10 实测的两次教训）：
-/// - 幂档（1 KiB 以上按 2 的幂）会让**一个桶覆盖一个区间**（如 1025..2048），
-///   于是桶里可能有比请求 `min` **小**的块。
-/// - 第一次修法（桶内线性找 `sz >= min`）保证了**正确性**，但在**无合并**的碎片化堆里，
-///   偏小的块会不断在桶里堆积，扫描退化成 O(n)：实测同一份输入，干净堆链接 5.8 秒，
-///   而碎片化堆（前面刚跑过 heapstress/cxxstress/fuzz/forkrace）链接 **137.6 秒**。
-/// - 精确档下**同桶块大小全相等** ⇒ `sz >= min` 恒成立、扫描立即命中，退化消失。
-const SMALL_STEP: usize = 16;
-/// 精确档覆盖的上限（64 KiB）。再大的块少而大，用 2 的幂分档即可。
-const SMALL_MAX: usize = 64 * 1024;
-/// 精确档数量：32, 48, …, 65536。
-const SMALL_BINS: usize = (SMALL_MAX - MIN_BLOCK) / SMALL_STEP + 1;
-
-/// 空闲桶数量：精确档 + 大块（2 的幂）档 + 余量。
-///
-/// 为什么分桶（2026-10 实测的根因修复）：原实现是**单条按地址升序的空闲表**，
+/// **为什么分桶**（2026-10 实测的根因修复）：原实现是**单条按地址升序的空闲表**，
 /// `freelist_take`（first-fit）/`freelist_insert`（有序插入）/`freelist_contains`
 /// 每次操作都**线性扫整条表** ⇒ 每次分配/释放 O(n)。实测代价：
 ///   - `heapstress` 的 19,200 次操作耗时 **25.7 秒**（≈1.3 毫秒/次，正常约 50 纳秒）；
@@ -198,19 +183,26 @@ const SMALL_BINS: usize = (SMALL_MAX - MIN_BLOCK) / SMALL_STEP + 1;
 ///   - 宿主上 GCC 自身构建单文件 70+ 分钟编不完。
 /// 分桶后 take/push 都是 **O(1)**。
 ///
+/// **为什么是"小块精确 + 大块幂档"这个粒度**（第三次迭代的实测结论）：曾把小尺寸也做成
+/// 精确档（16 字节步进到 64 KiB，共 4159 桶），结果**同一份输入、同一条命令**下 tcc 链接从
+/// **5.758 秒变成 141.4 秒**（再加位图仍是 153.3 秒），而分配器基准 heapstress 几乎不变
+/// （4.58 → 4.99 秒）⇒ **退化不在分配器自身**。故回退到实测最快的粒度。
+///
 /// **代价（如实声明）**：**不再做相邻块合并（coalescing）**——块落在尺寸桶里，
 /// 不再按地址排序，故找不到"地址相邻"的另一半。碎片换速度；本系统有 1 GiB 量级
 /// 可增长堆，且实测的分配模式（大量同尺寸小块）天然复用同一桶，故这是划算的取舍。
-const NBINS: usize = SMALL_BINS + 64;
+const NBINS: usize = 96;
 
 /// 尺寸 → 桶号。`size` 恒 >= `MIN_BLOCK`(32) 且为 16 的倍数。
+///
+/// 大块用 2 的幂 ⇒ **一个桶覆盖一个区间**，故 `bin_take` 必须逐块校验 `sz >= min`
+/// （见该函数注释：不校验会让 `sz - min` 下溢并写坏块头）。
 #[inline]
 fn bin_of(size: usize) -> usize {
-    if size <= SMALL_MAX {
-        (size - MIN_BLOCK) / SMALL_STEP // 精确档：同桶块大小全相等
+    if size <= 1024 {
+        (size >> 4) - 2 // 32→0, 48→1, …, 1024→62（小尺寸本就是精确档）
     } else {
-        // 大块按 2 的幂分档；逐块 `sz >= min` 校验仍在（见 bin_take），此处只保证桶号不越界。
-        let b = SMALL_BINS + (usize::BITS - 1 - (size - 1).leading_zeros()) as usize;
+        let b = 63 + (usize::BITS - 1 - (size - 1).leading_zeros()) as usize;
         if b >= NBINS { NBINS - 1 } else { b }
     }
 }
@@ -218,6 +210,47 @@ fn bin_of(size: usize) -> usize {
 /// 每个尺寸桶的空闲块栈顶（地址 0 = 空桶）。块之间用块头的 next 字段串成单链。
 static BINS: [SyncUnsafe<*mut u8>; NBINS] =
     [const { SyncUnsafe::new(core::ptr::null_mut()) }; NBINS];
+
+/// **非空桶位图**：第 b 位 = 桶 b 非空。用 trailing_zeros 一步定位下一个非空桶。
+///
+/// **为什么必须有**（2026-10 实测，第三次迭代才找对）：bin_take 从 bin_of(min) 起
+/// **向上扫空桶**，桶数就是扫描上限：
+///   - 96 个（幂档）时最多扫 96 次 —— 但幂档桶覆盖区间，桶内要线性找 sz >= min，
+///     碎片化堆里偏小的块堆积 ⇒ 实测链接 137.6 秒；
+///   - 4159 个（精确档）时桶内不用扫了，**但空桶扫描上限变成 4159** ⇒ 实测**同一份输入、
+///     同一条命令**：96 桶时链接 **5.8 秒**，4159 桶时 **141.4 秒**。
+/// 位图让"找下一个非空桶"是 O(1)（一次 trailing_zeros），两种退化同时消失。
+static BIN_MAP: [AtomicU64; (NBINS + 63) / 64] =
+    [const { AtomicU64::new(0) }; (NBINS + 63) / 64];
+
+#[inline]
+fn bin_map_set(b: usize) {
+    BIN_MAP[b / 64].fetch_or(1u64 << (b % 64), Ordering::Relaxed);
+}
+#[inline]
+fn bin_map_clear(b: usize) {
+    BIN_MAP[b / 64].fetch_and(!(1u64 << (b % 64)), Ordering::Relaxed);
+}
+/// 找 >= from 的最小非空桶号；没有则 None。最坏扫 65 个字。
+#[inline]
+fn bin_map_next(from: usize) -> Option<usize> {
+    let mut w = from / 64;
+    if w >= BIN_MAP.len() {
+        return None;
+    }
+    let mut bits = BIN_MAP[w].load(Ordering::Relaxed) & (!0u64 << (from % 64));
+    loop {
+        if bits != 0 {
+            let b = w * 64 + bits.trailing_zeros() as usize;
+            return if b < NBINS { Some(b) } else { None };
+        }
+        w += 1;
+        if w >= BIN_MAP.len() {
+            return None;
+        }
+        bits = BIN_MAP[w].load(Ordering::Relaxed);
+    }
+}
 
 /// 保护 BINS 与堆元数据的锁。
 static ALLOC_LOCK: SpinLock = SpinLock::new();
@@ -311,22 +344,23 @@ unsafe fn bin_push(block: *mut u8) {
         let b = bin_of(block_size(block));
         set_block_next(block, *BINS[b].get());
         *BINS[b].get() = block;
+        bin_map_set(b);
         mark_free(block);
     }
 }
 
-/// 取一个 **size >= min** 的块（从 min 的桶起向上找），必要时分裂。
+/// 取一个 **size >= min** 的块；用位图 O(1) 定位下一个非空桶，必要时分裂。
 ///
-/// **必须逐块校验 `sz >= min`**（2026-10 实测的缺陷）：幂档桶**覆盖一个区间**
-/// （如 1025..2048 同属一桶），故桶里可能有比 `min` 小的块。原实现直接取桶头 ⇒
-/// 当 `min = 2048` 而桶头是 1025 字节时 `sz - min` **下溢**成天文数字 ⇒
-/// `set_block_size(rest, 巨大值)` 写坏块头 ⇒ 之后 `bin_of(巨大值)` 数组越界 panic
-/// （实测：机内 `tcc syscallfuzz.c` 直接 `userspace panic: malloc.rs:296`）。
-/// 现在在本桶内线性找第一个 `sz >= min`（桶很小，代价可接受），找不到才升桶。
+/// **两处退化都已修**（2026-10 实测）：
+/// 1. 桶里可能有比 min 小的块（幂档桶覆盖区间）⇒ 直接取桶头会让 `sz - min` **下溢**、
+///    写坏块头、随后 `bin_of` 越界 panic（实测 `userspace panic: malloc.rs:296`）。
+///    故桶内**逐块校验 `sz >= min`**。
+/// 2. 从 min 的桶起**向上扫空桶**，桶数就是扫描上限 ⇒ 精确档（4159 桶）下实测链接
+///    141.4 秒。故用**非空桶位图**一步定位（`bin_map_next`）。
 unsafe fn bin_take(min: usize) -> *mut u8 {
     unsafe {
-        let mut b = bin_of(min);
-        while b < NBINS {
+        let mut from = bin_of(min);
+        while let Some(b) = bin_map_next(from) {
             let mut prev: *mut u8 = core::ptr::null_mut();
             let mut cur: *mut u8 = *BINS[b].get();
             while !cur.is_null() {
@@ -337,6 +371,9 @@ unsafe fn bin_take(min: usize) -> *mut u8 {
                         *BINS[b].get() = nxt;
                     } else {
                         set_block_next(prev, nxt);
+                    }
+                    if (*BINS[b].get()).is_null() {
+                        bin_map_clear(b);
                     }
                     mark_used(cur);
                     // 分裂：剩余 >= MIN_BLOCK 时，把尾部放回**它自己尺寸**的桶。
@@ -351,7 +388,7 @@ unsafe fn bin_take(min: usize) -> *mut u8 {
                 prev = cur;
                 cur = block_next(cur);
             }
-            b += 1;
+            from = b + 1;
         }
         core::ptr::null_mut()
     }
