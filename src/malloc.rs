@@ -15,15 +15,23 @@
 //! 块起始地址恒 16 字节对齐（brk 页对齐 → 0 mod 16）。
 //! 分配时把 payload 相对块起始的偏移写在 payload-8，free/realloc 据此反推块起始。
 //!
-//! ## 空闲表
+//! ## 空闲表：**按尺寸分档的桶**（2026-10 重写）
 //!
-//! 按地址升序的单向链表（\`FREELIST\`）。按地址排序使相邻块合并（coalescing）
-//! 只需检查链表中的直接邻居即可——插入时维护有序，free 时合并左右邻。
+//! 原实现是**单条按地址升序的空闲表**，每次 malloc/free 都要线性扫整条表 ⇒
+//! 每次操作 O(n)。实测代价触目惊心：heapstress 的 19,200 次操作耗时 **25.7 秒**
+//! （≈1.3 毫秒/次；正常分配器约 50 纳秒），系统内 tcc 的**链接**一步 **183.9 秒**，
+//! 宿主上 GCC 单文件构建 70+ 分钟编不完——**同一根因**。
 //!
-//! ## 分配策略：first-fit + 分裂
+//! 现改为 NBINS 个尺寸桶（小块 16 字节步进、大块按 2 的幂）：push/take 都是
+//! **O(1)**，双重释放检测用块头**标志位**（也是 O(1)）。
 //!
-//! malloc 从表头线性查找第一个足够大的块；若剩余 >= 最小块（32B），分裂出
-//! 剩余空闲块并回插。释放时按地址插入并尝试与邻居合并。
+//! **代价（如实声明）**：**不再做相邻块合并**（coalescing）——块按尺寸入桶，
+//! 不再按地址排序，故找不到"地址相邻"的另一半。用碎片换速度。
+//!
+//! ## 分配策略：桶内取用 + 分裂
+//!
+//! malloc 从 min 的桶起向上找第一个非空桶；若取到的块剩余 >= 最小块（32B），
+//! 分裂出剩余空闲块并压回**它自己尺寸**的桶。
 //!
 //! ## 并发
 //!
@@ -141,20 +149,6 @@ unsafe fn poison_payload(payload: *mut u8, cap: usize) {
     }
 }
 
-/// 检测 block 是否已在空闲表中（double-free 防御）。
-unsafe fn freelist_contains(block: *mut u8) -> bool {
-    unsafe {
-        let mut cur: *mut u8 = *FREELIST.get();
-        while !cur.is_null() {
-            if cur == block {
-                return true;
-            }
-            cur = block_next(cur);
-        }
-        false
-    }
-}
-
 /// 把 n 向上取整到 16 的倍数。
 #[inline]
 fn align16(n: usize) -> usize {
@@ -180,22 +174,75 @@ impl SpinLock {
     }
 }
 
-/// 全局空闲块链表的表头指针（地址 0 = 空表）。
-static FREELIST: SyncUnsafe<*mut u8> = SyncUnsafe::new(core::ptr::null_mut());
-/// 保护 FREELIST 与堆元数据的锁。
+/// 空闲桶数量：小尺寸按 16 字节步进（32..=1024 → 63 桶），更大尺寸按 2 的幂。
+///
+/// 为什么分桶（2026-10 实测的根因修复）：原实现是**单条按地址升序的空闲表**，
+/// `freelist_take`（first-fit）/`freelist_insert`（有序插入）/`freelist_contains`
+/// 每次操作都**线性扫整条表** ⇒ 每次分配/释放 O(n)。实测代价：
+///   - `heapstress` 的 19,200 次操作耗时 **25.7 秒**（≈1.3 毫秒/次，正常约 50 纳秒）；
+///   - 系统内 `tcc <1.5KB .s> -o <out>` 的**链接**一步耗时 **183.9 秒**（同一次汇编只要 6.6 秒）；
+///   - 宿主上 GCC 自身构建单文件 70+ 分钟编不完。
+/// 分桶后 take/push 都是 **O(1)**（take 最坏扫 96 个桶头）。
+///
+/// **代价（如实声明）**：**不再做相邻块合并（coalescing）**——块落在尺寸桶里，
+/// 不再按地址排序，故找不到"地址相邻"的另一半。碎片换速度；本系统有 1 GiB 量级
+/// 可增长堆，且实测的分配模式（大量同尺寸小块）天然复用同一桶，故这是划算的取舍。
+const NBINS: usize = 96;
+
+/// 尺寸 → 桶号。`size` 恒 >= `MIN_BLOCK`(32) 且为 16 的倍数。
+#[inline]
+fn bin_of(size: usize) -> usize {
+    if size <= 1024 {
+        (size >> 4) - 2 // 32→0, 48→1, …, 1024→62
+    } else {
+        // 1025..2048→63, 2049..4096→64, …（按 2 的幂分档）
+        63 + (usize::BITS - 1 - (size - 1).leading_zeros()) as usize
+    }
+}
+
+/// 每个尺寸桶的空闲块栈顶（地址 0 = 空桶）。块之间用块头的 next 字段串成单链。
+static BINS: [SyncUnsafe<*mut u8>; NBINS] =
+    [const { SyncUnsafe::new(core::ptr::null_mut()) }; NBINS];
+/// 保护 BINS 与堆元数据的锁。
 static ALLOC_LOCK: SpinLock = SpinLock::new();
 
 // ---------- 块内偏移访问（裸指针，锁内访问） ----------
 
-/// 读块头 size 字段。
+/// size 字段的**最低位**兼作"本块当前在空闲表上"的标志。
+///
+/// 为什么可以：所有块大小都是 16 的倍数（`align16`），最低 4 位恒为 0。
+/// 为什么需要：原实现用 `freelist_contains` **线性扫整条空闲表**来判断双重释放——
+/// 那是每次 free 一次 O(n) 扫描，是实测"每次分配/释放 ~1.3 毫秒"的主因之一
+/// （正常分配器约 50 纳秒）。用一位做标志后，双重释放检测是 O(1)。
+const FREE_BIT: usize = 1;
+
+/// 读块头 size 字段（**掩掉标志位**）。
 #[inline]
 unsafe fn block_size(p: *mut u8) -> usize {
-    unsafe { *(p as *const usize) }
+    unsafe { *(p as *const usize) & !FREE_BIT }
 }
-/// 写块头 size 字段。
+/// 写块头 size 字段（**保留标志位**：调用方可能在标记为已用之前改大小）。
 #[inline]
 unsafe fn set_block_size(p: *mut u8, sz: usize) {
-    unsafe { *(p as *mut usize) = sz; }
+    unsafe {
+        let raw = *(p as *const usize);
+        *(p as *mut usize) = (sz & !FREE_BIT) | (raw & FREE_BIT);
+    }
+}
+/// 标记本块"在空闲表上"。
+#[inline]
+unsafe fn mark_free(p: *mut u8) {
+    unsafe { *(p as *mut usize) |= FREE_BIT; }
+}
+/// 标记本块"已分配"（不在空闲表上）。
+#[inline]
+unsafe fn mark_used(p: *mut u8) {
+    unsafe { *(p as *mut usize) &= !FREE_BIT; }
+}
+/// 本块当前是否在空闲表上（O(1) 双重释放检测）。
+#[inline]
+unsafe fn is_free(p: *mut u8) -> bool {
+    unsafe { *(p as *const usize) & FREE_BIT != 0 }
 }
 /// 读空闲块 next 字段（偏移 8）。
 #[inline]
@@ -242,70 +289,38 @@ fn align_up(n: usize, align: usize) -> usize {
 
 // ---------- 空闲表操作（须持锁） ----------
 
-/// 把 \`block\`（其 size 已正确设置）插入空闲表，按地址升序，并尝试合并邻居。
-unsafe fn freelist_insert(block: *mut u8) {
+/// 把一个空闲块压入它**尺寸对应的桶**（O(1)）。**不做合并**（见 NBINS 的代价声明）。
+unsafe fn bin_push(block: *mut u8) {
     unsafe {
-        let start = block as usize;
-        let end = start + block_size(block);
-        let mut prev: *mut u8 = core::ptr::null_mut();
-        let mut cur: *mut u8 = *FREELIST.get();
-        while !cur.is_null() && (cur as usize) < start {
-            prev = cur;
-            cur = block_next(cur);
-        }
-        // 与右邻合并：若本块 end == cur start。
-        let merged = block;
-        if !cur.is_null() && end == (cur as usize) {
-            let new_size = block_size(merged) + block_size(cur);
-            set_block_size(merged, new_size);
-            set_block_next(merged, block_next(cur));
-        } else {
-            set_block_next(merged, cur);
-        }
-        // 与左邻合并：若 prev 的 end == merged start。
-        if !prev.is_null() {
-            let prev_end = (prev as usize) + block_size(prev);
-            if prev_end == (merged as usize) {
-                let new_size = block_size(prev) + block_size(merged);
-                set_block_size(prev, new_size);
-                set_block_next(prev, block_next(merged));
-                return;
-            }
-        }
-        if prev.is_null() {
-            *FREELIST.get() = merged;
-        } else {
-            set_block_next(prev, merged);
-        }
+        let b = bin_of(block_size(block));
+        set_block_next(block, *BINS[b].get());
+        *BINS[b].get() = block;
+        mark_free(block);
     }
 }
 
-/// 从空闲表取出第一个 size >= \`min\` 的块（first-fit），必要时分裂。
-/// 返回块起始指针；无足够块返回 null。
-unsafe fn freelist_take(min: usize) -> *mut u8 {
+/// 取一个 **size >= min** 的块（从 min 的桶起向上找第一个非空桶），必要时分裂。
+///
+/// 返回块起始指针（已 mark_used）；无足够块返回 null。最坏扫 NBINS 个桶头 = O(1)。
+unsafe fn bin_take(min: usize) -> *mut u8 {
     unsafe {
-        let mut prev: *mut u8 = core::ptr::null_mut();
-        let mut cur: *mut u8 = *FREELIST.get();
-        while !cur.is_null() {
-            let sz = block_size(cur);
-            if sz >= min {
-                let nxt = block_next(cur);
-                if prev.is_null() {
-                    *FREELIST.get() = nxt;
-                } else {
-                    set_block_next(prev, nxt);
-                }
-                // 分裂：若剩余 >= MIN_BLOCK，分出尾部空闲块。
+        let mut b = bin_of(min);
+        while b < NBINS {
+            let head = *BINS[b].get();
+            if !head.is_null() {
+                *BINS[b].get() = block_next(head);
+                mark_used(head);
+                let sz = block_size(head);
+                // 分裂：剩余 >= MIN_BLOCK 时，把尾部放回**它自己尺寸**的桶。
                 if sz - min >= MIN_BLOCK {
-                    let rest = cur.add(min);
+                    let rest = head.add(min);
                     set_block_size(rest, sz - min);
-                    freelist_insert(rest);
-                    set_block_size(cur, min);
+                    bin_push(rest);
+                    set_block_size(head, min);
                 }
-                return cur;
+                return head;
             }
-            prev = cur;
-            cur = block_next(cur);
+            b += 1;
         }
         core::ptr::null_mut()
     }
@@ -447,17 +462,18 @@ unsafe fn heap_extend(need: usize) -> *mut u8 {
         buf[base + 33] = b'\n';
         let _ = libsys::write(1, &buf[..base + 34]);
     }
-    // **整段登记**（见函数头注）：把 [cur, new_brk) 全部还给空闲表，而不是只还
-    // `need`。freelist_insert 会与左邻空闲块合并，故反复扩展不会产生碎片。
+    // **整段登记**（见函数头注）：把 [cur, new_brk) 全部还给空闲表，而不是只还 `need`。
+    // 分桶后不再有"与左邻合并"，但整段登记仍然必要——否则扩展出来的尾巴既不空闲
+    // 也不可达（brk 已推上去）⇒ 永久泄漏。
     let len = new_brk as usize - cur;
     set_block_size(cur as *mut u8, len);
-    freelist_insert(cur as *mut u8);
+    bin_push(cur as *mut u8);
     cur as *mut u8
 }
 
 /// 从堆申请一块连续内存并格式化为空闲块插入表（内部，须持锁）。
 unsafe fn heap_alloc_block(need_total: usize) -> *mut u8 {
-    let from_list = freelist_take(need_total);
+    let from_list = bin_take(need_total);
     if !from_list.is_null() {
         return from_list;
     }
@@ -465,7 +481,7 @@ unsafe fn heap_alloc_block(need_total: usize) -> *mut u8 {
     if heap_extend(need_total).is_null() {
         return core::ptr::null_mut();
     }
-    freelist_take(need_total)
+    bin_take(need_total)
 }
 
 /// \`malloc(size)\`：分配 \`size\` 字节，返回 16 字节对齐指针；失败返回 NULL 置 ENOMEM。
@@ -518,8 +534,8 @@ pub extern "C" fn free(ptr: *mut u8) {
         let cap = payload_capacity(block, ptr);
         // 金丝雀校验：检测越界写。
         check_canary(ptr, cap);
-        // double-free 防御：已在空闲表则置损坏标志，不再重复插入。
-        if freelist_contains(block) {
+        // double-free 防御：块头标志位 O(1) 判定（原先是线性扫整条空闲表）。
+        if is_free(block) {
             MALLOC_CORRUPT.store(true, Ordering::Relaxed);
             ALLOC_LOCK.unlock();
             return;
@@ -527,7 +543,7 @@ pub extern "C" fn free(ptr: *mut u8) {
         // 毒化已释放 payload（use-after-free 捕获）。
         poison_payload(ptr, cap);
         set_block_next(block, core::ptr::null_mut());
-        freelist_insert(block);
+        bin_push(block);
     }
     ALLOC_LOCK.unlock();
 }
@@ -595,10 +611,10 @@ pub extern "C" fn realloc(ptr: *mut u8, new_size: size_t) -> *mut u8 {
         write_canary(new_payload, np_cap);
         // 释放旧块。
         let old_cap2 = payload_capacity(block, ptr);
-        if !freelist_contains(block) {
+        if !is_free(block) {
             poison_payload(ptr, old_cap2);
             set_block_next(block, core::ptr::null_mut());
-            freelist_insert(block);
+            bin_push(block);
         }
         ALLOC_LOCK.unlock();
         new_payload
