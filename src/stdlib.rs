@@ -1056,106 +1056,19 @@ unsafe fn swap_bytes(a: *mut u8, b: *mut u8, size: usize) {
     }
 }
 
-/// \`qsort(base, nmemb, size, cmp)\`：就地排序。
+/// `qsort(base, nmemb, size, cmp)`：就地排序。
 ///
-/// **算法**：混合式快速排序（median-of-three 选主元 + 小分区插入排序收尾），
-/// 显式栈避免递归深度风险。平均 O(n log n)，最坏退化为 O(n log n)（introsort
-/// 限深后转堆排）→ 此处用限深+插入排序，对极端逆序输入仍稳定在合理复杂度。
-/// 非稳定排序（C qsort 不保证稳定性）。比较由调用方 `cmp` 提供。
+/// **算法在 `qsort_core.rs`**（纯计算、无 syscall）——为的是能在宿主上与参考排序逐点对照
+/// （S23；与 `math_core.rs` 同一手法）。本函数只做 C ABI 适配与退化情形早退。
+///
+/// **诚实说明**：原实现（Hoare + 指向数组内部的 pivot 指针）有**越界读**缺陷，详见
+/// `qsort_core.rs` 的文件头；实测形态是 `cc1` 在 `during GIMPLE pass: cfg` 段错误。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qsort(base: *mut c_void, nmemb: size_t, size: size_t, cmp: CmpFn) {
-    unsafe {
-        if base.is_null() || nmemb <= 1 || size == 0 || cmp as usize == 0 {
-            return;
-        }
-        let base = base as *mut u8;
-
-        // 插入排序阈值：小分区直接用插入排序（比递归更快的常数开销）。
-        const THRESHOLD: usize = 12;
-        // 显式栈：每项为 (lo, hi) 区间（含）。容量 nmemb 足够（每层两区）。
-        // 用固定容量避免分配；qsort 无内存分配依赖（S35 无外部依赖）。
-        // 栈深最多约 log2(nmemb) 层，但最坏退化时可达 O(n)；给足容量。
-        let mut stack_lo = [0usize; 1024];
-        let mut stack_hi = [0usize; 1024];
-        let mut sp = 1usize;
-        stack_lo[0] = 0;
-        stack_hi[0] = nmemb - 1;
-
-        while sp > 0 {
-            sp -= 1;
-            let lo = stack_lo[sp];
-            let hi = stack_hi[sp];
-
-            // 小分区：插入排序。
-            if hi - lo + 1 <= THRESHOLD {
-                let mut i = lo + 1;
-                while i <= hi {
-                    let mut j = i;
-                    while j > lo {
-                        let cur = base.add(j * size);
-                        let prev = base.add((j - 1) * size);
-                        if cmp(prev as *const c_void, cur as *const c_void) > 0 {
-                            swap_bytes(prev, cur, size);
-                            j -= 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    i += 1;
-                }
-                continue;
-            }
-
-            // median-of-three 主元，交换到 lo 位置。
-            let mid = lo + (hi - lo) / 2;
-            if cmp(base.add(mid * size) as *const c_void, base.add(lo * size) as *const c_void) < 0 {
-                swap_bytes(base.add(lo * size), base.add(mid * size), size);
-            }
-            if cmp(base.add(hi * size) as *const c_void, base.add(lo * size) as *const c_void) < 0 {
-                swap_bytes(base.add(lo * size), base.add(hi * size), size);
-            }
-            if cmp(base.add(mid * size) as *const c_void, base.add(hi * size) as *const c_void) > 0 {
-                swap_bytes(base.add(mid * size), base.add(hi * size), size);
-            }
-            // 中位数现在在 mid。以 mid 为主元进行 Hoare 划分。
-            let pivot = base.add(mid * size);
-            let mut i = lo;
-            let mut j = hi;
-            loop {
-                while cmp(base.add(i * size) as *const c_void, pivot as *const c_void) < 0 {
-                    i += 1;
-                }
-                while cmp(base.add(j * size) as *const c_void, pivot as *const c_void) > 0 {
-                    j -= 1;
-                }
-                if i >= j {
-                    break;
-                }
-                swap_bytes(base.add(i * size), base.add(j * size), size);
-                i += 1;
-                if j > 0 {
-                    j -= 1;
-                }
-            }
-            // 压栈较小的子区间，先处理大的（控制栈深度）。
-            if j > lo {
-                // 左边 [lo, j]，右边 [j+1, hi]。
-                let left_len = j - lo + 1;
-                let right_len = hi - j;
-                if left_len < right_len {
-                    // 右区间更大，先压右，再压左（下轮先处理左）。
-                    if sp < 1024 { stack_lo[sp] = j + 1; stack_hi[sp] = hi; sp += 1; }
-                    if sp < 1024 { stack_lo[sp] = lo; stack_hi[sp] = j; sp += 1; }
-                } else {
-                    if sp < 1024 { stack_lo[sp] = lo; stack_hi[sp] = j; sp += 1; }
-                    if sp < 1024 { stack_lo[sp] = j + 1; stack_hi[sp] = hi; sp += 1; }
-                }
-            } else if j < hi {
-                // 主元在 j，右区间 [j+1, hi]。
-                if sp < 1024 { stack_lo[sp] = j + 1; stack_hi[sp] = hi; sp += 1; }
-            }
-        }
+    if cmp as usize == 0 {
+        return;
     }
+    unsafe { crate::qsort_core::core_qsort(base as *mut u8, nmemb, size, cmp) }
 }
 
 /// \`bsearch(key, base, nmemb, size, cmp)\`：在已排序数组中二分查找。

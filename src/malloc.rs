@@ -117,7 +117,23 @@ unsafe fn check_canary(payload: *mut u8, cap: usize) -> bool {
 unsafe fn poison_payload(payload: *mut u8, cap: usize) {
     unsafe {
         let n = user_size(cap);
+        // **按机器字写，不再逐字节**（2026-10 实测的同类根因）：
+        // 每次 free 都要毒化整个用户区，逐字节 volatile 对大块是纯开销。
+        // 毒化本身仍保留（S40 加固可观测），只是把 8 次写合成 1 次。
+        let word = {
+            let mut w = 0usize;
+            let mut k = 0;
+            while k < core::mem::size_of::<usize>() {
+                w = (w << 8) | (POISON_BYTE as usize);
+                k += 1;
+            }
+            w
+        };
         let mut i = 0usize;
+        while i + core::mem::size_of::<usize>() <= n {
+            core::ptr::write_volatile(payload.add(i) as *mut usize, word);
+            i += core::mem::size_of::<usize>();
+        }
         while i < n {
             core::ptr::write_volatile(payload.add(i), POISON_BYTE);
             i += 1;

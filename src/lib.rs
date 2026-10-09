@@ -58,6 +58,8 @@ pub mod posix_batch5;
 pub mod posix_batch6;
 pub mod math_core;
 pub mod math_core2;
+// qsort 的纯计算核心（宿主对照验证用；见 qsort_core.rs 文件头记的那处越界读缺陷）。
+pub mod qsort_core;
 // 数学函数的 C ABI 导出层（核心保持纯函数，便于宿主对照验证器 include!）。
 pub mod math_exports;
 pub mod regex;
