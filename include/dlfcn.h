@@ -15,11 +15,12 @@ extern "C" {
 /* flags。**本实现的实际支持面见 rtld/src/main.rs 的 dlopen 文档**：
  * RTLD_LAZY 与 RTLD_NOW 无区别（一律立即解析全部重定位）；
  * RTLD_GLOBAL/RTLD_LOCAL 语义支持；RTLD_NOLOAD 见该处说明。 */
-#define RTLD_LAZY   0x00001
-#define RTLD_NOW    0x00002
-#define RTLD_NOLOAD 0x00004
-#define RTLD_GLOBAL 0x00100
-#define RTLD_LOCAL  0x00000
+#define RTLD_LAZY     0x00001
+#define RTLD_NOW      0x00002
+#define RTLD_NOLOAD   0x00004
+#define RTLD_GLOBAL   0x00100
+#define RTLD_LOCAL    0x00000
+#define RTLD_NODELETE 0x01000
 
 /* 失败返回 NULL（`dlopen`/`dlsym`）。`dlclose` 成功 0、句柄非法 -1。 */
 void *dlopen(const char *path, int flags);
