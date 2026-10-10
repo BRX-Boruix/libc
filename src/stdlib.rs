@@ -687,6 +687,40 @@ unsafe fn strtof_impl<T: FloatConv>(s: *const crate::ctypes::c_char, endptr: *mu
             neg = bytes[p] == b'-';
             p += 1;
         }
+        // **C99 要求认 `inf` / `infinity` / `nan` / `nan(...)`**（大小写不敏感）。
+        // 此前完全没处理：实测 `strtod("nan", 0)` 返回 **0**（既不是 NaN、也不报错），
+        // 于是任何用 strtod 造 NaN/无穷的程序都静默拿到 0 —— 机内验收 6 条断言全红。
+        if ci_starts_with(&bytes[p..], b"inf") {
+            let mut q = p + 3;
+            if ci_starts_with(&bytes[q..], b"inity") {
+                q += 5;
+            }
+            if !endptr.is_null() {
+                *endptr = unsafe { s.add(q) };
+            }
+            let v = T::infinity();
+            return if neg { T::negate(v) } else { v };
+        }
+        if ci_starts_with(&bytes[p..], b"nan") {
+            let mut q = p + 3;
+            // `nan(n-char-sequence)`：括号里的序列是**实现自定**的，本实现不解释它，
+            // 但按标准必须整个吃掉（否则 endptr 会停在左括号上）。
+            if q < bytes.len() && bytes[q] == b'(' {
+                let mut r = q + 1;
+                while r < bytes.len() && bytes[r] != b')' {
+                    r += 1;
+                }
+                if r < bytes.len() {
+                    q = r + 1;
+                }
+            }
+            if !endptr.is_null() {
+                *endptr = unsafe { s.add(q) };
+            }
+            // 符号对 NaN 只影响符号位（POSIX 允许）。
+            let v = T::nan();
+            return if neg { T::negate(v) } else { v };
+        }
         // 全部有效数字收集为 BigInt（不截断，保证严格正确舍入）。
         use crate::float_bigint::BigInt;
         let mut mant = BigInt::zero();
@@ -758,6 +792,16 @@ unsafe fn strtof_impl<T: FloatConv>(s: *const crate::ctypes::c_char, endptr: *mu
 }
 
 
+/// 大小写不敏感的前缀比较（C99 的 `inf`/`nan` 大小写不敏感；本 crate 的 ctype
+/// 只有字节级接口，不引入 locale）。
+fn ci_starts_with(hay: &[u8], needle: &[u8]) -> bool {
+    hay.len() >= needle.len()
+        && hay
+            .iter()
+            .zip(needle.iter())
+            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+}
+
 /// 浮点转换器 trait（f32/f64 的通用封装）。
 trait FloatConv: Sized + Copy {
     fn zero() -> Self;
@@ -771,6 +815,10 @@ trait FloatConv: Sized + Copy {
     fn negate(v: Self) -> Self;
     fn is_infinite(v: Self) -> bool;
     fn is_zero(v: Self) -> bool;
+    /// C99 `strtod` 必须认 `inf`/`infinity`。
+    fn infinity() -> Self;
+    /// C99 `strtod` 必须认 `nan`。
+    fn nan() -> Self;
 }
 
 impl FloatConv for f64 {
@@ -784,6 +832,8 @@ impl FloatConv for f64 {
     fn negate(v: Self) -> Self { -v }
     fn is_infinite(v: Self) -> bool { v.is_infinite() }
     fn is_zero(v: Self) -> bool { v == 0.0 }
+    fn infinity() -> Self { f64::INFINITY }
+    fn nan() -> Self { f64::NAN }
 }
 
 impl FloatConv for f32 {
@@ -804,6 +854,8 @@ impl FloatConv for f32 {
     fn negate(v: Self) -> Self { -v }
     fn is_infinite(v: Self) -> bool { v.is_infinite() }
     fn is_zero(v: Self) -> bool { v == 0.0 }
+    fn infinity() -> Self { f32::INFINITY }
+    fn nan() -> Self { f32::NAN }
 }
 
 
