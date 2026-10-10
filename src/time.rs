@@ -34,15 +34,28 @@ pub const CLOCK_MONOTONIC: c_int = 1;
 ///
 /// **来路（3P6-2 第二波「整项缺失」类，反向对账列出）。**
 ///
-/// **诚实边界（S09）**：本系统只有挂钟（gettimeofday）。故 CLOCK_REALTIME 如实填充；
-/// 其余（含 CLOCK_MONOTONIC）**如实返回 -1 置 EINVAL**（POSIX 允许对不支持的时钟报 EINVAL）。
-/// **不**用挂钟冒充单调钟——那会让「测量耗时」的代码在系统时间被调整时给出错的结果。
+/// - `CLOCK_REALTIME`：真实挂钟（内核 RTC 直读 CMOS）。
+/// - `CLOCK_MONOTONIC`：内核单调 uptime（`libsys::now()`——与 shell 的 `now`、
+///   `clock()` **同一真值来源**，不走挂钟）。
+///
+/// **粒度如实声明（S09）**：本系统经 SysFS 暴露的单调时钟是**毫秒**级
+/// （`INFO_BOOT_MS`），故 `tv_nsec` 恒为 1_000_000 的整数倍。
+/// 这**比返回 EINVAL 好**：POSIX 程序（超时、耗时统计）拿到 EINVAL 会直接失败，
+/// 而毫秒级单调钟是**可用**的；同时**不**用挂钟冒充单调钟——那会让「测量耗时」
+/// 的代码在系统时间被调整时给出错的结果。
+/// - 其余时钟：如实 `EINVAL`（POSIX 允许对不支持的时钟报 EINVAL）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_gettime(clk: c_int, tp: *mut Timespec) -> c_int {
     unsafe {
         if tp.is_null() {
             set_errno(crate::errno::EINVAL);
             return -1;
+        }
+        if clk == CLOCK_MONOTONIC {
+            let ns = libsys::now();
+            (*tp).tv_sec = (ns / 1_000_000_000) as i64;
+            (*tp).tv_nsec = (ns % 1_000_000_000) as i64;
+            return 0;
         }
         if clk != CLOCK_REALTIME {
             set_errno(crate::errno::EINVAL);
