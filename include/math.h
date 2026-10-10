@@ -39,6 +39,37 @@ extern "C" {
 #define FP_SUBNORMAL 3
 #define FP_NORMAL    4
 
+/* ---- C99 浮点分类（7.12.3）----
+ *
+ * **此前只有上面的 FP_* 常量、没有这些宏，也没有同名函数**（3P6-3 记录的真实阻塞）。
+ * 两层后果：① C 程序用不了 C99 分类；② C++ 的 `std::isnan` 更用不了——libstdc++ 的
+ * `<cmath>` 会 `#undef` 掉宏、再用 `using ::isnan;` 引入**函数**，故 `::isnan` 必须真实存在。
+ *
+ * **顺序要紧（实测教训）**：函数声明必须在宏定义**之前**。否则 `int fpclassify(double x);`
+ * 会被 `fpclassify(x)` 这个函数式宏展开成 `__builtin_fpclassify(...)`，直接编译错误——
+ * 机内 tcc 报的正是 `math.h:63: error: identifier expected`。
+ *
+ * **宏只在 C 下定义**：C99 要求它们接受任意实参类型（float/double/long double），
+ * 故走编译器的内建（clang/GCC 同族，不手拆 IEEE-754 位）；C++ 下若也定义成宏，
+ * 会与 libstdc++ 的 `using ::isnan;` 及重载打架——C++ 要的是函数。 */
+int fpclassify(double x);
+int isnan(double x);
+int isinf(double x);
+int isfinite(double x);
+int isnormal(double x);
+int signbit(double x);
+
+/* **不提供宏，只提供函数**——这是实测逼出来的取舍，不是省事：
+ * C99 规定这六个是宏，但宏的"泛型"实现只能走编译器内建 `__builtin_*`，
+ * 而**机内 tcc 不提供这些内建**：实测 `tcc mathclass_check.c` 报 8 条
+ * `unresolved reference to '__builtin_nanf' / '__builtin_isnan' / …`。
+ * libc 自己的**函数**在 tcc 里可用，故改成函数：`isnan(f)` 对任意实参类型
+ * 经隐式转换到 `double` 即可用，C++ 的 `using ::isnan;` 也拿到了真符号。
+ *
+ * **诚实边界**：`long double` 的次正规数在转换到 `double` 时可能被归类为 0
+ * （80 位扩展精度的最小次正规数小于 `double` 能表示的范围）。分类语义对
+ * float/double 完全正确；`long double` 只有这个极端边界不精确。 */
+
 /* ---- double：取整 / 分解 ---- */
 double fabs(double x);
 double copysign(double x, double y);

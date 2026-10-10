@@ -64,6 +64,7 @@ pub mod qsort_core;
 pub mod math_exports;
 pub mod regex;
 pub mod longdouble;
+pub mod math_classify;
 pub mod math_decomp;
 pub mod malloc;
 pub mod mman;
