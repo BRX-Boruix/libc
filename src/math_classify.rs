@@ -21,6 +21,21 @@
 
 use crate::ctypes::c_int;
 
+
+/// `NAN` 的真值（IEEE-754 quiet NaN 位型）。
+///
+/// **为什么是 libc 的常量对象而不是编译器内建**：`<math.h>` 原来写
+/// `#define NAN (__builtin_nanf(""))`，而**机内 tcc 不提供这些内建**——实测任何用
+/// `NAN`/`INFINITY` 的 C 程序在机内 tcc 下链接失败：
+/// `tcc: error: unresolved reference to '__builtin_nanf'`。
+/// libc 用位模式提供真值，不依赖任何编译器内建。
+#[unsafe(no_mangle)]
+pub static __boruix_nan: f64 = f64::from_bits(0x7FF8_0000_0000_0000);
+
+/// `INFINITY` / `HUGE_VAL` 的真值（IEEE-754 正无穷位型）。理由同 [`__boruix_nan`]。
+#[unsafe(no_mangle)]
+pub static __boruix_inf: f64 = f64::from_bits(0x7FF0_0000_0000_0000);
+
 /// `<math.h>` 的 `FP_*` 取值（与头文件**必须一致**）。
 const FP_NAN: c_int = 0;
 const FP_INFINITE: c_int = 1;

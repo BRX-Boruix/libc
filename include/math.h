@@ -25,10 +25,26 @@
 extern "C" {
 #endif
 
+/* **tcc 没有这些内建**（实测 `tcc: error: unresolved reference to '__builtin_nanf'`）
+ * ⇒ 机内 tcc 编译任何用 `NAN`/`INFINITY`/`HUGE_VAL` 的 C 程序都会**链接失败**。
+ * 故对 tcc 改用 libc 的**常量对象**（IEEE-754 位模式，见 libc/src/math_classify.rs，
+ * 不依赖任何编译器内建）。
+ *
+ * **诚实边界**：常量对象不是 C 的"常量表达式"，故 `static double x = NAN;` 这类
+ * **静态初始化**在 tcc 下仍不可用；运行期表达式一律可用（绝大多数用法）。 */
+#if defined(__TINYC__)
+extern const double __boruix_nan;
+extern const double __boruix_inf;
+#define HUGE_VAL (__boruix_inf)
+#define HUGE_VALF ((float)__boruix_inf)
+#define INFINITY (__boruix_inf)
+#define NAN (__boruix_nan)
+#else
 #define HUGE_VAL (__builtin_huge_val())
 #define HUGE_VALF (__builtin_huge_valf())
 #define INFINITY (__builtin_inff())
 #define NAN (__builtin_nanf(""))
+#endif
 
 /* 浮点分类常量（C99）。3P6-3：libstdc++ 的 src/c++17/floating_to_chars.cc 用
  * __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, x)，
