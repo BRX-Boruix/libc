@@ -37,7 +37,9 @@
 #define P_tmpdir "/tmp"
 #endif
 
-/* setvbuf 的 mode 取值（POSIX）。本 libc 的 stdio **不做用户态缓冲**，故三者行为等价；
+/* setvbuf 的 mode 取值（POSIX）。取值取 glibc 同值（编译期常量，无 ABI 含义）。
+ * 本 libc 的 stdio **写侧有缓冲层**（2026-10 起），故这三者对**可写流真的生效**；
+ * 读侧仍无缓冲层 ⇒ 对只读流请求有缓冲会**如实失败**（setvbuf 返回非 0）。
  * 宏必须存在，否则 libstdc++ 的 basic_file.cc 编不过。 */
 #define _IOFBF 0
 #define _IOLBF 1
@@ -149,7 +151,8 @@ void libc_initialize(void);
 typedef long fpos_t;
 int fgetpos(FILE *stream, fpos_t *pos);
 int fsetpos(FILE *stream, const fpos_t *pos);
-/* setbuf/setvbuf：本 libc 的 stdio **不做用户态缓冲** ⇒ 刻意的空操作（见 libc/src/posix_batch6.rs）。 */
+/* setbuf/setvbuf：真实实现见 libc/src/stdio.rs（2026-10）。
+ * 写侧缓冲层生效（含调用方自带缓冲）；读侧无缓冲层 ⇒ 对只读流请求有缓冲如实返回非 0。 */
 void setbuf(FILE *stream, char *buf);
 int setvbuf(FILE *stream, char *buf, int mode, size_t size);
 

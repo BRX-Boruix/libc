@@ -30,6 +30,13 @@ size_t wcsrtombs(char *dst, const wchar_t **src, size_t len, void *ps);
 size_t mbstowcs(wchar_t *dst, const char *src, size_t n);
 size_t wcstombs(char *dst, const wchar_t *src, size_t n);
 
+/* wcwidth/wcswidth：字符在终端上的显示列数（POSIX 要求）。
+ * 真值来自 libc/src/wcwidth.rs 的区间表（Unicode 5.0 的 EastAsianWidth/组合类 +
+ * Unicode 6.0 起的绘文字宽区间）；**表是区间近似，未收录的字符按 1 列算**，
+ * 模块文档写明了边界，绝不自称「完整」。 */
+int wcwidth(wchar_t wc);
+int wcswidth(const wchar_t *s, size_t n);
+
 #ifdef __cplusplus
 }
 #endif

@@ -56,24 +56,9 @@ pub unsafe extern "C" fn fsetpos(stream: *mut c_void, pos: *const c_long) -> c_i
     unsafe { crate::stdio::fseek(stream as *mut crate::stdio::FILE, *pos, 0) }
 }
 
-/// `setbuf(stream, buf)`：POSIX 的缓冲设置。
-///
-/// **诚实边界**：本 libc 的 stdio **不做用户态缓冲**（每次调用直写内核，见 `fflush` 的文档）⇒
-/// 流**本来就是无缓冲的**，故本调用是**刻意的空操作**——与 `setvbuf` 判不支持是同一个事实的两面。
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn setbuf(_stream: *mut c_void, _buf: *mut c_char) {}
-
-/// `setvbuf(stream, buf, mode, size)`：同上，**刻意的空操作**，返回 0（成功）。
-///
-/// **为什么返回 0 而不是 ENOTSUP**：本 libc 的流**确实是无缓冲的**，请求「无缓冲」在语义上
-/// 已满足；请求「有缓冲」也不会改变行为（因为实现无缓冲层）——**如实反映这一事实**，
-/// 并把边界写在这里与 `docs/TODO/libc-posix-surface.md` 的 B 类里。
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn setvbuf(
-    _stream: *mut c_void,
-    _buf: *mut c_char,
-    _mode: c_int,
-    _size: size_t,
-) -> c_int {
-    0
-}
+// `setbuf` / `setvbuf` **已移到 `libc/src/stdio.rs` 真实实现**（2026-10）。
+//
+// 原先这里是无缓冲时代的「刻意的空操作」，理由写的是「本 libc 的 stdio 不做用户态缓冲」。
+// 写侧缓冲层落地后该前提不再成立，空操作于是从「诚实」退化成**能力谎言**
+// （调用方请求有缓冲、拿到 0，实际每次仍直写）。真实实现必须能看到 `FILE` 的缓冲字段，
+// 故放在 `stdio.rs`。

@@ -29,7 +29,7 @@ impl SyncStream {
 }
 
 use crate::ctypes::{size_t, ssize_t, c_int, c_void, c_long, EOF};
-use crate::errno::{set_errno, from_libsys, EINVAL, EBADF};
+use crate::errno::{set_errno, from_libsys, EINVAL, EBADF, ENOMEM, ENOTSUP};
 use crate::stdio_format::{FmtSink, Spec, Length, Conv, emit_int, emit_str, emit_char, parse_and_format};
 
 // ---------- FILE 结构 ----------
@@ -65,6 +65,17 @@ pub struct FILE {
     pub buf_ptr: *mut u8,
     pub buf_len: usize,
     pub buf_pos: usize,
+    /// 写缓冲**容量**（字节）。0 = 尚未确定（惰性分配时取 `WBUF_CAP`）。
+    ///
+    /// 为什么需要：`setvbuf(stream, buf, mode, size)` 必须能按调用方给的 `size`
+    /// 配置缓冲。容量写死在常量里就无法忠实实现该调用——要么无视 `size`（能力谎言），
+    /// 要么声称不支持（而写侧缓冲其实已经有了）。
+    pub buf_cap: usize,
+    /// 缓冲是否由**本库分配**（只有 `true` 才在 `fclose`/重配时释放）。
+    ///
+    /// `setvbuf` 允许调用方自带缓冲（POSIX 要求实现使用它）；释放调用方的内存
+    /// 是实打实的堆破坏。
+    pub buf_owned: bool,
     pub closed: bool,
     /// 1 字节 pushback 槽（ungetc / fscanf 回退）。-1 表示空。
     pub pushback: i32,
@@ -168,17 +179,17 @@ pub fn stdio_init() {
     unsafe {
         static STREAM_STDIN: SyncStream = SyncStream::new(FILE {
             fd: 0, mode: FmMode::Read, buf_mode: FmBufMode::None, eof: false, error: false,
-            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false, pushback: -1,
+            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, buf_cap: 0, buf_owned: false, closed: false, pushback: -1,
             str_src: core::ptr::null(), str_len: 0, str_pos: 0,
         });
         static STREAM_STDOUT: SyncStream = SyncStream::new(FILE {
             fd: 1, mode: FmMode::Write, buf_mode: FmBufMode::Line, eof: false, error: false,
-            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false, pushback: -1,
+            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, buf_cap: 0, buf_owned: false, closed: false, pushback: -1,
             str_src: core::ptr::null(), str_len: 0, str_pos: 0,
         });
         static STREAM_STDERR: SyncStream = SyncStream::new(FILE {
             fd: 2, mode: FmMode::Write, buf_mode: FmBufMode::None, eof: false, error: false,
-            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false, pushback: -1,
+            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, buf_cap: 0, buf_owned: false, closed: false, pushback: -1,
             str_src: core::ptr::null(), str_len: 0, str_pos: 0,
         });
         if stdin.is_null() {
@@ -205,7 +216,7 @@ unsafe fn alloc_file(fd: u64, fm: FmMode) -> *mut FILE {
             // 读流本轮不缓冲（读侧要处理与 lseek/fseek 的位置语义，另案）。
             buf_mode: if fm.can_write() { FmBufMode::Full } else { FmBufMode::None },
             eof: false, error: false,
-            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, closed: false,
+            buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, buf_cap: 0, buf_owned: false, closed: false,
             pushback: -1,
             str_src: core::ptr::null(), str_len: 0, str_pos: 0,
         });
@@ -267,10 +278,16 @@ pub unsafe extern "C" fn freopen(
             f.eof = false;
             f.error = false;
             f.closed = false;
+            // 重绑前释放旧缓冲（仅当是本库分配的），否则 freopen 每次泄漏一块。
+            if f.buf_owned && !f.buf_ptr.is_null() {
+                crate::malloc::free(f.buf_ptr as *mut u8);
+            }
             f.buf_mode = FmBufMode::None;
             f.buf_ptr = core::ptr::null_mut();
             f.buf_len = 0;
             f.buf_pos = 0;
+            f.buf_cap = 0;
+            f.buf_owned = false;
             f.pushback = -1;
             f.str_src = core::ptr::null();
             f.str_len = 0;
@@ -372,6 +389,15 @@ pub unsafe extern "C" fn fclose(fp: *mut FILE) -> c_int {
         }
         // **先冲刷再关**（有缓冲后这是数据不丢的唯一保证）。
         let _ = wflush(f);
+        // 只释放**本库分配**的缓冲：setvbuf 允许调用方自带缓冲，释放调用方的内存
+        // 是实打实的堆破坏。
+        if f.buf_owned && !f.buf_ptr.is_null() {
+            crate::malloc::free(f.buf_ptr as *mut u8);
+        }
+        f.buf_ptr = core::ptr::null_mut();
+        f.buf_len = 0;
+        f.buf_cap = 0;
+        f.buf_owned = false;
         stream_unregister(fp);
         let fd = f.fd;
         f.closed = true;
@@ -448,8 +474,11 @@ pub extern "C" fn boruix_stdio_write_bytes() -> usize {
 // 真实的数据丢失面。故本实现同时保证：`fflush` 获得**真实语义**（不再是空操作）、
 // `fclose` 先冲刷再关、**`exit` 必须冲刷所有流**（`_exit` 按 POSIX 语义不冲刷）。
 
-/// 缓冲容量（POSIX `BUFSIZ` 的常见取值）。
+/// 默认缓冲容量（与头文件 `BUFSIZ` 同一量级；`setvbuf` 未指定 size 时用它）。
 const WBUF_CAP: usize = 4096;
+/// `BUFSIZ`：与 `libc/include/stdio.h` 的取值**必须一致**（`setbuf` 用它）。
+/// 两侧不一致会让 `setbuf` 的行为随「看哪一份」而变。
+const BUFSIZ: usize = 8192;
 /// 同时打开的流上限（供 `fflush(NULL)` 与 `exit` 冲刷全部流）。
 const MAX_OPEN_STREAMS: usize = 64;
 static OPEN_STREAMS: [AtomicUsize; MAX_OPEN_STREAMS] =
@@ -480,13 +509,20 @@ fn stream_unregister(fp: *mut FILE) {
 unsafe fn wbuf_ensure(f: &mut FILE) -> bool {
     unsafe {
         if !f.buf_ptr.is_null() {
-            return true;
+            // 容量为 0 的缓冲**无法安全使用**（写入会越界）⇒ 如实退回无缓冲路径，
+            // 而不是按默认容量往里写。setvbuf 已在入口拒绝 `buf != NULL && size == 0`，
+            // 此处是第二道防线。
+            return f.buf_cap != 0;
         }
-        let p = crate::malloc::malloc(WBUF_CAP) as *mut u8;
+        // 容量：setvbuf 指定的值优先；未指定时用默认（与头文件 BUFSIZ 同一量级）。
+        let cap = if f.buf_cap == 0 { WBUF_CAP } else { f.buf_cap };
+        let p = crate::malloc::malloc(cap) as *mut u8;
         if p.is_null() {
             return false;
         }
         f.buf_ptr = p;
+        f.buf_cap = cap;
+        f.buf_owned = true;
         f.buf_len = 0;
         f.buf_pos = 0;
         true
@@ -531,7 +567,7 @@ unsafe fn wbuf_put(f: &mut FILE, bytes: &[u8], line_flush: bool) -> bool {
         }
         let mut off = 0usize;
         while off < bytes.len() {
-            let space = WBUF_CAP - f.buf_len;
+            let space = f.buf_cap - f.buf_len;
             if space == 0 {
                 if !wflush(f) { return false; }
                 continue;
@@ -649,6 +685,109 @@ pub unsafe extern "C" fn fflush(fp: *mut FILE) -> c_int {
     unsafe {
         let f = &mut *fp;
         if wflush(f) { 0 } else { EOF }
+    }
+}
+
+/// `_IOFBF` / `_IOLBF` / `_IONBF`（与 `libc/include/stdio.h` 同一组取值）。
+pub const _IOFBF: c_int = 0;
+pub const _IOLBF: c_int = 1;
+pub const _IONBF: c_int = 2;
+
+/// `setvbuf(stream, buf, mode, size)`：配置流的缓冲（POSIX）。
+///
+/// **能做与不能做，逐条如实**（此前 posix_batch6 里是「刻意的空操作」，理由写的是
+/// 「本 libc 的 stdio 不做用户态缓冲」——该前提在**写侧缓冲层落地后已不成立**，
+/// 于是那个空操作从「诚实的空操作」退化成了**能力谎言**）：
+///
+/// - 写侧**有**缓冲层，故 `_IOFBF`/`_IOLBF`/`_IONBF` 与 `size` 对**可写流**
+///   全部忠实生效；
+/// - 读侧**没有**缓冲层（`fgetc`/`fread` 直读 fd）。对**只读流**请求有缓冲
+///   如实**返回非 0（失败）**——返回 0 会让调用方以为读已缓冲，那是能力谎言；
+///   请求 `_IONBF` 与现状一致，返回 0；
+/// - `buf != NULL`：使用调用方的缓冲（POSIX 要求），且**不**由本库释放；
+///   `size == 0` 配非空 `buf` 是无意义组合，如实拒绝；
+/// - `buf == NULL`：`size > 0` 时按 `size` 分配，`size == 0` 用默认容量。
+///
+/// POSIX 要求本调用在任何 I/O 之前。实现上先 `wflush` 把已缓冲数据落盘
+/// （**绝不为了重配而丢数据**），再换缓冲。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setvbuf(
+    stream: *mut FILE,
+    buf: *mut c_char,
+    mode: c_int,
+    size: size_t,
+) -> c_int {
+    unsafe {
+        if stream.is_null() {
+            set_errno(EINVAL);
+            return -1;
+        }
+        let f = &mut *stream;
+        if f.closed {
+            set_errno(EBADF);
+            return -1;
+        }
+        let new_mode = match mode {
+            _IONBF => FmBufMode::None,
+            _IOLBF => FmBufMode::Line,
+            _IOFBF => FmBufMode::Full,
+            _ => {
+                set_errno(EINVAL);
+                return -1;
+            }
+        };
+        // 读侧无缓冲层：对只读流请求有缓冲如实拒绝（见函数文档）。
+        if !f.mode.can_write() && new_mode != FmBufMode::None {
+            set_errno(ENOTSUP);
+            return -1;
+        }
+        if !buf.is_null() && size == 0 {
+            set_errno(EINVAL);
+            return -1;
+        }
+        // 先把已缓冲的数据落盘——重配绝不能成为数据丢失路径。
+        if !wflush(f) {
+            return -1;
+        }
+        if f.buf_owned && !f.buf_ptr.is_null() {
+            crate::malloc::free(f.buf_ptr as *mut u8);
+        }
+        f.buf_ptr = core::ptr::null_mut();
+        f.buf_len = 0;
+        f.buf_pos = 0;
+        f.buf_cap = 0;
+        f.buf_owned = false;
+        f.buf_mode = new_mode;
+        if new_mode == FmBufMode::None {
+            return 0;
+        }
+        if !buf.is_null() {
+            f.buf_ptr = buf as *mut u8;
+            f.buf_cap = size;
+            return 0;
+        }
+        if size > 0 {
+            let p = crate::malloc::malloc(size) as *mut u8;
+            if p.is_null() {
+                set_errno(ENOMEM);
+                return -1;
+            }
+            f.buf_ptr = p;
+            f.buf_cap = size;
+            f.buf_owned = true;
+        }
+        0
+    }
+}
+
+/// `setbuf(stream, buf)`：等价于 `setvbuf(stream, buf, buf ? _IOFBF : _IONBF, BUFSIZ)`。
+///
+/// POSIX 规定返回 void，故失败对调用方不可见——失败时流保持**原样**（绝不留半个配置）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setbuf(stream: *mut FILE, buf: *mut c_char) {
+    unsafe {
+        let mode = if buf.is_null() { _IONBF } else { _IOFBF };
+        let _ = setvbuf(stream, buf, mode, BUFSIZ);
     }
 }
 
@@ -1689,6 +1828,8 @@ pub unsafe extern "C" fn sscanf(s: *const c_char, fmt: *const c_char, ap: ...) -
         buf_ptr: core::ptr::null_mut(),
         buf_len: 0,
         buf_pos: 0,
+        buf_cap: 0,
+        buf_owned: false,
         closed: false,
         pushback: -1,
         str_src: bytes.as_ptr(),

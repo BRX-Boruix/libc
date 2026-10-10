@@ -83,6 +83,7 @@ pub mod thread;
 pub mod time;
 pub mod unistd;
 pub mod wchar;
+pub mod wcwidth;
 
 /// 初始化 libc（标准流等）。幂等，可安全多次调用。
 #[unsafe(no_mangle)]
