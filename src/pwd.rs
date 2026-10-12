@@ -594,24 +594,77 @@ pub unsafe extern "C" fn endgrent() {
 /// 需按"用户 → 组集合"方向查询。这也是 A2-7 登录后经 `groups_set` 装配身份的
 /// 数据来源。
 pub fn getgrouplist(user: &str, primary_gid: u32, out: &mut [u32]) -> usize {
+    getgrouplist_from(&load_groups(), user, primary_gid, out)
+}
+
+/// [`getgrouplist`] 的**纯逻辑层**（组表由调用方给出，不碰文件系统）。
+///
+/// **为什么抽出来**：`load_groups()` 走 `libsys::read_to_end` ⇒ 依赖真实 VFS。宿主上
+/// `syscall::call` 返回垃圾，`read` 永不返回 0 ⇒ `Vec` 无限增长（实测：宿主单测
+/// `memory allocation of 8589934592 bytes failed`）。抽纯后可在宿主上逐条锁定
+/// 「不截断、不写半个列表」的语义——与 `read_dir`/`parse_proc_list` 同一手法（S23/S31）。
+pub fn getgrouplist_from(records: &[GroupRecord], user: &str, primary_gid: u32, out: &mut [u32]) -> usize {
+    // 两趟扫描，**不需要暂存**（本函数服务于登录/身份装配路径，那里不该再依赖堆状态，
+    // 也不引入「固定容量」这种魔法上限）。
+    //
+    // **为什么不边写边去重**（旧实现的缺陷，2026-10 由新打通的宿主单测抓到）：
+    // 缓冲不足时 `out` 里只落了前几项，去重就看不到后面已出现过的 gid ⇒ 同一 gid 被数两次，
+    // 返回值不再是 POSIX 要求的「所需条数」；更糟的是旧代码用 `out[..n]` 做去重，
+    // `n` 一旦超过 `out.len()` 就直接**越界 panic**——而 POSIX 明确要求缓冲不足时
+    // 只报数、不写半个列表、不崩。
+    //
+    // 第 1 趟：数出**完整**去重列表的条数。
     let mut n = 0usize;
-    let mut push = |gid: u32, out: &mut [u32], n: &mut usize| {
-        // 去重：同一 gid 只出现一次（主组也参与去重）。
-        if out[..*n].contains(&gid) {
-            return;
-        }
-        if *n < out.len() {
-            out[*n] = gid;
-        }
-        *n += 1;
-    };
-    push(primary_gid, out, &mut n);
-    for rec in load_groups() {
-        if rec.members.iter().any(|m| m == user) {
-            push(rec.gid, out, &mut n);
+    while nth_group(records, user, primary_gid, n).is_some() {
+        n += 1;
+    }
+    // 第 2 趟：按**同一顺序**把前 `out.len()` 项写入。缓冲不足时只写能容纳的部分，
+    // 返回值仍是**所需条数**（POSIX：调用方据此扩容后重试）。
+    let take = core::cmp::min(n, out.len());
+    for (i, slot) in out[..take].iter_mut().enumerate() {
+        if let Some(gid) = nth_group(records, user, primary_gid, i) {
+            *slot = gid;
         }
     }
     n
+}
+
+/// 候选序列（**未去重**）的第 `pos` 项：主组占第 0 位，其后按组表声明顺序追加
+/// 「成员含 `user`」的组。`None` = 候选序列到此为止。
+fn candidate_at(records: &[GroupRecord], user: &str, primary_gid: u32, pos: usize) -> Option<u32> {
+    if pos == 0 {
+        return Some(primary_gid);
+    }
+    let mut i = 1usize;
+    for rec in records {
+        if rec.members.iter().any(|m| m == user) {
+            if i == pos {
+                return Some(rec.gid);
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+/// 去重后列表的第 `idx` 项（`None` = 列表到此为止）。
+///
+/// 同一 gid 只在**首次**出现处计入：与候选序列中**更早的**项逐一比对。
+/// 复杂度 O(n²)，n 是候选条数（组表很小）；这样无需暂存，也不会引入「魔法上限」。
+fn nth_group(records: &[GroupRecord], user: &str, primary_gid: u32, idx: usize) -> Option<u32> {
+    let mut kept = 0usize;
+    let mut pos = 0usize;
+    while let Some(gid) = candidate_at(records, user, primary_gid, pos) {
+        let dup = (0..pos).any(|j| candidate_at(records, user, primary_gid, j) == Some(gid));
+        if !dup {
+            if kept == idx {
+                return Some(gid);
+            }
+            kept += 1;
+        }
+        pos += 1;
+    }
+    None
 }
 
 // A2-4：组表解析的纯逻辑层单测。
@@ -659,9 +712,40 @@ mod a2_4_tests {
 
     #[test]
     fn getgrouplist_reports_required_count_without_truncating() {
+        // 用**纯逻辑层**（组表由本测给出）——`getgrouplist` 本体走真实 VFS，宿主上不可用。
+        // 成员关系刻意写成一目了然：alice∈dev,ops；bob∈dev；carol∈ops。
+        let json = br#"{"groups":[{"name":"dev","gid":2000,"members":["alice","bob"]},
+                       {"name":"ops","gid":2001,"members":["alice","carol"]}]}"#;
+        let recs = parse_groups(json);
+
         // 缓冲为 0 时必须如实返回**所需条数**（POSIX 语义），而不是写越界或返回 0。
         let mut empty: [u32; 0] = [];
-        let need = getgrouplist("nobody-not-in-any-group", 5555, &mut empty);
+        let need = getgrouplist_from(&recs, "nobody-not-in-any-group", 5555, &mut empty);
         assert_eq!(need, 1, "only the primary group is reported when no group lists the user");
+
+        // alice：主组 5555 + dev(2000) + ops(2001) ⇒ 3 条；缓冲 0 ⇒ 只报数、不写。
+        let need = getgrouplist_from(&recs, "alice", 5555, &mut empty);
+        assert_eq!(need, 3, "alice belongs to 3 groups (primary + dev + ops)");
+
+        // 缓冲不足（2 < 3）：仍如实返回所需条数，且**不写半个列表**（不越界）。
+        let mut small = [0u32; 2];
+        let need = getgrouplist_from(&recs, "alice", 5555, &mut small);
+        assert_eq!(need, 3, "buffer too small -> report required count, do not truncate silently");
+
+        // 缓冲足够：写入顺序 = 主组在前，然后按组表声明顺序。
+        let mut full = [0u32; 4];
+        let need = getgrouplist_from(&recs, "alice", 5555, &mut full);
+        assert_eq!(need, 3);
+        assert_eq!(&full[..3], &[5555, 2000, 2001], "primary first, then declaration order");
+
+        // 主组与某组重复时只出现一次（去重）：bob 仅属 dev(2000)，主组也是 2000 ⇒ 去重后 1 条。
+        let need = getgrouplist_from(&recs, "bob", 2000, &mut full);
+        assert_eq!(need, 1, "primary gid 2000 dedups against dev(2000)");
+        assert_eq!(full[0], 2000, "dedup: 2000 appears once");
+
+        // 不在任何组、且主组也不与任何组重复 ⇒ 只有主组一条。
+        let need = getgrouplist_from(&recs, "carol", 7777, &mut full);
+        assert_eq!(need, 2, "carol: primary 7777 + ops(2001)");
+        assert_eq!(&full[..2], &[7777, 2001], "primary first, then ops");
     }
 }

@@ -52,8 +52,12 @@ enum ExitEntry {
 static ATEXIT_FNS: Mutex<[Option<ExitEntry>; MAX_ATEXIT]> = Mutex::new([None; MAX_ATEXIT]);
 
 /// `atexit(f)`：登记退出处理函数。成功返回 0；表满返回非 0。
-#[unsafe(no_mangle)]
-pub extern "C" fn atexit(f: Option<ExitFn>) -> c_int {
+///
+/// **宿主测试构建不导出 C 符号**（`cfg_attr(not(test), ...)`）：宿主 CRT（msvcrt）自己也定义
+/// `atexit`，两边同时导出就是链接期 `LNK2005: atexit 已经在 ... 中定义`（实测，也是 libc 唯一
+/// 的重复符号）。测试构建里由宿主 CRT 提供该符号即可；本函数被 libc **内部**调用
+/// （`stdio.rs` 的临时文件兜底清理），故函数本体必须留，去掉的只是**导出名**。
+pub extern "C" fn atexit_internal(f: Option<ExitFn>) -> c_int {
     let Some(f) = f else {
         return -1;
     };
@@ -65,6 +69,13 @@ pub extern "C" fn atexit(f: Option<ExitFn>) -> c_int {
         }
     }
     1
+}
+
+/// C ABI 出口：`atexit`。**仅非测试构建**（宿主 CRT 已有一份，同时导出即 LNK2005）。
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn atexit(f: Option<ExitFn>) -> c_int {
+    atexit_internal(f)
 }
 
 /// `on_exit(f, arg)`：登记**带参数**的退出处理函数。成功返回 0；表满或 `f` 为空返回非 0。

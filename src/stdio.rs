@@ -2454,7 +2454,7 @@ pub unsafe extern "C" fn tmpfile() -> *mut FILE {
         return core::ptr::null_mut();
     }
     if !TMP_CLEANUP_REGISTERED.swap(true, Ordering::SeqCst) {
-        let _ = crate::stdlib::atexit(Some(tmp_cleanup_at_exit));
+        let _ = crate::stdlib::atexit_internal(Some(tmp_cleanup_at_exit));
     }
     // 4. 包成读写流。
     let fp = alloc_file(fd as u64, FmMode::ReadWrite);
