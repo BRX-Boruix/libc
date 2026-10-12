@@ -148,6 +148,9 @@ pub unsafe extern "C" fn sigaction(
 ///
 /// `set`/`oset` 至少一者非空。`how`：SIG_BLOCK(0)/SIG_UNBLOCK(1)/SIG_SETMASK(2)
 /// （与 libsys SIGNAL_BLOCK/UNBLOCK/SET 对齐）。返回 0 成功，-1 失败置 errno。
+///
+/// **与 `sigpending` 的区别**（别混）：本函数管的是**屏蔽集**（哪些信号被挡住），
+/// `sigpending` 取的是**待决集**（挡住之后积压了哪些）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigprocmask(
     how: c_int,
@@ -199,6 +202,31 @@ pub unsafe extern "C" fn sigprocmask(
 
 /// 信号集的位编码 = **`1 << sig`**（与内核 `task::signal_set::SignalSet` 同一事实）。
 ///
+/// `sigpending(set)`：取当前进程的**待决信号集**（POSIX，声明见 `<signal.h>`）。
+///
+/// 成功返回 0 并把待决集写入 `set`；`set` 为空返回 -1 置 `EINVAL`。
+///
+/// **为什么现在才有**：内核此前只有 `SIGNAL_MASK`（屏蔽集读写）与内部访问器
+/// `SignalState::pending()`，**没有把待决集暴露给用户态的调用号** ⇒ 本项只能登记为缺失。
+/// 本轮补了内核动词 `SYS_SIGNAL_PENDING`（0x85）才有这条出口。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigpending(set: *mut sigset_t) -> c_int {
+    if set.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    match libsys::signal::pending() {
+        Ok(bits) => {
+            unsafe { *set = bits };
+            0
+        }
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// 为什么必须提供这些函数：`sigset_t` 是 u64 位图，若不给辅助函数，C 程序只能**手搓位**——
 /// 极易按「bit(sig-1)」的直觉写错（本仓的覆盖面驱动就这么错过一次：传 `1<<11` 以为屏蔽了
 /// SIGUSR2，实际屏蔽的是 SIGSEGV=11）。POSIX 要求这五个函数正是为了让调用方不碰编码。

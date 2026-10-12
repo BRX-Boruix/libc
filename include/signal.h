@@ -111,6 +111,11 @@ int kill(pid_t pid, int sig);
 int sigaction(int sig, const struct sigaction *act, struct sigaction *oldact);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 
+/* sigpending：取当前进程的**待决信号集**（POSIX）。成功 0 并写入 *set；set 为空 -> -1 置 EINVAL。
+ * 与 sigprocmask 管的是**不同**集合：那个是屏蔽集（哪些被挡住），这个是待决集（挡住后积压了哪些）。
+ * 内核侧对应 SYS_SIGNAL_PENDING（0x85）——此前只有屏蔽集入口，故本项曾登记为缺失。 */
+int sigpending(sigset_t *set);
+
 #ifdef __cplusplus
 }
 #endif
