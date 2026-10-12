@@ -653,6 +653,43 @@ pub extern "C" fn ftruncate(fd: c_int, length: crate::ctypes::off_t) -> c_int {
     }
 }
 
+/// `link(target, link_path)`：创建**硬链接**（POSIX，声明见 `<unistd.h>`）。成功 0，失败 -1 置 errno。
+///
+/// 与 `symlink` 本质不同：软链接造**新节点**（内容是目标路径串），硬链接让**同一个节点**
+/// 多一个目录项 ⇒ 两条路径共享内容、`st_ino` 相同、`st_nlink` 计数。
+///
+/// **诚实边界（S09）**：目前只有 **RamFS** 实现了该原语（根文件系统）。ext2 侧需先能从
+/// `Arc<dyn INode>` 拿回目标 inode 号（内核 `add_dir_entry` 已收 ino，缺的是跨 trait 边界的
+/// 身份通道），故 ext2 上如实返回 `ENOTSUP`——**不近似**（复制内容不是硬链接）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn link(target: *const c_char, link_path: *const c_char) -> c_int {
+    if target.is_null() || link_path.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let t = match unsafe { crate::stdio::cstr_to_str(target) } {
+        Some(s) => s,
+        None => {
+            set_errno(EINVAL);
+            return -1;
+        }
+    };
+    let l = match unsafe { crate::stdio::cstr_to_str(link_path) } {
+        Some(s) => s,
+        None => {
+            set_errno(EINVAL);
+            return -1;
+        }
+    };
+    match libsys::link(&t, &l) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// `fsync(fd)`：把数据冲刷到稳定存储（POSIX，声明见 `<unistd.h>`）。成功 0，失败 -1 置 errno。
 ///
 /// **诚实边界（S09）**：本内核的块缓存是**每设备**一份、不是每文件一份 ⇒ 无法只冲刷
@@ -1157,8 +1194,9 @@ fn stat_from_info(info: &libsys::StatInfo) -> stat {
     let mode = stat_type_bits(info.node_type) | stat_perm_bits(info.perms);
     stat {
         st_dev: 0,
-        st_ino: 0,
-        st_nlink: 0,
+        st_ino: info.ino,   // D.2 link：文件身份真值（此前硬编码 0）
+        // 内核侧 nlink 是 u32（POSIX 的 nlink_t 亦是），这里提升到 struct stat 的 u64 字段。
+        st_nlink: info.nlink as u64, // D.2 link：硬链接计数真值（此前硬编码 0）
         st_mode: mode,
         // A1-7 归真（PRE-11「三层各自伪造」消解）：属主自 StatInfo 真值
         // 投影（A1-4 起内核 stat 通道如实报告节点属主），不再硬编码 0。

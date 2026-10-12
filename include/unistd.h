@@ -53,6 +53,13 @@ int fsync(int fd);
  * 诚实边界：本系统没有 fd→路径 解析，故由内核提供 fd 版动词（SYS_STREAM_FCHOWN 0x1C）。 */
 int fchown(int fd, uid_t uid, gid_t gid);
 
+/* link：创建硬链接（POSIX）。成功 0，失败 -1 置 errno。
+ * 与 symlink 本质不同：软链接造新节点，硬链接让**同一个节点**多一个目录项
+ * （两路径共享内容、st_ino 相同、st_nlink 计数）。
+ * 诚实边界：目前只有 RamFS 实现（根文件系统）；ext2 上如实返回 ENOTSUP——不近似
+ * （复制内容不是硬链接）。内核侧对应 SYS_ENTRY_LINK（0x49）。 */
+int link(const char *target, const char *link_path);
+
 /* dup2：把 oldfd 复制到 newfd（POSIX）。副本与原 fd 共享文件偏移。
  * 3P6-2 第二波：由 GCC 的真实报错驱动补上（libiberty 的 filedescriptor.c 需要它）。 */
 int dup2(int oldfd, int newfd);
