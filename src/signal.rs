@@ -202,6 +202,25 @@ pub unsafe extern "C" fn sigprocmask(
 
 /// 信号集的位编码 = **`1 << sig`**（与内核 `task::signal_set::SignalSet` 同一事实）。
 ///
+/// `alarm(seconds)`：设置/取消一次性闹钟（POSIX，声明见 `<unistd.h>`）。
+///
+/// 返回**上一个**闹钟的剩余秒数（向上取整；无未到期闹钟则为 0）；`seconds == 0` 取消。
+/// 到期由内核投递 `SIGALRM`。
+///
+/// **诚实边界**：内核实现的是**每线程**闹钟（用调用者的 pid），POSIX 规定是**每进程**的
+/// ——单线程进程下二者相同。`setitimer` 的周期语义与三种计时器未实现，如实缺。
+#[unsafe(no_mangle)]
+pub extern "C" fn alarm(seconds: crate::ctypes::c_uint) -> crate::ctypes::c_uint {
+    match libsys::signal::alarm(seconds) {
+        Ok(rem) => rem as crate::ctypes::c_uint,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            // POSIX 的 alarm 没有失败返回通道；如实返回 0 并置 errno（调用方可查）。
+            0
+        }
+    }
+}
+
 /// `sigsuspend(mask)`：原子地把屏蔽集换成 `*mask` 并挂起，直到有信号被投递
 /// （POSIX，声明见 `<signal.h>`）。**恒返回 -1 置 `EINTR`**。
 ///

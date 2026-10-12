@@ -65,6 +65,11 @@ int link(const char *target, const char *link_path);
  * 越界由内核钳制到 [-20,19]（与调度器单点一致），不是报错。 */
 int nice(int inc);
 
+/* alarm：设置/取消一次性闹钟（POSIX）。返回上一个闹钟的剩余秒数（向上取整）；0 取消。
+ * 到期由内核投递 SIGALRM。诚实边界：内核实现的是每线程闹钟（用调用者 pid），POSIX 规定
+ * 是每进程的——单线程进程下相同；setitimer 的周期语义与三种计时器未实现，如实缺。 */
+unsigned int alarm(unsigned int seconds);
+
 /* dup2：把 oldfd 复制到 newfd（POSIX）。副本与原 fd 共享文件偏移。
  * 3P6-2 第二波：由 GCC 的真实报错驱动补上（libiberty 的 filedescriptor.c 需要它）。 */
 int dup2(int oldfd, int newfd);
