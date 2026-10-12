@@ -44,4 +44,16 @@ int yield_sys(void);
  * 实现在 libc/src/mman.rs。此前内核与 libsys 都已有该调用号，唯独缺 libc 的 C ABI 出口。 */
 int boruix_memory_query(const void *addr, unsigned long long *out);
 
+/* 身份与能力的 C ABI 出口（boruix 专有：POSIX 的 setuid 只动 uid/gid、**保留 caps**，
+ * 表达不了能力轴）。caps 位：SYSTEM=1<<0 DEVICE=1<<1 MEMORY=1<<2 KILL=1<<3 OWNER=1<<4。
+ * boruix_identity_set(uid, gid, caps)：**传 caps=0 即彻底降权**（本函数主要用途）。
+ *   授权：无 CAP_SYSTEM 时只能改 caps、不得改 uid/gid（A2-1）。成功 0 / 失败 -1 置 errno。
+ * boruix_identity_query(out)：out 指向 12 字节可写缓冲，布局 = 3 个 u32 [uid, gid, caps]。
+ *
+ * 为什么需要：自动化通道（--selftest / --selftest-quick / --run=）**故意**跑在 login 降权
+ * 之前（init/src/main.rs:1170-1172 成文）⇒ 持 init 的 system() 全能力（含 CAP_OWNER，
+ * 而 CAP_OWNER 完全绕过策略求值）⇒ 任何验证权限行为的程序若走这些通道，都会看到特权进程。 */
+int boruix_identity_set(unsigned int uid, unsigned int gid, unsigned int caps);
+int boruix_identity_query(void *out);
+
 #endif /* _BORUIX_H */
