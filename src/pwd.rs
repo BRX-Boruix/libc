@@ -593,8 +593,55 @@ pub unsafe extern "C" fn endgrent() {
 /// **为何需要它**：`struct group.gr_mem` 在本实现恒为 NULL（见字段说明），故调用方
 /// 需按"用户 → 组集合"方向查询。这也是 A2-7 登录后经 `groups_set` 装配身份的
 /// 数据来源。
-pub fn getgrouplist(user: &str, primary_gid: u32, out: &mut [u32]) -> usize {
+pub fn groups_of_user(user: &str, primary_gid: u32, out: &mut [u32]) -> usize {
     getgrouplist_from(&load_groups(), user, primary_gid, out)
+}
+
+/// `getgrouplist(user, group, groups, ngroups)`：BSD/glibc 的组列表查询（声明见 `<grp.h>`）。
+///
+/// **契约（照 BSD/glibc，不是本实现自定）**：
+/// - 入参 `*ngroups` = 调用方缓冲能容纳的条数；
+/// - 成功：写入去重后的列表（主组在前，随后按组表声明顺序），把 `*ngroups` 置为**实际条数**，返回 **0**；
+/// - 缓冲不足：把 `*ngroups` 置为**所需条数**、返回 **-1**，调用方据此扩容后重试。
+///
+/// **为什么必须存在这个出口**：`grp.h` 的注释早就写着「要拿某用户的组请用 getgrouplist」，
+/// 但此前**只有 Rust 函数、没有 C ABI 出口** ⇒ 用户程序根本拿不到组列表。那是**可达性缺口**，
+/// 与 `boruix_memory_query` 同一类。
+///
+/// **与 Rust 侧 [`groups_of_user`] 的分工**：Rust 侧返回「所需条数」这一个数、不做容量判定；
+/// C 侧把它包成 BSD 契约（0 / -1 + `*ngroups` 出参）。判定只有一处，不重复。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrouplist(
+    user: *const crate::ctypes::c_char,
+    group: crate::ctypes::gid_t,
+    groups: *mut crate::ctypes::gid_t,
+    ngroups: *mut crate::ctypes::c_int,
+) -> crate::ctypes::c_int {
+    if user.is_null() || groups.is_null() || ngroups.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    let name = match unsafe { crate::stdio::cstr_to_str(user) } {
+        Some(s) => s,
+        None => {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+    };
+    let cap = unsafe { *ngroups };
+    if cap < 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    // 容量 0 时传空切片：与「缓冲不足」同一条路径（只报数、不写）。
+    let out = unsafe { core::slice::from_raw_parts_mut(groups, cap as usize) };
+    let need = groups_of_user(&name, group, out);
+    unsafe { *ngroups = need as crate::ctypes::c_int };
+    if need > cap as usize {
+        crate::errno::set_errno(crate::errno::ERANGE);
+        return -1;
+    }
+    0
 }
 
 /// [`getgrouplist`] 的**纯逻辑层**（组表由调用方给出，不碰文件系统）。
