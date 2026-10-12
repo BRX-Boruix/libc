@@ -116,6 +116,12 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
  * 内核侧对应 SYS_SIGNAL_PENDING（0x85）——此前只有屏蔽集入口，故本项曾登记为缺失。 */
 int sigpending(sigset_t *set);
 
+/* sigsuspend：原子地把屏蔽集换成 *mask 并挂起，直到有信号被投递（POSIX）。恒返回 -1 置 EINTR。
+ * 原子性必须由内核给：用户态「先 sigprocmask 再等」中间有窗口，信号会在换集**之前**被投递。
+ * 屏蔽集的还原点在投递侧（内核 deliver_on_return）——阻塞的 syscall 唤醒后没有「继续」路径。
+ * 内核侧对应 SYS_SIGNAL_SUSPEND（0x86）。 */
+int sigsuspend(const sigset_t *mask);
+
 #ifdef __cplusplus
 }
 #endif

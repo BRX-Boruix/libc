@@ -202,6 +202,34 @@ pub unsafe extern "C" fn sigprocmask(
 
 /// 信号集的位编码 = **`1 << sig`**（与内核 `task::signal_set::SignalSet` 同一事实）。
 ///
+/// `sigsuspend(mask)`：原子地把屏蔽集换成 `*mask` 并挂起，直到有信号被投递
+/// （POSIX，声明见 `<signal.h>`）。**恒返回 -1 置 `EINTR`**。
+///
+/// **原子性为什么必须由内核给**：用户态「先 `sigprocmask` 再等」中间有窗口——信号若在
+/// 两次调用之间到达，就会在换上屏蔽集**之前**被投递（本该挡住它）。内核把「换集」与
+/// 「入睡」做成对唤醒方不可分割的一步（`block_current_with` 的条件复检在调度锁内）。
+///
+/// **屏蔽集的还原点在投递侧**：阻塞的 syscall 唤醒后直接返回用户态，没有「唤醒后继续」
+/// 的路径 ⇒ 内核在 `deliver_on_return` 取到信号时还原（POSIX 的规定也正是如此）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigsuspend(mask: *const sigset_t) -> c_int {
+    if mask.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    match libsys::signal::suspend(unsafe { *mask }) {
+        // 正常路径不该走到这里（内核恒返回 Interrupted）。
+        Ok(_) => {
+            set_errno(crate::errno::EINTR);
+            -1
+        }
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// `sigpending(set)`：取当前进程的**待决信号集**（POSIX，声明见 `<signal.h>`）。
 ///
 /// 成功返回 0 并把待决集写入 `set`；`set` 为空返回 -1 置 `EINVAL`。
