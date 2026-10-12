@@ -4,7 +4,7 @@
 //! `mm::user_space`，因为 W^X 策略在那里裁决）。
 
 use crate::ctypes::{c_int, c_void, off_t, size_t};
-use crate::errno::{from_libsys, set_errno, ENOTSUP};
+use crate::errno::{from_libsys, set_errno, EINVAL, ENOTSUP};
 
 pub const PROT_READ: c_int = 1;
 pub const PROT_WRITE: c_int = 2;
@@ -14,6 +14,33 @@ pub const MAP_PRIVATE: c_int = 0x02;
 pub const MAP_ANONYMOUS: c_int = 0x20;
 /// POSIX 失败哨兵（`(void *)-1`）。
 pub const MAP_FAILED: *mut c_void = usize::MAX as *mut c_void;
+
+/// `boruix_memory_query(addr, out)`：查询 `addr` 所在 4KB 页的**页表真值**（KM2 / 0x22）。
+///
+/// 成功返回 0 并把 u64 位图写入 `out`（须指向 8 字节可写缓冲）；失败返回 -1 置 errno。
+/// 位图 `0` = 未映射（含 demand 区已声明但未触碰——查询**只读页表，绝不触发补页**）；
+/// 否则为 `MEMQ_PRESENT | [MEMQ_USER] | [MEMQ_WRITABLE]`。
+///
+/// **为什么补这个出口**：内核 `sys_memory_query` 与 libsys 的 `SYS_MEMORY_QUERY`/`MEMQ_*`
+/// 早就在，但 libc 没有 C ABI 出口 ⇒ 用户程序只能自己写 `int 0x80`。那是**可达性缺口**，
+/// 不是缺功能（本仓的夹具当时就是这么绕过它的）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn boruix_memory_query(addr: *const c_void, out: *mut u64) -> c_int {
+    if out.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    match libsys::memory_query(addr as u64) {
+        Ok(bits) => {
+            unsafe { *out = bits };
+            0
+        }
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
 
 /// `munmap(addr, len)`：解除映射（`mmap` 的配对操作）。
 #[unsafe(no_mangle)]

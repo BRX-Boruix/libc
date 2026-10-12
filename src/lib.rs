@@ -56,6 +56,8 @@ pub mod posix_batch3;
 pub mod posix_batch4;
 pub mod posix_batch5;
 pub mod posix_batch6;
+pub mod posix_batch7;
+pub mod semaphore;
 pub mod math_core;
 pub mod math_core2;
 // qsort 的纯计算核心（宿主对照验证用；见 qsort_core.rs 文件头记的那处越界读缺陷）。

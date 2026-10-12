@@ -34,6 +34,10 @@ int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
 int isatty(int fd);
 
+/* confstr：取配置定义字符串（POSIX）。返回值=所需长度（含 NUL）；name 无值时返回 0 置 EINVAL。
+ * 已定义 _CS_PATH(1) 与 _CS_GNU_LIBC_VERSION(2)——后者如实标注是 boruix 而非 glibc。 */
+size_t confstr(int name, char *buf, size_t len);
+
 /* dup2：把 oldfd 复制到 newfd（POSIX）。副本与原 fd 共享文件偏移。
  * 3P6-2 第二波：由 GCC 的真实报错驱动补上（libiberty 的 filedescriptor.c 需要它）。 */
 int dup2(int oldfd, int newfd);

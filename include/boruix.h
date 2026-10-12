@@ -39,4 +39,9 @@ unsigned long boruix_stdio_write_bytes(void);
  * 实现在 libc/src/process.rs，此前没有声明（头文件覆盖审计列出）。 */
 int yield_sys(void);
 
+/* 页属性查询（KM2 / syscall 0x22）。成功返回 0 并把 u64 位图写入 out；失败返回 -1 置 errno。
+ * 位图 0 = 未映射（只读页表，绝不触发补页）；否则 PRESENT|USER|WRITABLE 的组合。
+ * 实现在 libc/src/mman.rs。此前内核与 libsys 都已有该调用号，唯独缺 libc 的 C ABI 出口。 */
+int boruix_memory_query(const void *addr, unsigned long long *out);
+
 #endif /* _BORUIX_H */

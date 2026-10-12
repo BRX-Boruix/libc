@@ -76,6 +76,9 @@ int getc(FILE *fp);
 int putc(int c, FILE *fp);
 int ungetc(int c, FILE *fp);
 char *fgets(char *s, int n, FILE *fp);
+/* gets：读一行（不含换行）。**危险**——不检查目标缓冲大小，缓冲区溢出是接口固有缺陷，
+ * POSIX 因此废弃它。仅为兼容老代码而提供；新代码请用 fgets。 */
+char *gets(char *s);
 int fputs(const char *s, FILE *fp);
 ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *fp);
 ssize_t getline(char **lineptr, size_t *n, FILE *fp);
