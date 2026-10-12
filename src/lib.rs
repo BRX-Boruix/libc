@@ -40,16 +40,24 @@
 
 extern crate alloc;
 
-// `cargo test -p libc`（宿主单测）**当前跑不通**，三条结构性原因（已实测，勿再盲试）：
-// 1. `[lib] crate-type` 含 `staticlib` ⇒ 宿主上要求**可完整链接**的产物，而分配器与
-//    panic 处理器在裸机侧由 `libsys` 按 `cfg(all(not(test), any(target_os="none","boruix")))`
-//    提供、宿主上如实缺席；
-// 2. 补一份 host 专用 `#[global_allocator]`+`#[panic_handler]` 也**不解决**：宿主仍按
-//    `unwind` 编译 ⇒ `unwinding panics are not supported without std`；而设回 `panic="abort"`
-//    又让 `cargo test`（必须 unwind）无法构建 —— 两者冲突；
-// 3. 目标专用的 `global_asm!` 会进测试构建 ⇒ `expected absolute expression`。
-// 要真正打通需**把 `staticlib` 拆成独立 crate**（build 体系改动，牵连 SDK 产物路径），
-// 见 docs/TODO/3p.md 二十一续。
+// `cargo test -p libc`（宿主单测）跑不通的**真实**原因（逐条实测得出，勿再凭推断）：
+//
+// 1. **符号与宿主 CRT 冲突**（真障碍，也是唯一剩下的）：本 crate 用 `#[no_mangle]` 导出
+//    `atexit` 等 C 符号，而宿主 msvcrt.lib 也定义它们 ⇒ 链接期
+//    `LNK2005: atexit 已经在 ... 中定义` + `LNK1169: 找到一个或多个多重定义的符号`。
+//    **任何 crate 拆分都解决不了**——符号在本体里。
+// 2. 目标专用的 `global_asm!`（x87 long double、setjmp）会进宿主测试构建 ⇒
+//    `expected absolute expression` / `unknown directive`。**已按目标门禁修掉**（见下方 `longdouble`）。
+//
+// 【曾经写错的判断，留档以免重蹈】此前这里写着「`staticlib` crate-type 要求宿主完整链接」
+// 与「`panic=abort` 与 cargo test 冲突」——**两条都不成立**：
+//   - `cargo test --lib` 只构建测试目标，`no global memory allocator` / `#[panic_handler]` /
+//     `unwinding panics are not supported` 三条**全部消失**（实测）；
+//   - `panic` 对 test profile 只是被 Cargo **忽略并警告**，不是错误。
+//
+// **本项目的既有做法**（见 tools/checks/math_verify/verify.rs）：把**纯逻辑**留在可 `include!`
+// 的源文件里，宿主侧用 `mod x { include!("...") }` 引入**同一份源码**做逐点验证。
+// 故 `mode.rs` 这类纯模块应走 `tools/checks/` 下的宿主验证器，而不是拆 crate。
 
 pub mod ctype;
 pub mod ctypes;
@@ -78,6 +86,11 @@ pub mod qsort_core;
 // 数学函数的 C ABI 导出层（核心保持纯函数，便于宿主对照验证器 include!）。
 pub mod math_exports;
 pub mod regex;
+// **目标门禁**：本模块与 `setjmp` 是 x86-64 **裸机**汇编（x87 80 位 long double、非局部跳转），
+// 宿主（Windows/COFF）汇编器不认这些指令与指示符 ⇒ 进宿主测试构建会报
+// `expected absolute expression` / `unknown directive`。按目标门禁**本来就该做**：
+// 这段汇编与宿主无关，不是为测试而打的补丁。
+#[cfg(all(target_arch = "x86_64", any(target_os = "none", target_os = "boruix")))]
 pub mod longdouble;
 pub mod math_classify;
 pub mod math_decomp;
@@ -86,6 +99,7 @@ pub mod mman;
 pub mod process;
 pub mod pwd;
 pub mod random;
+#[cfg(all(target_arch = "x86_64", any(target_os = "none", target_os = "boruix")))]
 pub mod setjmp;
 pub mod sha256;
 pub mod shadow;
