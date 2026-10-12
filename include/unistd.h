@@ -44,6 +44,11 @@ size_t confstr(int name, char *buf, size_t len);
  * 内核侧对应 SYS_TASK_GROUPS_GET（0x3E）——此前只有 GROUPS_SET、无查询入口，故本项曾登记为缺失。 */
 int getgroups(int size, gid_t list[]);
 
+/* fsync：把数据冲刷到稳定存储（POSIX）。成功 0，失败 -1 置 errno。
+ * 诚实边界：本内核块缓存是每设备一份 ⇒ 实现冲刷全部设备缓存（POSIX 要求的超集，粒度粗但语义正确）；
+ * 仍有脏块未落盘时如实返回 -1 置 EIO（与关机路径同一条判据），不假装成功。 */
+int fsync(int fd);
+
 /* dup2：把 oldfd 复制到 newfd（POSIX）。副本与原 fd 共享文件偏移。
  * 3P6-2 第二波：由 GCC 的真实报错驱动补上（libiberty 的 filedescriptor.c 需要它）。 */
 int dup2(int oldfd, int newfd);

@@ -653,6 +653,28 @@ pub extern "C" fn ftruncate(fd: c_int, length: crate::ctypes::off_t) -> c_int {
     }
 }
 
+/// `fsync(fd)`：把数据冲刷到稳定存储（POSIX，声明见 `<unistd.h>`）。成功 0，失败 -1 置 errno。
+///
+/// **诚实边界（S09）**：本内核的块缓存是**每设备**一份、不是每文件一份 ⇒ 无法只冲刷
+/// 「该 fd 所在设备」。实现冲刷**全部**设备缓存——语义上是 POSIX 要求的**超集**
+/// （fsync 的承诺是「数据已在稳定存储上」，多冲不违反），代价是粒度粗。这不是近似。
+///
+/// **仍脏即失败**：内核回传「仍脏块数」，> 0 时如实返回 -1 置 `EIO`（与关机路径同一条判据）。
+#[unsafe(no_mangle)]
+pub extern "C" fn fsync(fd: c_int) -> c_int {
+    if fd < 0 {
+        set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    match libsys::fsync(fd as u64) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// \`chdir(path)\`：切换工作目录。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chdir(path: *const c_char) -> c_int {
