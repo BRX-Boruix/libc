@@ -675,6 +675,54 @@ pub extern "C" fn fsync(fd: c_int) -> c_int {
     }
 }
 
+/// `fchmod(fd, mode)`：按 fd 改文件模式（POSIX，声明见 `<sys/stat.h>`）。成功 0，失败 -1 置 errno。
+///
+/// **为什么不复用路径版 `chmod`**：本系统**没有 fd→路径 解析**（全仓无 `/proc/self/fd` 一类入口，
+/// 实测零命中），故必须由内核提供 fd 版动词 `SYS_STREAM_FCHMOD`（0x1B）。判定面与路径版一致。
+#[unsafe(no_mangle)]
+pub extern "C" fn fchmod(fd: c_int, mode: crate::ctypes::mode_t) -> c_int {
+    if fd < 0 {
+        set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    match libsys::fchmod(fd as u64, mode) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
+/// `fchown(fd, uid, gid)`：按 fd 改属主（POSIX，声明见 `<unistd.h>`）。成功 0，失败 -1 置 errno。
+///
+/// **易他主需 `CAP_SYSTEM`**（内核单点判定，与路径版 `chown` 同一判据）；`uid`/`gid` 传 `-1`
+/// 表示**保持不变**（POSIX）——先 `fstat` 取当前值再复用同一内核动词，不在用户态另造判定。
+#[unsafe(no_mangle)]
+pub extern "C" fn fchown(
+    fd: c_int,
+    uid: crate::ctypes::uid_t,
+    gid: crate::ctypes::gid_t,
+) -> c_int {
+    if fd < 0 {
+        set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    let mut st: stat = unsafe { core::mem::zeroed() };
+    if unsafe { fstat(fd, &mut st) } != 0 {
+        return -1; // fstat 已置 errno
+    }
+    let new_uid = if uid == u32::MAX { st.st_uid } else { uid };
+    let new_gid = if gid == u32::MAX { st.st_gid } else { gid };
+    match libsys::fchown(fd as u64, new_uid, new_gid) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// \`chdir(path)\`：切换工作目录。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chdir(path: *const c_char) -> c_int {

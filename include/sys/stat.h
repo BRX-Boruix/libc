@@ -101,6 +101,11 @@ int mkdir(const char *path, mode_t mode);
  * （如 0o200）才可观测。见 libc/src/mode.rs。 */
 mode_t umask(mode_t mask);
 
+/* fchmod：按 fd 改文件模式（POSIX）。成功 0，失败 -1 置 errno。
+ * 诚实边界：本系统没有 fd→路径 解析（无 /proc/self/fd 一类入口），故必须由内核提供
+ * fd 版动词（SYS_STREAM_FCHMOD 0x1B）；判定面与路径版 chmod 完全一致，仅少了目录遍历检查。 */
+int fchmod(int fd, mode_t mode);
+
 #ifdef __cplusplus
 }
 #endif
