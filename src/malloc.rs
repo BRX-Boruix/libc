@@ -414,9 +414,29 @@ pub extern "C" fn boruix_brk(new: u64) -> i64 {
 /// 打开后，libc 的 `malloc` 与 libsys 的 buddy 在每次 `brk` 扩展时各打一行
 /// `[C|L] <cur_brk> <new_brk>`（十六进制）。**默认关闭**——诊断不能污染所有程序。
 /// 这是定位「两个分配器共用 brk」类问题的**常驻工具**，不是一次性补丁。
+/// 裸机门禁（与 `libsys::allocator` 的 `mod allocator` **完全一致**）：宿主测试构建里
+/// 没有裸机堆，`libsys::heap_diag*` 如实缺席，故这里退化为空操作——
+/// 不加门禁就会在 host 上报 `cannot find function heap_diag in crate libsys`，
+/// 把整个 libc 的宿主测试挡住（实测）。
+#[cfg(all(not(test), any(target_os = "none", target_os = "boruix")))]
+fn diag_set(on: bool) {
+    libsys::heap_diag(on);
+}
+#[cfg(not(all(not(test), any(target_os = "none", target_os = "boruix"))))]
+fn diag_set(_on: bool) {}
+
+#[cfg(all(not(test), any(target_os = "none", target_os = "boruix")))]
+fn diag_on() -> bool {
+    libsys::heap_diag_on()
+}
+#[cfg(not(all(not(test), any(target_os = "none", target_os = "boruix"))))]
+fn diag_on() -> bool {
+    false
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn boruix_heap_diag(on: crate::ctypes::c_int) {
-    libsys::heap_diag(on != 0);
+    diag_set(on != 0);
 }
 
 /// 分配器**契约自检**（默认关闭，由 `boruix_heap_diag(1)` 打开）。
@@ -430,7 +450,7 @@ pub extern "C" fn boruix_heap_diag(on: crate::ctypes::c_int) {
 ///
 /// 零分配：栈缓冲 + write（诊断路径绝不能分配）。
 fn check_capacity(tag: u8, cap: usize, want: usize) {
-    if !libsys::heap_diag_on() {
+    if !diag_on() {
         return;
     }
     // **口径收紧**：`cap` 是 payload 容量（**含末尾 canary 区**），用户真正可写的只有
@@ -486,7 +506,7 @@ unsafe fn heap_extend(need: usize) -> *mut u8 {
     //
     // **必须带 pid**：串口日志是多进程交织的，不带 pid 会把「不同进程各自的第一段」
     // 误读成「同一进程重复」——实测踩过这个坑。
-    if libsys::heap_diag_on() {
+    if diag_on() {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut buf = [0u8; 56];
         buf[0] = b'[';

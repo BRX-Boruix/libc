@@ -1209,6 +1209,7 @@ mod a7_owner_truth_tests {
             created_time: 0, modified_time: 0, changed_time: 0,
             owner_uid: 0, owner_gid: 0,
             is_terminal: 1,
+            console_owner: 0,
         };
         assert_eq!(isatty_from_info(&tty), 1, "node says terminal -> 1");
 
@@ -1221,6 +1222,7 @@ mod a7_owner_truth_tests {
             created_time: 0, modified_time: 0, changed_time: 0,
             owner_uid: 0, owner_gid: 0,
             is_terminal: 0,
+            console_owner: 0,
         };
         assert_eq!(isatty_from_info(&file), 0, "redirected to a file -> 0 (was 1)");
 
@@ -1253,6 +1255,7 @@ mod a7_owner_truth_tests {
             owner_uid: 1000,
             owner_gid: 50,
             is_terminal: 0,
+            console_owner: 0,
         };
         let st: stat = stat_from_info(&info);
         assert_eq!(st.st_mode & 0o777, 0o640, "three-segment mode restore");

@@ -26,8 +26,12 @@ crt = ["libsys/crt"]
 libsys = { path = "../libsys", default-features = false }
 spin = "0.9"
 
-# 用户态裸机库：无 unwinding 运行时。unwind 相关函数由 no_std 下层与
-# libsys 提供；libc 自身不引入任何 unwinding 依赖（S35：零外部依赖引入）。
+# 用户态裸机库：无 unwinding 运行时。
+#
+# **注意**：这两行 `panic = "abort"` 与宿主 `cargo test`（必须 unwind）**冲突**——
+# 去掉它们宿主仍报 `unwinding panics are not supported without std`（`staticlib` 要求
+# 可完整链接，而分配器/panic 处理器在宿主上缺席），加上它们 `cargo test` 直接无法构建。
+# 打通宿主单测需要把 `staticlib` 拆成独立 crate，见 docs/TODO/3p.md 二十一续。
 [profile.dev]
 panic = "abort"
 [profile.release]

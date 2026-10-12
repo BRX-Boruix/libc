@@ -40,6 +40,17 @@
 
 extern crate alloc;
 
+// `cargo test -p libc`（宿主单测）**当前跑不通**，三条结构性原因（已实测，勿再盲试）：
+// 1. `[lib] crate-type` 含 `staticlib` ⇒ 宿主上要求**可完整链接**的产物，而分配器与
+//    panic 处理器在裸机侧由 `libsys` 按 `cfg(all(not(test), any(target_os="none","boruix")))`
+//    提供、宿主上如实缺席；
+// 2. 补一份 host 专用 `#[global_allocator]`+`#[panic_handler]` 也**不解决**：宿主仍按
+//    `unwind` 编译 ⇒ `unwinding panics are not supported without std`；而设回 `panic="abort"`
+//    又让 `cargo test`（必须 unwind）无法构建 —— 两者冲突；
+// 3. 目标专用的 `global_asm!` 会进测试构建 ⇒ `expected absolute expression`。
+// 要真正打通需**把 `staticlib` 拆成独立 crate**（build 体系改动，牵连 SDK 产物路径），
+// 见 docs/TODO/3p.md 二十一续。
+
 pub mod ctype;
 pub mod ctypes;
 pub mod dirent;
