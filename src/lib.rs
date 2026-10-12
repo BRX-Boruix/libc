@@ -78,6 +78,7 @@ pub mod identity;
 pub mod mode;
 pub mod posix_batch6;
 pub mod posix_batch7;
+pub mod resource;
 pub mod semaphore;
 pub mod math_core;
 pub mod math_core2;

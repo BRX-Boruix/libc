@@ -60,6 +60,11 @@ int fchown(int fd, uid_t uid, gid_t gid);
  * （复制内容不是硬链接）。内核侧对应 SYS_ENTRY_LINK（0x49）。 */
 int link(const char *target, const char *link_path);
 
+/* nice：把调用进程的 nice 加上 inc，返回**新的** nice（POSIX）。
+ * 返回值可为 -1（新的 nice 恰好为 -1 时）——POSIX 承认这一歧义，调用方须先清零 errno。
+ * 越界由内核钳制到 [-20,19]（与调度器单点一致），不是报错。 */
+int nice(int inc);
+
 /* dup2：把 oldfd 复制到 newfd（POSIX）。副本与原 fd 共享文件偏移。
  * 3P6-2 第二波：由 GCC 的真实报错驱动补上（libiberty 的 filedescriptor.c 需要它）。 */
 int dup2(int oldfd, int newfd);

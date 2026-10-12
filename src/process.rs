@@ -104,6 +104,74 @@ pub extern "C" fn getegid() -> crate::ctypes::gid_t {
     getgid()
 }
 
+/// `nice(inc)`：把调用进程的 nice 值**加上** `inc`，返回**新的** nice（POSIX，声明见 `<unistd.h>`）。
+///
+/// **返回值可为 -1**（新的 nice 恰好是 -1 时）——POSIX 明确承认这一歧义：调用方须在调用前
+/// 把 `errno` 清零再判断。本实现照此，不另造编码。
+///
+/// 越界由内核**钳制**到 [-20, 19]（与调度器单点一致），不是报错：nice 来自用户态，越界
+/// 不应能打挂内核；钳到最近合法档是「最接近用户意图」的确定性行为。
+#[unsafe(no_mangle)]
+pub extern "C" fn nice(inc: c_int) -> c_int {
+    // 先读当前值（pid 0 = 自身）。
+    let cur = match libsys::nice_get(0) {
+        Ok(n) => n,
+        Err(e) => {
+            crate::errno::set_errno(crate::errno::from_libsys(e));
+            return -1;
+        }
+    };
+    match libsys::nice_set(0, cur + inc) {
+        Ok(n) => n,
+        Err(e) => {
+            crate::errno::set_errno(crate::errno::from_libsys(e));
+            -1
+        }
+    }
+}
+
+/// `getpriority(which, who)`：取调度优先级（POSIX，声明见 `<sys/resource.h>`）。
+///
+/// POSIX 关系：`priority = 20 - nice` ⇒ 本函数返回 `20 - nice`（值域 1..=40）。
+/// **`which` 只支持 `PRIO_PROCESS`**：本系统无进程组、无多用户（ADR-043），`PRIO_PGRP`/
+/// `PRIO_USER` 如实返回 -1 置 `EINVAL`——不假装支持。
+#[unsafe(no_mangle)]
+pub extern "C" fn getpriority(which: c_int, who: c_int) -> c_int {
+    if which != crate::resource::PRIO_PROCESS {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    // POSIX：who == 0 表示自身。
+    let pid = if who == 0 { 0 } else { who as usize };
+    match libsys::nice_get(pid) {
+        Ok(n) => crate::resource::PRIORITY_BASE - n,
+        Err(e) => {
+            crate::errno::set_errno(crate::errno::from_libsys(e));
+            -1
+        }
+    }
+}
+
+/// `setpriority(which, who, prio)`：设调度优先级（POSIX，声明见 `<sys/resource.h>`）。
+///
+/// `nice = 20 - prio`（与 `getpriority` 同一关系）。`which` 只支持 `PRIO_PROCESS`（同上）。
+/// **改他人需 `CAP_SYSTEM`**（内核单点判定），越权如实 `EPERM`。
+#[unsafe(no_mangle)]
+pub extern "C" fn setpriority(which: c_int, who: c_int, prio: c_int) -> c_int {
+    if which != crate::resource::PRIO_PROCESS {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    let pid = if who == 0 { 0 } else { who as usize };
+    match libsys::nice_set(pid, crate::resource::PRIORITY_BASE - prio) {
+        Ok(_) => 0,
+        Err(e) => {
+            crate::errno::set_errno(crate::errno::from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// `getgroups(size, list)`：查询调用进程的**补充组**集合（POSIX，声明见 `<unistd.h>`）。
 ///
 /// **契约（POSIX）**：
