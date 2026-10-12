@@ -38,6 +38,12 @@ int isatty(int fd);
  * 已定义 _CS_PATH(1) 与 _CS_GNU_LIBC_VERSION(2)——后者如实标注是 boruix 而非 glibc。 */
 size_t confstr(int name, char *buf, size_t len);
 
+/* getgroups：查询调用进程的补充组集合（POSIX）。
+ * size == 0（list 可为 NULL）⇒ 只返回所需条数；否则写入至多 size 个并返回实际条数；
+ * size 不足 ⇒ 返回 -1 置 EINVAL（不截断、不写半个列表）。
+ * 内核侧对应 SYS_TASK_GROUPS_GET（0x3E）——此前只有 GROUPS_SET、无查询入口，故本项曾登记为缺失。 */
+int getgroups(int size, gid_t list[]);
+
 /* dup2：把 oldfd 复制到 newfd（POSIX）。副本与原 fd 共享文件偏移。
  * 3P6-2 第二波：由 GCC 的真实报错驱动补上（libiberty 的 filedescriptor.c 需要它）。 */
 int dup2(int oldfd, int newfd);

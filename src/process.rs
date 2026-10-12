@@ -104,6 +104,51 @@ pub extern "C" fn getegid() -> crate::ctypes::gid_t {
     getgid()
 }
 
+/// `getgroups(size, list)`：查询调用进程的**补充组**集合（POSIX，声明见 `<unistd.h>`）。
+///
+/// **契约（POSIX）**：
+/// - `size == 0`（`list` 可为 NULL）⇒ 只返回**所需条数**（探测形态）；
+/// - 否则写入至多 `size` 个并返回**实际条数**；
+/// - `size` 不足 ⇒ 返回 **-1** 置 `EINVAL`（POSIX 规定；**不**截断、不写半个列表）。
+///
+/// **为什么现在才有**：内核此前只有 `SYS_TASK_GROUPS_SET`（只回传设置后的结果），
+/// **没有独立查询入口** ⇒ 用户态无法知道自己当前的补充组，libc 侧因此只能把 `getgroups`
+/// 登记为整项缺失。本轮补了内核动词 `SYS_TASK_GROUPS_GET`（0x3E）才有这条出口。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgroups(size: c_int, list: *mut crate::ctypes::gid_t) -> c_int {
+    if size < 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    if size == 0 {
+        // 探测：只问条数（内核允许 a1 == 0 当且仅当容量为 0）。
+        return match libsys::groups_get(&mut []) {
+            Ok(n) => n as c_int,
+            Err(e) => {
+                crate::errno::set_errno(crate::errno::from_libsys(e));
+                -1
+            }
+        };
+    }
+    if list.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    let out = unsafe { core::slice::from_raw_parts_mut(list, size as usize) };
+    match libsys::groups_get(out) {
+        Ok(n) if n <= size as usize => n as c_int,
+        // 缓冲不足：内核只写了能容纳的部分，但 POSIX 要求此时返回 -1/EINVAL。
+        Ok(_) => {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            -1
+        }
+        Err(e) => {
+            crate::errno::set_errno(crate::errno::from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// getppid()：父进程 pid。
 ///
 /// **来路（3P6-2 第二波「整项缺失」类）**：父 pid 由内核经 procfs 暴露
