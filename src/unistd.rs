@@ -23,6 +23,26 @@ pub const O_TRUNC: c_int = 0x200;
 pub const O_APPEND: c_int = 0x400;
 
 /// \`open(path, flags, mode)\`：打开文件，返回 fd 或 -1。
+/// 进程级 umask（POSIX）。**默认 0**：本实现此前根本不看 mode，默认 0 可避免静默改变
+/// 现有程序的权限；只有显式调用 `umask()` 之后才生效。
+static UMASK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// 读当前 umask（供 `open`/`mkdir` 在建文件/目录时应用）。
+pub fn umask_get() -> crate::ctypes::mode_t {
+    UMASK.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// `umask(mask)`：设置进程的文件创建掩码，返回**旧值**（POSIX）。
+///
+/// **诚实边界（S09）**：本内核的权限只有 owner 的 r/w/x 三个布尔（见 `sys/stat.h`），
+/// 不存在 owner/group/other 矩阵 ⇒ 掩码里清除**组/其他**的那些位在本系统上**不可观测**
+/// （`umask 022` 对 `0644` 毫无影响）；只有清除 **owner** 位（如 `0o200`）才可观测。
+/// 这是内核权限模型的边界，不是本函数的近似。
+#[unsafe(no_mangle)]
+pub extern "C" fn umask(mask: crate::ctypes::mode_t) -> crate::ctypes::mode_t {
+    UMASK.swap(mask & 0o777, core::sync::atomic::Ordering::Relaxed)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_uint) -> c_int {
     if path.is_null() {
@@ -47,11 +67,15 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_uint) -
         // O_EXCL：独占创建（内核在 sys_open 内原子判定，见该处注释）。
         exclusive: flags & O_EXCL != 0,
     };
-    // 权限：从 mode 取 r/w/x 位（本内核 Permissions 用最低 3 位）。
+    // 权限：mode 按 **POSIX 位**解释（0644/0755…），经 `crate::mode` 的适配层折成内核的
+    // 3 个布尔。此前直接取最低 3 位当 r/w/x，与调用方传的 0644 语义不通——
+    // `0644 & 0b010 == 0` 会把「owner 可读写」建成**只读**（见 libc/src/mode.rs）。
+    let (r, w, x) = crate::mode::perms_from_mode(mode, umask_get());
     let perm = libsys::Permissions {
-        readable: (mode & 0b100) != 0 || read,
-        writable: (mode & 0b010) != 0 || write,
-        executable: (mode & 0b001) != 0,
+        // 打开既有文件时，flags 侧的读/写意图照旧生效（O_RDWR 不该被 mode 挡住）。
+        readable: r || read,
+        writable: w || write,
+        executable: x,
         system_only: false,
     };
     match libsys::open(path_str, oflags, perm) {
@@ -721,10 +745,11 @@ pub unsafe extern "C" fn mkdir(path: *const c_char, mode: crate::ctypes::mode_t)
         Some(s) => s,
         None => { set_errno(EINVAL); return -1; }
     };
+    let (r, w, x) = crate::mode::perms_from_mode(mode, umask_get());
     let perm = libsys::Permissions {
-        readable: (mode & 0b100) != 0,
-        writable: (mode & 0b010) != 0,
-        executable: (mode & 0b001) != 0,
+        readable: r,
+        writable: w,
+        executable: x,
         system_only: false,
     };
     match libsys::mkdir(p, perm) {

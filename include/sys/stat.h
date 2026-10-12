@@ -93,6 +93,14 @@ int fstat(int fd, struct stat *buf);
 int chmod(const char *path, mode_t mode);
 int mkdir(const char *path, mode_t mode);
 
+/* umask：设置文件创建掩码并返回旧值（POSIX）。**默认 0**（本实现此前不看 mode，默认 0 避免
+ * 静默改变现有程序权限）。
+ *
+ * 诚实边界：内核权限只有 owner 的 r/w/x 三个布尔、不存在 owner/group/other 矩阵 ⇒
+ * 掩码里清除组/其他的位不可观测（umask 022 对 0644 无影响）；只有清除 owner 位
+ * （如 0o200）才可观测。见 libc/src/mode.rs。 */
+mode_t umask(mode_t mask);
+
 #ifdef __cplusplus
 }
 #endif

@@ -55,6 +55,7 @@ pub mod posix_batch2;
 pub mod posix_batch3;
 pub mod posix_batch4;
 pub mod posix_batch5;
+pub mod mode;
 pub mod posix_batch6;
 pub mod posix_batch7;
 pub mod semaphore;
