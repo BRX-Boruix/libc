@@ -45,6 +45,10 @@ pub type sighandler_t = usize;
 /// `sigset_t`：屏蔽集（BORUIX 用 u64 位图，NSIG=64，与 libsys mask 对齐）。
 pub type sigset_t = u64;
 
+/// SA_ONSTACK 与 SS_* 的**内核侧同一事实**（见 libc/include/signal.h 的说明）。
+/// 取值与内核 	ask::signal::SA_ONSTACK 一致（0x08000000，与 Linux 对齐）。
+
+
 /// `struct sigaction`（BORUIX 精简 ABI，x86_64）：
 /// - `sa_handler`：SIG_DFL/SIG_IGN/函数指针；
 /// - `sa_mask`：进程级屏蔽近似（内核无按动作 mask，见模块注释）；
@@ -202,6 +206,70 @@ pub unsafe extern "C" fn sigprocmask(
 
 /// 信号集的位编码 = **`1 << sig`**（与内核 `task::signal_set::SignalSet` 同一事实）。
 ///
+/// `SA_ONSTACK`：在备用信号栈上执行 handler（POSIX `sigaction` 的 `sa_flags` 位）。
+/// 取值与内核 `task::signal::SA_ONSTACK` 同一事实（0x08000000，与 Linux 一致）。
+pub const SA_ONSTACK: c_int = 0x0800_0000;
+
+/// `SS_ONSTACK`：查询时表示「当前正跑在备用栈上」。**本实现不产生该标志**（未实现查询），
+/// 常量如实定义以符合 POSIX 头文件。
+pub const SS_ONSTACK: c_int = 1;
+/// `SS_DISABLE`：设置时表示禁用备用栈。
+pub const SS_DISABLE: c_int = 2;
+
+/// `stack_t`（POSIX `<signal.h>`）。
+#[repr(C)]
+pub struct stack_t {
+    pub ss_sp: *mut c_void,
+    pub ss_flags: c_int,
+    pub ss_size: crate::ctypes::size_t,
+}
+
+/// `sigaltstack(ss, oss)`：设置/查询备用信号栈（POSIX，声明见 `<signal.h>`）。
+///
+/// `ss == NULL` 只查询。设置时 `ss_flags & SS_DISABLE` ⇒ 禁用；否则用 `ss_sp`/`ss_size`。
+/// 旧值写入 `oss`（未设置过则为 `SS_DISABLE`）。
+///
+/// **诚实边界**：内核实现的是**每进程**备用栈（POSIX 规定每线程）——单线程下相同；
+/// `SS_ONSTACK` 查询未实现，故 `oss.ss_flags` 只可能回 `SS_DISABLE` 或 0。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigaltstack(
+    ss: *const stack_t,
+    oss: *mut stack_t,
+) -> c_int {
+    // `ss == NULL` ⇒ **纯查询**：走内核的查询模式（不改状态）。
+    //
+    // 这里不能用「set(0,0) 顺便读旧值」代替——`(0,0)` 在 POSIX 里是 `SS_DISABLE`（禁用），
+    // 那样「查一下当前备用栈」会把栈清掉。内核为此有独立的模式位（见 `SYS_SIGNAL_ALTSTACK`）。
+    let res = if ss.is_null() {
+        libsys::signal::altstack_get()
+    } else {
+        let s = unsafe { &*ss };
+        if s.ss_flags & SS_DISABLE != 0 {
+            libsys::signal::altstack_set(0, 0)
+        } else if s.ss_sp.is_null() || s.ss_size == 0 {
+            set_errno(EINVAL);
+            return -1;
+        } else {
+            libsys::signal::altstack_set(s.ss_sp as u64, s.ss_size as u64)
+        }
+    };
+    match res {
+        Ok((ob, os)) => {
+            if !oss.is_null() {
+                let out = unsafe { &mut *oss };
+                out.ss_sp = ob as *mut c_void;
+                out.ss_size = os as crate::ctypes::size_t;
+                out.ss_flags = if ob == 0 { SS_DISABLE } else { 0 };
+            }
+            0
+        }
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// `alarm(seconds)`：设置/取消一次性闹钟（POSIX，声明见 `<unistd.h>`）。
 ///
 /// 返回**上一个**闹钟的剩余秒数（向上取整；无未到期闹钟则为 0）；`seconds == 0` 取消。

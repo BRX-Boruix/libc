@@ -122,6 +122,22 @@ int sigpending(sigset_t *set);
  * 内核侧对应 SYS_SIGNAL_SUSPEND（0x86）。 */
 int sigsuspend(const sigset_t *mask);
 
+/* 备用信号栈（sigaltstack）。SA_ONSTACK 置位且已设栈时，handler 在备用栈上跑——
+ * 这是栈溢出类信号（SIGSEGV）唯一能安全跑 handler 的方式（否则投递会再次炸在溢出栈上）。
+ * 诚实边界：内核实现的是每进程备用栈（POSIX 规定每线程）——单线程下相同；
+ * SS_ONSTACK 查询（当前是否正跑在备用栈上）未实现，故 oss->ss_flags 只回 SS_DISABLE 或 0。
+ * 内核侧对应 SYS_SIGNAL_ALTSTACK（0x88）：a4 是模式位（0=设置、1=纯查询）——
+ * 「查询」必须不改状态，不能与 SS_DISABLE 的 (0,0) 共用一个编码。 */
+#define SA_ONSTACK 0x08000000
+#define SS_ONSTACK 1
+#define SS_DISABLE 2
+typedef struct {
+    void  *ss_sp;
+    int    ss_flags;
+    size_t ss_size;
+} stack_t;
+int sigaltstack(const stack_t *ss, stack_t *oss);
+
 #ifdef __cplusplus
 }
 #endif
