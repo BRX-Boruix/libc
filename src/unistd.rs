@@ -661,6 +661,37 @@ pub extern "C" fn ftruncate(fd: c_int, length: crate::ctypes::off_t) -> c_int {
 /// **诚实边界（S09）**：目前只有 **RamFS** 实现了该原语（根文件系统）。ext2 侧需先能从
 /// `Arc<dyn INode>` 拿回目标 inode 号（内核 `add_dir_entry` 已收 ino，缺的是跨 trait 边界的
 /// 身份通道），故 ext2 上如实返回 `ENOTSUP`——**不近似**（复制内容不是硬链接）。
+/// `ttyname(fd)`：返回该 fd 对应终端的**路径**（POSIX，声明见 `<unistd.h>`）。
+///
+/// **本实现只能忠实回答「不是终端」这一半**：非终端 ⇒ NULL 置 `ENOTTY`（POSIX）。
+/// 是终端时**如实返回 NULL 置 `ENOTTY`**——因为本系统目前**拿不到节点的名字**（见下），
+/// 而**编一个路径**（例如恒返回 `/devices/console`）会在 fd 属于别的终端时撒谎。
+///
+/// # 为什么拿不到名字（实测结论，不是推断）
+///
+/// 看似可行的办法是「用身份比对」：`fstat(fd).st_ino` 与 `stat("/devices/console").st_ino`
+/// 相等就返回那个路径。**这条路在本系统不成立**：`INode::stable_id` 的默认实现是
+/// `self` 地址，而它的文档明写「无状态视图节点（procfs/devfs/stdio）的 `lookup` 同样可能
+/// **每次新建实例**」——于是 `fstat` 拿到的节点与 `stat` 解析出的节点是**两个不同实例**，
+/// 身份必然不等。实测：`ttyname(1)`（stdout 就是 console）返回 NULL。
+///
+/// 反向查找（遍历挂载树找「哪个路径指向这个节点」）同样解决不了——那个新实例根本不在树里。
+///
+/// # 要忠实实现，缺的组件是
+///
+/// **让视图节点自述名字**：给 `INode` 加一个「本节点的规范路径（若有）」的查询
+/// （`node_path_hint()` 之类），由 devfs/stdio 节点在构造时填入（它们本来就知道自己挂在
+/// 哪个名字下）。有了它，`ttyname` 只需 `fstat` 取节点 → 问名字 → 返回。
+/// 在此之前，本函数如实失败，**不返回伪造路径**。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ttyname(fd: c_int) -> *mut c_char {
+    // 非终端：忠实（POSIX 语义 + errno 都对）。
+    // 是终端：本系统尚无「节点自述名字」通道，如实失败而不是编一个路径。
+    let _ = fd;
+    set_errno(crate::errno::ENOTTY);
+    core::ptr::null_mut()
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn link(target: *const c_char, link_path: *const c_char) -> c_int {
     if target.is_null() || link_path.is_null() {

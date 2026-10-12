@@ -70,6 +70,20 @@ int nice(int inc);
  * 是每进程的——单线程进程下相同；setitimer 的周期语义与三种计时器未实现，如实缺。 */
 unsigned int alarm(unsigned int seconds);
 
+/* ttyname：返回该 fd 对应终端的路径（POSIX）。
+ *
+ * 诚实边界（实测结论）：本实现只能忠实回答「不是终端」这一半——非终端 -> NULL 置 ENOTTY；
+ * 是终端时**也**如实返回 NULL 置 ENOTTY，因为本系统目前拿不到节点的名字，而编一个路径
+ * （如恒返回 /devices/console）会在 fd 属于别的终端时撒谎。
+ *
+ * 为什么身份比对不成立：INode::stable_id 的默认实现是 self 地址，而其文档明写「无状态视图
+ * 节点（procfs/devfs/stdio）的 lookup 同样可能每次新建实例」⇒ fstat 与 stat 拿到的是两个
+ * 不同实例，st_ino 必然不等（实测 ttyname(1) 返回 NULL）。反向查找也无效（新实例不在树里）。
+ *
+ * 要忠实实现，缺的组件是「让视图节点自述名字」：给 INode 加 node_path_hint() 之类，
+ * 由 devfs/stdio 节点在构造时填入。 */
+char *ttyname(int fd);
+
 /* dup2：把 oldfd 复制到 newfd（POSIX）。副本与原 fd 共享文件偏移。
  * 3P6-2 第二波：由 GCC 的真实报错驱动补上（libiberty 的 filedescriptor.c 需要它）。 */
 int dup2(int oldfd, int newfd);
