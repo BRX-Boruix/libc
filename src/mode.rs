@@ -73,6 +73,26 @@ mod tests {
         assert_eq!(perms_from_mode(0, 0), (false, false, false));
     }
 
+    #[test]
+    fn owner_write_only_and_execute_only() {
+        assert_eq!(perms_from_mode(0o200, 0), (false, true, false));
+        assert_eq!(perms_from_mode(0o100, 0), (false, false, true));
+    }
+
+    #[test]
+    fn group_other_bits_do_not_change_the_result() {
+        // 本内核只表达 owner 三位 ⇒ 组/其他的位不影响结果（诚实边界，非近似）。
+        assert_eq!(perms_from_mode(0o644, 0), perms_from_mode(0o600, 0));
+        assert_eq!(perms_from_mode(0o755, 0), perms_from_mode(0o700, 0));
+    }
+
+    #[test]
+    fn umask_can_clear_owner_read_execute_or_everything() {
+        assert_eq!(perms_from_mode(0o644, 0o400), (false, true, false));
+        assert_eq!(perms_from_mode(0o755, 0o100), (true, true, false));
+        assert_eq!(perms_from_mode(0o755, 0o777), (false, false, false));
+    }
+
     /// 回归锁：这是**改动前**的行为——`0644` 被解成**只读**（最低 3 位当 r/w/x）。
     /// 它必须是**错**的，否则本次适配没有意义。
     #[test]
