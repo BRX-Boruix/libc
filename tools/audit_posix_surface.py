@@ -37,6 +37,11 @@ import re
 import subprocess
 import sys
 
+# 控制台可能是 GBK：无法编码的字符（如某些框线符号）会让脚本在**输出阶段**崩掉，
+# 从而把「检查逻辑失败」与「打印失败」混为一谈。这里显式降级，宁可打出 ?。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIBC = os.path.dirname(HERE)
 INC = os.path.join(LIBC, "include")

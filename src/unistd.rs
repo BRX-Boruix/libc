@@ -653,6 +653,63 @@ pub extern "C" fn ftruncate(fd: c_int, length: crate::ctypes::off_t) -> c_int {
     }
 }
 
+/// `flock` 的操作位（取值与 glibc/Linux 一致；声明见 `<sys/file.h>`）。
+pub const LOCK_SH: c_int = 1;
+pub const LOCK_EX: c_int = 2;
+pub const LOCK_NB: c_int = 4;
+pub const LOCK_UN: c_int = 8;
+
+/// `flock(fd, operation)`：BSD 风格 advisory 文件锁（声明见 `<sys/file.h>`）。
+/// 成功返回 0，失败 -1 置 errno。
+///
+/// **已实现**：`LOCK_SH`/`LOCK_EX`/`LOCK_UN` 三个操作位，映射到内核
+/// `SYS_STREAM_LOCK` 的共享/独占/释放。
+///
+/// **诚实边界（S09，逐条）**：
+/// - 内核锁表**不阻塞**（`vfs::flock::flock_lock` 冲突即返回 `Busy`）。故对
+///   **不带 `LOCK_NB`** 的加锁请求，本函数**如实返回 `ENOTSUP`**——
+///   "等到拿到锁"这一半本系统做不到；假装成功、或静默降级成非阻塞，都会让调用方
+///   基于错误前提继续跑。要非阻塞语义请显式带 `LOCK_NB`。
+/// - 带 `LOCK_NB` 且冲突 ⇒ `EWOULDBLOCK`（Linux 对 `flock` 的约定；
+///   内核给的是 `Busy`，此处按本 API 的约定换码）。
+/// - 锁按**调用者 uid** 登记（内核 `LockOwner { uid }`），不是按打开文件描述 ⇒
+///   **同一 uid 的多个进程共享同一把锁**（与 Linux 的 per-open-file-description 不同）。
+/// - 未定义的操作位如实 `EINVAL`。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn flock(fd: c_int, operation: c_int) -> c_int {
+    if operation & !(LOCK_SH | LOCK_EX | LOCK_UN | LOCK_NB) != 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let nb = operation & LOCK_NB != 0;
+    let op = operation & !LOCK_NB;
+    let cmd = match op {
+        LOCK_SH => libsys::nr::FLOCK_CMD_SHARED,
+        LOCK_EX => libsys::nr::FLOCK_CMD_EXCLUSIVE,
+        LOCK_UN => libsys::nr::FLOCK_CMD_UNLOCK,
+        // 操作位必须恰为三者之一（Linux 同样不允许 LOCK_SH|LOCK_EX 这类组合）。
+        _ => {
+            set_errno(EINVAL);
+            return -1;
+        }
+    };
+    if op != LOCK_UN && !nb {
+        set_errno(crate::errno::ENOTSUP);
+        return -1;
+    }
+    match libsys::flock(fd as u64, cmd) {
+        Ok(_) => 0,
+        Err(libsys::Error::Busy) => {
+            set_errno(crate::errno::EWOULDBLOCK);
+            -1
+        }
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
+        }
+    }
+}
+
 /// `link(target, link_path)`：创建**硬链接**（POSIX，声明见 `<unistd.h>`）。成功 0，失败 -1 置 errno。
 ///
 /// 与 `symlink` 本质不同：软链接造**新节点**（内容是目标路径串），硬链接让**同一个节点**

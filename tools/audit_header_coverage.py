@@ -30,10 +30,24 @@ import os
 import re
 import sys
 
+# 控制台可能是 GBK：无法编码的字符（如某些框线符号）会让脚本在**输出阶段**崩掉，
+# 从而把「检查逻辑失败」与「打印失败」混为一谈。这里显式降级，宁可打出 ?。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIBC = os.path.dirname(HERE)
 SRC = os.path.join(LIBC, "src")
 INC = os.path.join(LIBC, "include")
+
+# 已判定为**内部符号**（不进任何头文件）。每项都必须写明理由——本表是"显式判定一次"
+# 的落地处，而不是把缺口藏起来的地方。
+TRIAGED_INTERNAL = {
+    "__sigsetjmp_prepare": (
+        "setjmp 内部：sigsetjmp/setlongjmp 的寄存器保存辅助，由 libc 自己的 "
+        "setjmp.rs 调用，不是 C 可见 API。"
+    ),
+}
 
 NO_MANGLE = re.compile(r"^\s*#\[(unsafe\()?no_mangle\)?\]")
 FN = re.compile(r'^\s*pub\s+(unsafe\s+)?extern\s+"C"\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)')
@@ -111,12 +125,19 @@ def main():
         else:
             missing.append((sym, f, ln))
 
-    print("[audit] C 可见导出共 %d 个；**任何头文件都没提到**的 %d 个" % (len(exports), len(missing)))
+    untriaged = [m for m in missing if m[0] not in TRIAGED_INTERNAL]
+    print(
+        "[audit] C 可见导出共 %d 个；任何头文件都没提到的 %d 个（其中已判定为内部 %d 个）"
+        % (len(exports), len(missing), len(missing) - len(untriaged))
+    )
     for sym, f, ln in missing:
-        print("  MISS %-32s (%s:%d)" % (sym, f, ln))
-    if missing:
-        print("\n提示：这些不全是缺陷——有些是刻意内部（例如只在 libsys 侧使用的入口）。")
-        print("      但**每一个都该被显式判定一次**：要么补进头文件，要么在这里登记为内部符号。")
+        if sym in TRIAGED_INTERNAL:
+            print("  INTERNAL %-28s (%s:%d) —— %s" % (sym, f, ln, TRIAGED_INTERNAL[sym]))
+        else:
+            print("  MISS %-32s (%s:%d)" % (sym, f, ln))
+    if untriaged:
+        print("\n提示：每一个「没被任何头文件提到」的符号都该被**显式判定一次**：")
+        print("      要么补进头文件，要么登记进 TRIAGED_INTERNAL 并写明理由。")
         return 1
     return 0
 
