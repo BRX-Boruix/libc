@@ -1383,7 +1383,7 @@ fn render_spec(
             let mut d = crate::float::decompose(v);
             match s.conv {
                 Conv::Float => crate::float::emit_fixed(&s, &mut d, precision, sink),
-                Conv::Exp => crate::float::emit_exp(&s, &mut d, precision, sink),
+                Conv::Exp => crate::float::emit_exp(&s, &mut d, precision, false, sink),
                 _ => crate::float::emit_general(&s, &mut d, precision, sink),
             }
         }

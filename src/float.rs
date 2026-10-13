@@ -89,6 +89,13 @@ pub fn decompose_fast(value: f64) -> Option<Decomposed> {
         return Some(Decomposed { digits, digit_len: l, dec_exp: l as i32 - 1, negative: sign, special: 0 });
     }
     if e2 > 62 { return None; }
+    // **溢出检查必须在移位之前**：`m << e2` 会**静默丢弃**高位，事后再用
+    // `int_val > 2^63` 判是判不出来的——实测 1e20 的 `m << 14` 回绕成 7.766e18，
+    // 反而"合法"，于是 printf("%g", 1e20) 打印 7.76628e+18。判据：结果能放进 u64
+    // 当且仅当 `m <= u64::MAX >> e2`，即 `m >> (64-e2) == 0`。
+    if e2 > 0 && (m >> (64 - e2 as u32)) != 0 {
+        return None;
+    }
     let int_val: u64 = m << e2;
     if int_val > (1u64 << 63) { return None; }
     let mut digits = [0u8; 800];
@@ -214,10 +221,14 @@ fn sign_prefix(d: &Decomposed, spec: &Spec) -> &'static [u8] {
 }
 
 /// `%e/%E`：`d.ddde±XX`（precision 为小数位数）。
+///
+/// `strip`：`%g` 的指数分支要去掉小数部分的**尾随 0**（小数被清空时连小数点一起去掉），
+/// C11 7.21.6.1 对 `%g` 的规定；`%e` 本身不删。
 pub fn emit_exp(
     spec: &Spec,
     d: &mut Decomposed,
     precision: usize,
+    strip: bool,
     sink: &mut dyn FmtSink,
 ) -> Result<(), ()> {
     if d.special != 0 {
@@ -228,11 +239,20 @@ pub fn emit_exp(
     let mut body = StackBuf::<420>::new();
     body.extend(sign);
     body.push_byte(d.digits[0]);
+    let frac_start = body.len;
     if precision > 0 {
         body.push_byte(b'.');
         for i in 1..=precision {
             let c = if i < d.digit_len { d.digits[i] } else { b'0' };
             body.push_byte(c);
+        }
+    }
+    if strip {
+        while body.len > frac_start && body.buf[body.len - 1] == b'0' {
+            let _ = body.pop_byte();
+        }
+        if body.len > frac_start && body.buf[body.len - 1] == b'.' {
+            let _ = body.pop_byte();
         }
     }
     let marker = if spec.upper { b'E' } else { b'e' };
@@ -332,7 +352,7 @@ pub fn emit_general(
     round_to(d, precision);
     let x = d.dec_exp;
     if x < -4 || x >= precision as i32 {
-        emit_exp(spec, d, precision - 1, sink)
+        emit_exp(spec, d, precision - 1, true, sink)
     } else {
         emit_fixed_g(spec, d, precision, sink)
     }

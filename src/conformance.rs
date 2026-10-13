@@ -981,3 +981,160 @@ fn regex_bre_plus_is_literal() {
         crate::regex::regfree(&mut re2);
     }
 }
+
+
+// ===========================================================================
+// printf 格式引擎（C11 7.21.6.1）
+// ===========================================================================
+
+/// 经 snprintf 渲染（可变参数在宿主上走 GP 槽，整数/指针路径可用）。
+unsafe fn sn(fmt: &[u8], buf: &mut [u8]) -> alloc::vec::Vec<u8> {
+    let n = crate::stdio::snprintf(
+        buf.as_mut_ptr() as *mut c_char,
+        buf.len(),
+        cs(fmt),
+    );
+    if n < 0 {
+        return alloc::vec::Vec::new();
+    }
+    alloc::vec::Vec::from(&buf[..n as usize])
+}
+
+/// 整数/字符串/字符格式：直接喂给格式引擎（避开可变参数），逐条对照 C11。
+#[test]
+fn printf_integer_and_string_specifiers() {
+    let mut buf = [0u8; 64];
+    unsafe {
+        // %d / 宽度 / 精度 / flags
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%d\0"), 42), 2);
+        assert_eq!(&buf[..2], b"42");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%d\0"), -42), 3);
+        assert_eq!(&buf[..3], b"-42");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%5d\0"), 42), 5);
+        assert_eq!(&buf[..5], b"   42");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%-5d\0"), 42), 5);
+        assert_eq!(&buf[..5], b"42   ");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%05d\0"), 42), 5);
+        assert_eq!(&buf[..5], b"00042");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%+d\0"), 42), 3);
+        assert_eq!(&buf[..3], b"+42");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"% d\0"), 42), 3);
+        assert_eq!(&buf[..3], b" 42");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%.3d\0"), 7), 3);
+        assert_eq!(&buf[..3], b"007");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%5.3d\0"), 7), 5);
+        assert_eq!(&buf[..5], b"  007");
+
+        // 进制与 alt 形式
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%x\0"), 255), 2);
+        assert_eq!(&buf[..2], b"ff");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%X\0"), 255), 2);
+        assert_eq!(&buf[..2], b"FF");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%#x\0"), 255), 4);
+        assert_eq!(&buf[..4], b"0xff");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%o\0"), 8), 2);
+        assert_eq!(&buf[..2], b"10");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%#o\0"), 8), 3);
+        assert_eq!(&buf[..3], b"010");
+
+        // 长度修饰符
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%ld\0"), 1234567890123i64), 13);
+        assert_eq!(&buf[..13], b"1234567890123");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%lld\0"), -5i64), 2);
+        assert_eq!(&buf[..2], b"-5");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%zu\0"), 7usize), 1);
+        assert_eq!(&buf[..1], b"7");
+
+        // 星号宽度/精度
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%*d\0"), 5, 42), 5);
+        assert_eq!(&buf[..5], b"   42");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%.*d\0"), 3, 7), 3);
+        assert_eq!(&buf[..3], b"007");
+
+        // 字符与字符串
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%c\0"), 65), 1);
+        assert_eq!(&buf[..1], b"A");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%s\0"), cs(b"hi\0")), 2);
+        assert_eq!(&buf[..2], b"hi");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%5s\0"), cs(b"hi\0")), 5);
+        assert_eq!(&buf[..5], b"   hi");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%-5s\0"), cs(b"hi\0")), 5);
+        assert_eq!(&buf[..5], b"hi   ");
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%.1s\0"), cs(b"hi\0")), 1);
+        assert_eq!(&buf[..1], b"h");
+
+        // 百分号字面量
+        assert_eq!(crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"100%%\0")), 4);
+        assert_eq!(&buf[..4], b"100%");
+
+        // %p：格式**实现自定**（C11 7.21.6.1）。本实现：非空指针带 0x 前缀的十六进制；
+        // 空指针按 alt 规则不补前缀（打印 "0"）——与 glibc 的 "(nil)" 不同，两者都合规。
+        let v: usize = 0x1234;
+        let n = crate::stdio::snprintf(buf.as_mut_ptr() as *mut c_char, 64, cs(b"%p\0"), v);
+        assert!(n > 2 && &buf[..2] == b"0x", "non-null pointer must carry the 0x prefix");
+
+        // %n：写入**已输出**的字符数
+        let mut cnt: c_int = -1;
+        let n2 = crate::stdio::snprintf(
+            buf.as_mut_ptr() as *mut c_char, 64, cs(b"abc%n\0"), &mut cnt as *mut c_int,
+        );
+        assert_eq!(n2, 3);
+        assert_eq!(cnt, 3, "%n must store the number of chars written so far");
+    }
+}
+
+/// 浮点格式化：经 crate::float 的发射器直接测（可变参数在宿主上读不到 XMM 槽，
+/// 见 stdio.rs 的 next_float_arg —— 那条 GP 路径是给 os="none" 软浮点目标用的）。
+fn float_fmt(fmt: &[u8], v: f64) -> alloc::vec::Vec<u8> {
+    use crate::stdio_format::{parse_and_format, Conv, VecSink};
+    let mut discard = alloc::vec::Vec::new();
+    let mut found = None;
+    {
+        let mut sink = VecSink(&mut discard);
+        let _ = parse_and_format(fmt, &mut sink, |spec, _s| {
+            found = Some(*spec);
+            Ok(())
+        });
+    }
+    let s = found.expect("one conversion");
+    let prec = if s.prec >= 0 { s.prec as usize } else { 6 };
+    let mut d = crate::float::decompose(v);
+    let mut out = alloc::vec::Vec::new();
+    {
+        let mut sink = VecSink(&mut out);
+        let r = match s.conv {
+            Conv::Float => crate::float::emit_fixed(&s, &mut d, prec, &mut sink),
+            Conv::Exp => crate::float::emit_exp(&s, &mut d, prec, false, &mut sink),
+            _ => crate::float::emit_general(&s, &mut d, prec, &mut sink),
+        };
+        assert!(r.is_ok());
+    }
+    out
+}
+
+/// %f/%e/%g 的定点/指数/有效位规则（C11 7.21.6.1）。
+#[test]
+fn printf_float_specifiers() {
+    assert_eq!(float_fmt(b"%f", 1.5), b"1.500000");
+    assert_eq!(float_fmt(b"%.2f", 1.5), b"1.50");
+    assert_eq!(float_fmt(b"%8.2f", 1.5), b"    1.50");
+    assert_eq!(float_fmt(b"%-8.2f", 1.5), b"1.50    ");
+    assert_eq!(float_fmt(b"%08.2f", 1.5), b"00001.50");
+    assert_eq!(float_fmt(b"%.0f", 2.5), b"2", "round-half-even: 2.5 -> 2");
+    assert_eq!(float_fmt(b"%.0f", 3.5), b"4", "round-half-even: 3.5 -> 4");
+    assert_eq!(float_fmt(b"%f", 0.0), b"0.000000");
+    assert_eq!(float_fmt(b"%f", -0.0), b"-0.000000");
+    assert_eq!(float_fmt(b"%e", 1500.0), b"1.500000e+03");
+    assert_eq!(float_fmt(b"%E", 1500.0), b"1.500000E+03");
+    assert_eq!(float_fmt(b"%.2e", 0.0015), b"1.50e-03");
+    assert_eq!(float_fmt(b"%g", 1500.0), b"1500");
+    assert_eq!(float_fmt(b"%g", 0.00015), b"0.00015");
+    assert_eq!(float_fmt(b"%g", 1e20), b"1e+20");
+    // **大值**：这条钉住 decompose_fast 的溢出检查（移位前判，而不是事后判）。
+    assert_eq!(float_fmt(b"%g", 1e20), b"1e+20");
+    assert_eq!(float_fmt(b"%.1f", 1e20), b"100000000000000000000.0");
+    assert_eq!(float_fmt(b"%e", 1e20), b"1.000000e+20");
+    assert_eq!(float_fmt(b"%.0f", 1e18), b"1000000000000000000");
+    assert_eq!(float_fmt(b"%+f", 1.0), b"+1.000000");
+    assert_eq!(float_fmt(b"% f", 1.0), b" 1.000000");
+}
