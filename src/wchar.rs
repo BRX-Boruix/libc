@@ -147,12 +147,13 @@ pub unsafe extern "C" fn wcrtomb(
     _ps: *mut crate::ctypes::c_void,
 ) -> size_t {
     unsafe {
-        if s.is_null() {
-            return 0;
-        }
         if wc < 0 || wc > 0xFF {
             crate::errno::set_errno(crate::errno::EILSEQ);
             return usize::MAX;
+        }
+        if s.is_null() {
+            // POSIX：s == NULL 时只返回该宽字符所需的字节数（本编码恒为 1），不写。
+            return 1;
         }
         *s = wc as u8 as c_char;
         1
@@ -177,7 +178,8 @@ pub unsafe extern "C" fn mbsrtowcs(
         loop {
             let b = *p as u8 as wchar_t;
             if b == 0 {
-                if !dst.is_null() {
+                // len == 0 时**没有位置**可放结尾 NUL：写了就是越界（调用方只给了 0 个元素）。
+                if !dst.is_null() && i < len {
                     *dst.add(i) = 0;
                 }
                 *src = core::ptr::null();
@@ -213,15 +215,22 @@ pub unsafe extern "C" fn wcsrtombs(
         loop {
             let w = *p;
             if w == 0 {
-                if !dst.is_null() {
+                if !dst.is_null() && i < len {
                     *dst.add(i) = 0;
                 }
                 *src = core::ptr::null();
                 return i;
             }
-            if w < 0 || w > 0xFF || i >= len {
+            if w < 0 || w > 0xFF {
+                crate::errno::set_errno(crate::errno::EILSEQ);
                 *src = p;
-                return usize::MAX; // 不可转（含空间不足）。
+                return usize::MAX;
+            }
+            if i >= len {
+                // 空间不足：POSIX/glibc 返回 (size_t)-1 并置 E2BIG。
+                crate::errno::set_errno(crate::errno::E2BIG);
+                *src = p;
+                return usize::MAX;
             }
             if !dst.is_null() {
                 *dst.add(i) = w as u8 as c_char;

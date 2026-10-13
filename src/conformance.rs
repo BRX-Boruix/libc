@@ -666,3 +666,80 @@ fn snprintf_returns_would_be_length_and_terminates() {
         assert_eq!(untouched, [0x7Fu8; 4]);
     }
 }
+
+
+// ===========================================================================
+// wchar.h / locale.h
+// ===========================================================================
+
+use crate::ctypes::wchar_t;
+
+/// 本实现的编码是**逐字节**（无多字节编码，见 wchar.rs 文件头的诚实说明）；
+/// 下面钉住的是 POSIX 对**返回值与控制流**的规定，与编码选择无关。
+#[test]
+fn wchar_conversion_contract() {
+    unsafe {
+        let mut wc: wchar_t = 0;
+        let np: *mut crate::ctypes::c_void = core::ptr::null_mut();
+        assert_eq!(crate::wchar::mbrtowc(&mut wc, cs(b"A\0"), 1, np), 1);
+        assert_eq!(wc, 65);
+
+        // NUL 字节：写 L'\0' 并返回 0（POSIX）。
+        assert_eq!(crate::wchar::mbrtowc(&mut wc, cs(b"\0"), 1, np), 0);
+        assert_eq!(wc, 0);
+
+        // s == NULL ⇒ 等价于 mbrtowc(NULL, "", 1, ps)：复位状态，返回 0。
+        assert_eq!(crate::wchar::mbrtowc(&mut wc, core::ptr::null::<c_char>(), 1, np), 0);
+
+        // pwc == NULL ⇒ 只数长度，不写。
+        assert_eq!(crate::wchar::mbrtowc(core::ptr::null_mut(), cs(b"A\0"), 1, np), 1);
+
+        // wcrtomb：合法宽字符 1 字节；超出 [0,255] ⇒ (size_t)-1 + EILSEQ。
+        let mut buf = [0i8; 4];
+        assert_eq!(crate::wchar::wcrtomb(buf.as_mut_ptr(), 0x41, np), 1);
+        assert_eq!(buf[0] as u8, 0x41);
+        crate::errno::set_errno(0);
+        assert_eq!(crate::wchar::wcrtomb(buf.as_mut_ptr(), 0x4E2D, np), usize::MAX);
+        assert_eq!(crate::errno::errno(), crate::errno::EILSEQ);
+
+        // s == NULL ⇒ 只数所需字节数（合法宽字符 = 1），不写。
+        assert_eq!(crate::wchar::wcrtomb(core::ptr::null_mut(), 0x41, np), 1);
+    }
+}
+
+/// len == 0 时**不得写入任何元素**——连结尾 NUL 也不行（调用方只给了 0 个位置）。
+#[test]
+fn wchar_zero_length_writes_nothing() {
+    unsafe {
+        let np: *mut crate::ctypes::c_void = core::ptr::null_mut();
+        // 空源 + len==0：转换出 0 个宽字符，且**一个元素都不许写**（连结尾 NUL 也不行）。
+        let mut sentinel = [0x7FFF as wchar_t; 2];
+        assert_eq!(crate::wchar::mbstowcs(sentinel.as_mut_ptr(), cs(b"\0"), 0), 0);
+        assert_eq!(sentinel[0], 0x7FFF, "len==0 must not write the terminator");
+
+        let empty = [0 as wchar_t];
+        let mut bytes = [0x7Fi8; 2];
+        assert_eq!(crate::wchar::wcstombs(bytes.as_mut_ptr(), empty.as_ptr(), 0), 0);
+        assert_eq!(bytes[0], 0x7Fi8, "len==0 must not write the terminator");
+
+        // 源非空而 len==0（空间不足）⇒ (size_t)-1 + E2BIG（POSIX 与 glibc 同）。
+        let wide = [65 as wchar_t, 0 as wchar_t];
+        crate::errno::set_errno(0);
+        assert_eq!(crate::wchar::wcstombs(bytes.as_mut_ptr(), wide.as_ptr(), 0), usize::MAX);
+        assert_eq!(crate::errno::errno(), crate::errno::E2BIG);
+    }
+}
+
+/// C locale 下 strcoll 必须与 strcmp 同序；strxfrm 必须给出可比较的变换结果
+/// 且返回**未截断**的长度（C11 7.24.4.5）。
+#[test]
+fn strcoll_and_strxfrm_in_c_locale() {
+    unsafe {
+        assert!(crate::posix_batch6::strcoll(cs(b"abc\0"), cs(b"abd\0")) < 0);
+        assert_eq!(crate::posix_batch6::strcoll(cs(b"abc\0"), cs(b"abc\0")), 0);
+        let mut dst = [0i8; 8];
+        let n = crate::posix_batch6::strxfrm(dst.as_mut_ptr(), cs(b"abc\0"), dst.len());
+        assert_eq!(n, 3);
+        assert_eq!(dst[..4], [b'a' as i8, b'b' as i8, b'c' as i8, 0]);
+    }
+}
