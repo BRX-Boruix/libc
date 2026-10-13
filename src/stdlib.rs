@@ -2,7 +2,7 @@
 //!
 //! ## 字符串转数值
 //!
-//! \`strtol/strtoul/strtoll/strtoull\` 支持任意 base（0=自动前缀推断，
+//! `strtol/strtoul/strtoll/strtoull` 支持任意 base（0=自动前缀推断，
 //! 2..=36），处理前导空白、可选符号、前缀（0x/0b/0）。溢出时置 ERANGE 并返回
 //! LONG_MAX/LONG_MIN（POSIX 语义），endptr 指向停止位置。实现用 checked 运算
 //! 避免溢出（S19）。
@@ -156,19 +156,19 @@ pub unsafe extern "C" fn __assert_fail(expr: *const c_char, file: *const c_char,
     abort()
 }
 
-/// \`abs(n)\`：绝对值（i32::MIN 返回自身，未定义）。
+/// `abs(n)`：绝对值（i32::MIN 返回自身，未定义）。
 #[unsafe(no_mangle)]
 pub extern "C" fn abs(n: c_int) -> c_int {
     n.wrapping_abs()
 }
 
-/// \`labs(n)\`：long 绝对值。
+/// `labs(n)`：long 绝对值。
 #[unsafe(no_mangle)]
 pub extern "C" fn labs(n: c_long) -> c_long {
     n.wrapping_abs()
 }
 
-/// \`llabs(n)\`：long long 绝对值。
+/// `llabs(n)`：long long 绝对值。
 #[unsafe(no_mangle)]
 pub extern "C" fn llabs(n: c_longlong) -> c_longlong {
     n.wrapping_abs()
@@ -570,19 +570,19 @@ pub unsafe extern "C" fn getenv(name: *const crate::ctypes::c_char) -> *mut crat
     }
 }
 
-/// \`atoi(s)\`：字符串转 int（等价 strtol base=10）。
+/// `atoi(s)`：字符串转 int（等价 strtol base=10）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atoi(s: *const crate::ctypes::c_char) -> c_int {
     strtol(s, core::ptr::null_mut(), 10) as c_int
 }
 
-/// \`atol(s)\`：字符串转 long。
+/// `atol(s)`：字符串转 long。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atol(s: *const crate::ctypes::c_char) -> c_long {
     strtol(s, core::ptr::null_mut(), 10)
 }
 
-/// \`atoll(s)\`：字符串转 long long。
+/// `atoll(s)`：字符串转 long long。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atoll(s: *const crate::ctypes::c_char) -> c_longlong {
     strtoll(s, core::ptr::null_mut(), 10)
@@ -597,7 +597,7 @@ pub unsafe extern "C" fn atof(s: *const crate::ctypes::c_char) -> f64 {
     strtod(s, core::ptr::null_mut())
 }
 
-/// \`strtol(s, endptr, base)\`：字符串转 long。
+/// `strtol(s, endptr, base)`：字符串转 long。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtol(
     s: *const crate::ctypes::c_char,
@@ -607,7 +607,7 @@ pub unsafe extern "C" fn strtol(
     strtox::<i64>(s, endptr, base, i64::MAX, i64::MIN) as c_long
 }
 
-/// \`strtoul(s, endptr, base)\`：字符串转 unsigned long。
+/// `strtoul(s, endptr, base)`：字符串转 unsigned long。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtoul(
     s: *const crate::ctypes::c_char,
@@ -617,7 +617,7 @@ pub unsafe extern "C" fn strtoul(
     strtoux::<u64>(s, endptr, base, u64::MAX) as c_ulong
 }
 
-/// \`strtoll(s, endptr, base)\`：字符串转 long long。
+/// `strtoll(s, endptr, base)`：字符串转 long long。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtoll(
     s: *const crate::ctypes::c_char,
@@ -627,7 +627,7 @@ pub unsafe extern "C" fn strtoll(
     strtox::<i64>(s, endptr, base, i64::MAX, i64::MIN) as c_longlong
 }
 
-/// \`strtoull(s, endptr, base)\`：字符串转 unsigned long long。
+/// `strtoull(s, endptr, base)`：字符串转 unsigned long long。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtoull(
     s: *const crate::ctypes::c_char,
@@ -640,11 +640,11 @@ pub unsafe extern "C" fn strtoull(
 
 // ---------- strtod/strtof/strtold：十进制字符串→浮点 ----------
 
-/// \`strtod(s, endptr)\`：字符串转 double。
+/// `strtod(s, endptr)`：字符串转 double。
 ///
 /// 支持 [空白][sign]dig[.dig][e|E[sign]dig]，前导空白由 isspace 判定。
 /// **严格正确舍入（C 标准）**：全部有效数字收集为精确大整数（float_bigint），
-/// 经 \`strtod_exact\` 以 round-half-even 舍入到最近 f64（含次正规边界，如
+/// 经 `strtod_exact` 以 round-half-even 舍入到最近 f64（含次正规边界，如
 /// 2.2250738585072011e-308 正确舍入到最大次正规）。无 18 位截断。
 /// 溢出返回 ±HUGE_VAL 并置 ERANGE，无匹配返回 0。
 #[unsafe(no_mangle)]
@@ -668,7 +668,7 @@ pub unsafe extern "C" fn strtof(
     unsafe { strtof_impl::<f32>(s, endptr) }
 }
 
-/// \`strtold(s, endptr)\`：字符串转 long double（本目标 long double≈f64）。
+/// `strtold(s, endptr)`：字符串转 long double（本目标 long double≈f64）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtold(
     s: *const crate::ctypes::c_char,
@@ -1075,9 +1075,9 @@ unsafe fn strtoux<T>(
     }
 }
 
-/// \`rand()\`：伪随机数 [0, RAND_MAX]。线性同余。
+/// `rand()`：伪随机数 [0, RAND_MAX]。线性同余。
 ///
-/// 真实数据链路（S06）：种子经 \`srand\` 设定；未设定时用当前单调时钟
+/// 真实数据链路（S06）：种子经 `srand` 设定；未设定时用当前单调时钟
 /// 纳秒播种（首次调用）。这是确定性 PRNG，**不是密码学随机**（文档明示）。
 #[unsafe(no_mangle)]
 pub extern "C" fn rand() -> c_int {
@@ -1085,13 +1085,13 @@ pub extern "C" fn rand() -> c_int {
     (seed & 0x7FFFFFFF) as c_int
 }
 
-/// \`srand(seed)\`：设定 PRNG 种子。
+/// `srand(seed)`：设定 PRNG 种子。
 #[unsafe(no_mangle)]
 pub extern "C" fn srand(seed: c_uint) {
     crate::random::seed(seed as u64);
 }
 
-/// \`div(numer, denom)\`：整数除法，返回商与余数。
+/// `div(numer, denom)`：整数除法，返回商与余数。
 #[unsafe(no_mangle)]
 pub extern "C" fn div(numer: c_int, denom: c_int) -> DivT {
     DivT {
@@ -1100,7 +1100,7 @@ pub extern "C" fn div(numer: c_int, denom: c_int) -> DivT {
     }
 }
 
-/// \`div_t\`。
+/// `div_t`。
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DivT {
@@ -1108,7 +1108,7 @@ pub struct DivT {
     pub rem: c_int,
 }
 
-/// \`ldiv(numer, denom)\`：long 除法。
+/// `ldiv(numer, denom)`：long 除法。
 #[unsafe(no_mangle)]
 pub extern "C" fn ldiv(numer: c_long, denom: c_long) -> LDivT {
     LDivT {
@@ -1155,7 +1155,7 @@ pub unsafe extern "C" fn qsort(base: *mut c_void, nmemb: size_t, size: size_t, c
     unsafe { crate::qsort_core::core_qsort(base as *mut u8, nmemb, size, cmp) }
 }
 
-/// \`bsearch(key, base, nmemb, size, cmp)\`：在已排序数组中二分查找。
+/// `bsearch(key, base, nmemb, size, cmp)`：在已排序数组中二分查找。
 /// 命中返回元素指针，未命中返回 NULL。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bsearch(

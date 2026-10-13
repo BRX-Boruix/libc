@@ -1,3 +1,5 @@
 /target
 Cargo.lock
 test_harness/target/
+__pycache__/
+*.pyc

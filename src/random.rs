@@ -1,8 +1,8 @@
 //! 伪随机数生成器（供 rand/srand 使用）。
 //!
-//! 确定性 xorshift64* 型 PRNG，经全局原子种子状态。\`rand\` 未调用 \`srand\`
+//! 确定性 xorshift64* 型 PRNG，经全局原子种子状态。`rand` 未调用 `srand`
 //! 时，首次调用用单调时钟纳秒播种——这是**确定性 PRNG**，非密码学安全
-//! （文档明示；若要密码学熵，应接内核 \`/devices/random\` 或 RDRAND）。
+//! （文档明示；若要密码学熵，应接内核 `/devices/random` 或 RDRAND）。
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

@@ -1,16 +1,16 @@
 //! f64 十进制格式化（`%f/%e/%g` 的 dtoa 核心）与 `%a` 十六进制浮点。
 //!
-//! 纯逻辑、可移植、可 host 单测。把 f64 分解为 \`0.digits × 10^dec_exp\` 形式，
-//! \`%f/%e/%g\` 据此重排与舍入。
+//! 纯逻辑、可移植、可 host 单测。把 f64 分解为 `0.digits × 10^dec_exp` 形式，
+//! `%f/%e/%g` 据此重排与舍入。
 //!
 //! ## 精度 / 范围保证（S33/S29 如实声明）
 //!
-//! - \`precision <= 17\`（默认 6）时，对常规 f64 输入给出与 C 库一致或仅末位
+//! - `precision <= 17`（默认 6）时，对常规 f64 输入给出与 C 库一致或仅末位
 //!   相差 1 ulp 的十进制串；这是 f64 十进制 round-trip 的有效位上限。
 //! - 采用 round-half-even 舍入（C 默认方向）。
 //! - **全范围精确**：本实现用**大整数精确法**（float_bigint.rs）把 f64 视为
-//!   \`m × 2^e2\` 并精确展开为十进制，覆盖全部值域（含最大/最小次正规数
-//!   如 \`1e300\` 与 \`5e-324\`），逐位精确，无窗口限制。
+//!   `m × 2^e2` 并精确展开为十进制，覆盖全部值域（含最大/最小次正规数
+//!   如 `1e300` 与 `5e-324`），逐位精确，无窗口限制。
 //! - 性能为朴素大数除法（每位一次全量除法），printf 默认精度足够；吞吐优化
 //!   （S32 无优化无数据）留待需要时量测。
 //! - 特殊值 inf/-inf/nan 显式输出（S09，绝不伪造数值）。
@@ -20,7 +20,7 @@ use crate::stdio_format::{Spec, FmtSink};
 /// 浮点值的分解结果（未舍入的原始数字序列，最多 800 位）。
 #[derive(Clone)]
 pub struct Decomposed {
-    /// 数字位（\`0..=9\` 的 ASCII），不含小数点。
+    /// 数字位（`0..=9` 的 ASCII），不含小数点。
     pub digits: [u8; 800],
     pub digit_len: usize,
     /// 十进制指数：数值 = 0.digits × 10^dec_exp。
@@ -32,8 +32,8 @@ pub struct Decomposed {
 
 /// 分解 f64，不做舍入（输出可精确生成的十进制数字，**全值域精确**）。
 ///
-/// 经大整数精确法（\`decompose_exact\`，float_bigint.rs）把 value 写成
-/// \`N × 10^-k\` 并展开 N 的十进制数字，覆盖最大/最小次正规数（S33 如实）。
+/// 经大整数精确法（`decompose_exact`，float_bigint.rs）把 value 写成
+/// `N × 10^-k` 并展开 N 的十进制数字，覆盖最大/最小次正规数（S33 如实）。
 pub fn decompose(value: f64) -> Decomposed {
     // 快速路径：小整数直接展开（避免大整数除法）；否则回退精确路径。
     if let Some(d) = decompose_fast(value) {
@@ -116,7 +116,7 @@ pub fn decompose_fast(value: f64) -> Option<Decomposed> {
     })
 }
 
-/// 舍入到 \`n\` 个有效数字（round-half-even），就地更新 digit_len。
+/// 舍入到 `n` 个有效数字（round-half-even），就地更新 digit_len。
 /// 若进位溢出最高位，dec_exp +1 且 digit_len=1（"1"）。
 pub fn round_to(d: &mut Decomposed, n: usize) {
     if n >= d.digit_len {
@@ -213,7 +213,7 @@ fn sign_prefix(d: &Decomposed, spec: &Spec) -> &'static [u8] {
     if d.negative { b"-" } else if spec.plus { b"+" } else if spec.space { b" " } else { b"" }
 }
 
-/// \`%e/%E\`：\`d.ddde±XX\`（precision 为小数位数）。
+/// `%e/%E`：`d.ddde±XX`（precision 为小数位数）。
 pub fn emit_exp(
     spec: &Spec,
     d: &mut Decomposed,
@@ -256,7 +256,7 @@ pub fn emit_exp(
     emit_aligned(spec, body.as_slice(), sign.len(), sink)
 }
 
-/// \`%f/%F\`：定点小数（precision 为小数位数）。
+/// `%f/%F`：定点小数（precision 为小数位数）。
 pub fn emit_fixed(
     spec: &Spec,
     d: &mut Decomposed,
@@ -316,7 +316,7 @@ pub fn emit_fixed(
     emit_aligned(spec, body.as_slice(), sign.len(), sink)
 }
 
-/// \`%g/%G\`：自动选择 %e 或 %f。
+/// `%g/%G`：自动选择 %e 或 %f。
 pub fn emit_general(
     spec: &Spec,
     d: &mut Decomposed,

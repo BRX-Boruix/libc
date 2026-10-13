@@ -253,7 +253,7 @@ fn match_bracket(p: &[u8], c: u8, noescape: bool, casefold: bool) -> Option<(usi
 
 /// `fnmatch(pattern, string, flags)`：shell 风格通配匹配。匹配返回 0，不匹配返回 `FNM_NOMATCH`。
 ///
-/// 支持：`*`、`?`、`[...]`（含 `!`/`^` 取反与 `a-z` 范围）、`\\` 转义；
+/// 支持：`*`、`?`、`[...]`（含 `!`/`^` 取反与 `a-z` 范围）、`\` 转义；
 /// 标志：`FNM_PATHNAME`（`*`/`?`/`[]` 不跨 `/`）、`FNM_NOESCAPE`、`FNM_PERIOD`、
 /// `FNM_LEADING_DIR`、`FNM_CASEFOLD`（GNU 扩展，**已支持**：ASCII 折叠——本系统无 locale 数据，非 ASCII 不折）。
 ///

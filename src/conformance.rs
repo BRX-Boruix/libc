@@ -2,7 +2,7 @@
 //!
 //! 目的：把 libc 里那些"看起来简单、所以从没核对过"的纯逻辑函数，按各自标准
 //! （C11 / POSIX.1-2008）**明文规定的行为**逐条钉住。这些函数不碰内核，故宿主
-//! （\`cargo test --lib\`）就能跑——真机侧另有 \`shell/src/libc_check.rs\` 的 libccheck。
+//! （`cargo test --lib`）就能跑——真机侧另有 `shell/src/libc_check.rs` 的 libccheck。
 //!
 //! 为什么单独放一个文件：本组是按**标准条款**组织的（而不是按源文件），一处集中
 //! 便于对照标准逐条核对；生产文件里只留各模块自己的局部不变量测试。
@@ -23,7 +23,7 @@ fn csm(s: &[u8]) -> *mut c_char {
 // string.h
 // ===========================================================================
 
-/// \`strchr(s, 0)\` 返回**终止符的地址**（C11 7.24.5.2：搜索包含结尾的空字符）。
+/// `strchr(s, 0)` 返回**终止符的地址**（C11 7.24.5.2：搜索包含结尾的空字符）。
 #[test]
 fn strchr_finds_terminator() {
     let s = b"abc\0";
@@ -34,7 +34,7 @@ fn strchr_finds_terminator() {
     }
 }
 
-/// \`strrchr\` 找**最后**一次出现；未找到返回 NULL。
+/// `strrchr` 找**最后**一次出现；未找到返回 NULL。
 #[test]
 fn strrchr_finds_last() {
     let s = b"abca\0";
@@ -44,8 +44,8 @@ fn strrchr_finds_last() {
     }
 }
 
-/// \`strncpy\`：src 短于 n 时**用 NUL 补齐到 n 个字节**；src 不短于 n 时
-/// **不写终止符**（C11 7.24.2.4——这正是它与 \`strlcpy\` 的区别）。
+/// `strncpy`：src 短于 n 时**用 NUL 补齐到 n 个字节**；src 不短于 n 时
+/// **不写终止符**（C11 7.24.2.4——这正是它与 `strlcpy` 的区别）。
 #[test]
 fn strncpy_pads_and_does_not_terminate() {
     unsafe {
@@ -60,7 +60,7 @@ fn strncpy_pads_and_does_not_terminate() {
     }
 }
 
-/// \`strncat\`：至多追加 n 个字符，且**总是** NUL 终止（C11 7.24.3.2）。
+/// `strncat`：至多追加 n 个字符，且**总是** NUL 终止（C11 7.24.3.2）。
 #[test]
 fn strncat_appends_at_most_n_and_terminates() {
     unsafe {
@@ -76,7 +76,7 @@ fn strncat_appends_at_most_n_and_terminates() {
     }
 }
 
-/// \`strtok_r\`：跳过**前导**分隔符；连续分隔符之间不产生空 token；末尾不产生空 token；
+/// `strtok_r`：跳过**前导**分隔符；连续分隔符之间不产生空 token；末尾不产生空 token；
 /// 找不到 token 返回 NULL（POSIX strtok_r）。
 #[test]
 fn strtok_r_skips_empty_fields() {
@@ -97,7 +97,7 @@ fn strtok_r_skips_empty_fields() {
     }
 }
 
-/// \`strsep\`：连续分隔符产生**空**字段（与 strtok 相反），末尾字段照常返回。
+/// `strsep`：连续分隔符产生**空**字段（与 strtok 相反），末尾字段照常返回。
 #[test]
 fn strsep_yields_empty_fields() {
     unsafe {
@@ -119,7 +119,7 @@ fn strsep_yields_empty_fields() {
     }
 }
 
-/// \`strstr\`/\`memmem\`：**空 needle 返回 haystack 本身**（C11 7.24.5.7 的约定）。
+/// `strstr`/`memmem`：**空 needle 返回 haystack 本身**（C11 7.24.5.7 的约定）。
 #[test]
 fn empty_needle_matches_at_start() {
     unsafe {
@@ -133,7 +133,7 @@ fn empty_needle_matches_at_start() {
     }
 }
 
-/// \`strcspn\`/\`strspn\`/\`strpbrk\`：补集/交集语义（C11 7.24.5.3/7.24.5.6/7.24.5.4）。
+/// `strcspn`/`strspn`/`strpbrk`：补集/交集语义（C11 7.24.5.3/7.24.5.6/7.24.5.4）。
 #[test]
 fn span_functions() {
     unsafe {
@@ -146,7 +146,7 @@ fn span_functions() {
     }
 }
 
-/// \`strcmp\`/\`strncmp\`/\`strcasecmp\`：返回值**符号**有意义，绝对值无意义。
+/// `strcmp`/`strncmp`/`strcasecmp`：返回值**符号**有意义，绝对值无意义。
 #[test]
 fn compare_functions_sign() {
     unsafe {
@@ -159,7 +159,7 @@ fn compare_functions_sign() {
     }
 }
 
-/// \`memchr\` 的 n==0 不得读取任何字节（返回 NULL）。
+/// `memchr` 的 n==0 不得读取任何字节（返回 NULL）。
 #[test]
 fn memchr_zero_length() {
     unsafe {
@@ -172,7 +172,7 @@ fn memchr_zero_length() {
     }
 }
 
-/// \`memmove\` 必须支持重叠区域（C11 7.24.2.2）。
+/// `memmove` 必须支持重叠区域（C11 7.24.2.2）。
 #[test]
 fn memmove_handles_overlap() {
     unsafe {

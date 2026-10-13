@@ -1,17 +1,17 @@
-//! malloc/free/realloc/calloc —— 基于 \`brk\` 的用户态堆分配器（C ABI）。
+//! malloc/free/realloc/calloc —— 基于 `brk` 的用户态堆分配器（C ABI）。
 //!
-//! 真实数据链路（S06）：堆空间直接来自 \`libsys::mem::brk\` 系统调用（内核
+//! 真实数据链路（S06）：堆空间直接来自 `libsys::mem::brk` 系统调用（内核
 //! MEMORY 域 memory_grow）。分配器自身管理这些内存，不依赖 Rust 全局分配器，
 //! 因此 malloc 是独立、确定性的 C 风格分配器。
 //!
 //! ## 块布局（16 字节头，payload 16 字节对齐）
 //!
 //! 每个块（无论分配/空闲）头 16 字节：
-//! \`\`\`text
+//! ```text
 //! +0  usize  block_size（含 16 字节头，块总大小，16 的倍数）
 //! +8  usize  分配块：保留（恒 0）；空闲块：下一空闲块指针（0 = 表尾）
 //! +16        payload（通常 起始+16；对齐分配时为对齐后的地址）
-//! \`\`\`
+//! ```
 //! 块起始地址恒 16 字节对齐（brk 页对齐 → 0 mod 16）。
 //! 分配时把 payload 相对块起始的偏移写在 payload-8，free/realloc 据此反推块起始。
 //!
@@ -568,7 +568,7 @@ unsafe fn heap_alloc_block(need_total: usize) -> *mut u8 {
     bin_take(need_total)
 }
 
-/// \`malloc(size)\`：分配 \`size\` 字节，返回 16 字节对齐指针；失败返回 NULL 置 ENOMEM。
+/// `malloc(size)`：分配 `size` 字节，返回 16 字节对齐指针；失败返回 NULL 置 ENOMEM。
 #[unsafe(no_mangle)]
 pub extern "C" fn malloc(size: size_t) -> *mut u8 {
     // `malloc(0)`：C 标准允许返回 NULL，但**主流实现（glibc）返回可用的非空指针**，
@@ -606,7 +606,7 @@ pub extern "C" fn malloc(size: size_t) -> *mut u8 {
     payload
 }
 
-/// \`free(ptr)\`：释放 \`malloc\` 分配的内存。ptr=NULL 为合法空操作。
+/// `free(ptr)`：释放 `malloc` 分配的内存。ptr=NULL 为合法空操作。
 #[unsafe(no_mangle)]
 pub extern "C" fn free(ptr: *mut u8) {
     if ptr.is_null() {
@@ -632,10 +632,10 @@ pub extern "C" fn free(ptr: *mut u8) {
     ALLOC_LOCK.unlock();
 }
 
-/// \`realloc(ptr, new_size)\`：调整已分配块大小。
+/// `realloc(ptr, new_size)`：调整已分配块大小。
 ///
-/// **说明**：经 payload 偏移方案（offset 存于 payload-8），\`realloc\` 能正确
-/// 处理 \`malloc/calloc\` 与 \`posix_memalign/aligned_alloc\` 分配的指针——
+/// **说明**：经 payload 偏移方案（offset 存于 payload-8），`realloc` 能正确
+/// 处理 `malloc/calloc` 与 `posix_memalign/aligned_alloc` 分配的指针——
 /// 均以 payload-8 的偏移反推块起始，并从原 payload 复制数据。
 #[unsafe(no_mangle)]
 pub extern "C" fn realloc(ptr: *mut u8, new_size: size_t) -> *mut u8 {
@@ -705,7 +705,7 @@ pub extern "C" fn realloc(ptr: *mut u8, new_size: size_t) -> *mut u8 {
     }
 }
 
-/// \`calloc(nmemb, size)\`：分配并清零 nmemb*size 字节。
+/// `calloc(nmemb, size)`：分配并清零 nmemb*size 字节。
 #[unsafe(no_mangle)]
 pub extern "C" fn calloc(nmemb: size_t, size: size_t) -> *mut u8 {
     // 与 malloc(0) 同一口径：零大小也返回可用的非空指针（glibc 行为）。
@@ -720,7 +720,7 @@ pub extern "C" fn calloc(nmemb: size_t, size: size_t) -> *mut u8 {
     p
 }
 
-/// \`malloc_usable_size(ptr)\`：返回 ptr 指向块的实际可用字节数。
+/// `malloc_usable_size(ptr)`：返回 ptr 指向块的实际可用字节数。
 #[unsafe(no_mangle)]
 pub extern "C" fn malloc_usable_size(ptr: *mut u8) -> size_t {
     if ptr.is_null() {
@@ -732,7 +732,7 @@ pub extern "C" fn malloc_usable_size(ptr: *mut u8) -> size_t {
     sz
 }
 
-/// \`posix_memalign(&memptr, alignment, size)\`：对齐分配。
+/// `posix_memalign(&memptr, alignment, size)`：对齐分配。
 ///
 /// 支持任意 2 的幂对齐（`>= sizeof(void*)`，含 SSE/AVX 的 64/256 等）。分配时
 /// 整体多分配 `alignment` 字节，把 payload 对齐到 `alignment`，并把块起始
@@ -756,7 +756,7 @@ pub extern "C" fn posix_memalign(memptr: *mut *mut u8, alignment: size_t, size: 
     }
 }
 
-/// \`aligned_alloc(alignment, size)\`：C11 对齐分配（size 应为 alignment 的倍数）。
+/// `aligned_alloc(alignment, size)`：C11 对齐分配（size 应为 alignment 的倍数）。
 #[unsafe(no_mangle)]
 pub extern "C" fn aligned_alloc(alignment: size_t, size: size_t) -> *mut u8 {
     if !alignment.is_power_of_two() || alignment == 0 {

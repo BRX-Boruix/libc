@@ -5,31 +5,31 @@
 //! kernel(sycall) ← libsys(薄封装) ← libc(本 crate, C ABI) ← 用户程序
 //! ```
 //!
-//! 本 crate 提供 C ABI（\`extern "C"\`）函数，供 no_std Rust bin crate 经
-//! \`unsafe extern "C"\` 声明调用，也可产出 staticlib 供未来原生 C 工具链链接。
-//! 用户程序入口（\`_start\` → \`user_main\`）仍由 libsys 提供，libc 不接管入口。
+//! 本 crate 提供 C ABI（`extern "C"`）函数，供 no_std Rust bin crate 经
+//! `unsafe extern "C"` 声明调用，也可产出 staticlib 供未来原生 C 工具链链接。
+//! 用户程序入口（`_start` → `user_main`）仍由 libsys 提供，libc 不接管入口。
 //!
 //! ## 模块
-//! - \`malloc\`：malloc/free/realloc/calloc（brk 堆分配器）
-//! - \`string\`：mem/str 函数
-//! - \`ctype\`：字符分类/转换
-//! - \`stdio\`：printf 家族 + FILE* 流
-//! - \`stdio_format\`：printf 格式引擎（纯逻辑）
-//! - \`float\`：f64 十进制格式化（%f/%e/%g）
-//! - \`stdlib\`：strtol/atoi/abs/rand/div
-//! - \`unistd\`：open/close/read/write/lseek/mkdir/remove/fcntl
-//! - \`dirent\`：opendir/readdir/closedir
-//! - \`signal\`：signal/sigaction/sigprocmask/raise
-//! - \`process\`：exit/getpid/kill/waitpid
-//! - \`time\`：time/clock/sleep
-//! - \`errno\`：errno 机制与错误码
-//! - \`ctypes\`：C 基础类型
-//! - \`random\`：PRNG（rand 用）
+//! - `malloc`：malloc/free/realloc/calloc（brk 堆分配器）
+//! - `string`：mem/str 函数
+//! - `ctype`：字符分类/转换
+//! - `stdio`：printf 家族 + FILE* 流
+//! - `stdio_format`：printf 格式引擎（纯逻辑）
+//! - `float`：f64 十进制格式化（%f/%e/%g）
+//! - `stdlib`：strtol/atoi/abs/rand/div
+//! - `unistd`：open/close/read/write/lseek/mkdir/remove/fcntl
+//! - `dirent`：opendir/readdir/closedir
+//! - `signal`：signal/sigaction/sigprocmask/raise
+//! - `process`：exit/getpid/kill/waitpid
+//! - `time`：time/clock/sleep
+//! - `errno`：errno 机制与错误码
+//! - `ctypes`：C 基础类型
+//! - `random`：PRNG（rand 用）
 //!
 //! ## 入口初始化
 //!
-//! 用户程序在 \`user_main\` 中调用任何 stdio/printf 函数前，可调用
-//! \`libc_initialize()\` 初始化标准流；printf/puts 等会惰性自初始化，故显式
+//! 用户程序在 `user_main` 中调用任何 stdio/printf 函数前，可调用
+//! `libc_initialize()` 初始化标准流；printf/puts 等会惰性自初始化，故显式
 //! 调用可选。malloc/string 等纯内存函数无需初始化。
 
 // 目标裸机恒 no_std；host 单测（cargo test）时用 std 提供 allocator/panic。

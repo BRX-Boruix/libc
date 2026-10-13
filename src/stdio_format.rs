@@ -1,14 +1,14 @@
 //! printf 格式引擎（纯逻辑，可移植，可在 host 上单测）。
 //!
 //! 本模块实现 C printf 格式串的解析与渲染核心，不依赖任何系统调用，输出到
-//! 一个可注入的字节 sink（\`FmtSink\`）。真正的 \`printf\`/\`sprintf\`/\`fprintf\`
-//! 入口在 \`stdio.rs\`，它们经 \`c_variadic\` 读取可变参数后调用本引擎。
+//! 一个可注入的字节 sink（`FmtSink`）。真正的 `printf`/`sprintf`/`fprintf`
+//! 入口在 `stdio.rs`，它们经 `c_variadic` 读取可变参数后调用本引擎。
 //!
 //! 支持的转换：
-//! - 整数：\`%d %i %u %x %X %o %b\`（含长度修饰 hh/h/l/ll/z，flags \`-+ 0#\`）
-//! - 字符/字符串/指针：\`%c %s %p\`
-//! - 浮点：\`%f %F %e %E %g %G\`（f64，经 c_variadic 读入）
-//! - 其他：\`%%\`、\`%n\`（写已输出字符数）
+//! - 整数：`%d %i %u %x %X %o %b`（含长度修饰 hh/h/l/ll/z，flags `-+ 0#`）
+//! - 字符/字符串/指针：`%c %s %p`
+//! - 浮点：`%f %F %e %E %g %G`（f64，经 c_variadic 读入）
+//! - 其他：`%%`、`%n`（写已输出字符数）
 
 /// 输出 sink 抽象（写字节；失败返回 Err 以中止格式化）。
 use alloc::vec::Vec;
@@ -24,7 +24,7 @@ pub trait FmtSink {
     }
 }
 
-/// 把输出写到一个 \`&mut Vec<u8>\` 的适配（sprintf/snprintf 用，可单测）。
+/// 把输出写到一个 `&mut Vec<u8>` 的适配（sprintf/snprintf 用，可单测）。
 pub struct VecSink<'a>(pub &'a mut Vec<u8>);
 impl FmtSink for VecSink<'_> {
     fn write(&mut self, bytes: &[u8]) -> Result<(), ()> {
@@ -82,7 +82,7 @@ pub struct Spec {
     pub upper: bool,
 }
 
-/// 解析一段格式串，对每条说明调用 \`f\`。遇到 \`%%\` 作为字面量输出。
+/// 解析一段格式串，对每条说明调用 `f`。遇到 `%%` 作为字面量输出。
 pub fn parse_and_format<F: FnMut(&Spec, &mut dyn FmtSink) -> Result<(), ()>>(
     fmt: &[u8],
     sink: &mut dyn FmtSink,
@@ -120,7 +120,7 @@ pub fn parse_and_format<F: FnMut(&Spec, &mut dyn FmtSink) -> Result<(), ()>>(
     Ok(emitted)
 }
 
-/// 尝试从 \`fmt[pos..]\` 解析一个格式说明符。
+/// 尝试从 `fmt[pos..]` 解析一个格式说明符。
 fn parse_spec(fmt: &[u8], mut pos: usize) -> Option<(Spec, usize)> {
     let mut spec = Spec {
         left: false, plus: false, space: false, zero: false, alt: false,

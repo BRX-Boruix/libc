@@ -22,7 +22,7 @@ pub const O_CLOEXEC: c_int = 0x80000;
 pub const O_TRUNC: c_int = 0x200;
 pub const O_APPEND: c_int = 0x400;
 
-/// \`open(path, flags, mode)\`：打开文件，返回 fd 或 -1。
+/// `open(path, flags, mode)`：打开文件，返回 fd 或 -1。
 /// 进程级 umask（POSIX）。**默认 0**：本实现此前根本不看 mode，默认 0 可避免静默改变
 /// 现有程序的权限；只有显式调用 `umask()` 之后才生效。
 static UMASK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -87,7 +87,7 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_uint) -
     }
 }
 
-/// \`close(fd)\`：关闭 fd。
+/// `close(fd)`：关闭 fd。
 #[unsafe(no_mangle)]
 pub extern "C" fn close(fd: c_int) -> c_int {
     // 位置表也要清：否则 fd 号被复用时会带着上一个文件的位置。
@@ -137,7 +137,7 @@ pub extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
     }
 }
 
-/// \`read(fd, buf, count)\`：读取字节。
+/// `read(fd, buf, count)`：读取字节。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
     if buf.is_null() {
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssi
     }
 }
 
-/// \`write(fd, buf, count)\`：写入字节。
+/// `write(fd, buf, count)`：写入字节。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
     if buf.is_null() {
@@ -347,7 +347,7 @@ pub extern "C" fn lseek(
     newpos
 }
 
-/// \`unlink(path)\`：删除文件。
+/// `unlink(path)`：删除文件。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     if path.is_null() {
@@ -857,7 +857,7 @@ pub extern "C" fn fchown(
     }
 }
 
-/// \`chdir(path)\`：切换工作目录。
+/// `chdir(path)`：切换工作目录。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chdir(path: *const c_char) -> c_int {
     if path.is_null() {
@@ -877,7 +877,7 @@ pub unsafe extern "C" fn chdir(path: *const c_char) -> c_int {
     }
 }
 
-/// \`getcwd(buf, size)\`：读当前工作目录。
+/// `getcwd(buf, size)`：读当前工作目录。
 #[unsafe(no_mangle)]
 pub extern "C" fn getcwd(buf: *mut c_char, size: size_t) -> *mut c_char {
     if buf.is_null() || size == 0 {

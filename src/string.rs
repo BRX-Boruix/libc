@@ -2,15 +2,15 @@
 //!
 //! 全部为纯逻辑、可移植（S01/S04），不依赖任何系统调用。这些函数在 host
 //! 上亦可编译运行（用于 unit test，S23）。边界语义（S19）：
-//! - \`memcpy\`/\`memset\` 以字节处理，长度 size_t 无符号，无溢出路径；
-//! - \`strlen\` 依赖 NUL 终止，调用方须保证终止符存在（C 契约）；
+//! - `memcpy`/`memset` 以字节处理，长度 size_t 无符号，无溢出路径；
+//! - `strlen` 依赖 NUL 终止，调用方须保证终止符存在（C 契约）；
 //! - 所有指针必须有效，本层不校验（C 契约，与 libc 一致）。
 
 use crate::ctypes::{size_t, c_char, c_int};
 
-/// \`memcpy(dst, src, n)\`：复制 n 字节。src/dst 不得重叠（重叠用 memmove）。
+/// `memcpy(dst, src, n)`：复制 n 字节。src/dst 不得重叠（重叠用 memmove）。
 ///
-/// 注意：\`memcpy\`/\`memmove\`/\`memset\`/\`memcmp\` 的 C ABI 符号由 libsys（builtins）
+/// 注意：`memcpy`/`memmove`/`memset`/`memcmp` 的 C ABI 符号由 libsys（builtins）
 /// 提供，本 libc 不重复导出（S09，避免与编译内建符号冲突）。此处为纯 Rust 别名
 /// 供 Rust 侧调用。
 pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: size_t) -> *mut u8 {
@@ -20,7 +20,7 @@ pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: size_t) -> *mut
     dst
 }
 
-/// \`memmove(dst, src, n)\`：复制 n 字节，允许 src/dst 重叠。
+/// `memmove(dst, src, n)`：复制 n 字节，允许 src/dst 重叠。
 pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: size_t) -> *mut u8 {
     unsafe {
         core::ptr::copy(src, dst, n);
@@ -28,7 +28,7 @@ pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: size_t) -> *mu
     dst
 }
 
-/// \`memset(s, c, n)\`：把 s 前 n 字节设为 c（低 8 位）。
+/// `memset(s, c, n)`：把 s 前 n 字节设为 c（低 8 位）。
 pub unsafe extern "C" fn memset(s: *mut u8, c: c_int, n: size_t) -> *mut u8 {
     unsafe {
         core::ptr::write_bytes(s, c as u8, n);
@@ -36,7 +36,7 @@ pub unsafe extern "C" fn memset(s: *mut u8, c: c_int, n: size_t) -> *mut u8 {
     s
 }
 
-/// \`memcmp(a, b, n)\`：比较前 n 字节。返回 <0/0/>0（按无符号字节序）。
+/// `memcmp(a, b, n)`：比较前 n 字节。返回 <0/0/>0（按无符号字节序）。
 pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: size_t) -> c_int {
     unsafe {
         for i in 0..n {
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: size_t) -> c_int 
     0
 }
 
-/// \`memchr(s, c, n)\`：在前 n 字节中查找 c，返回首次出现位置或 NULL。
+/// `memchr(s, c, n)`：在前 n 字节中查找 c，返回首次出现位置或 NULL。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memchr(s: *const u8, c: c_int, n: size_t) -> *mut u8 {
     let target = c as u8;
@@ -64,7 +64,7 @@ pub unsafe extern "C" fn memchr(s: *const u8, c: c_int, n: size_t) -> *mut u8 {
     core::ptr::null_mut()
 }
 
-/// \`strlen(s)\`：返回字符串长度（不含 NUL）。
+/// `strlen(s)`：返回字符串长度（不含 NUL）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strlen(s: *const c_char) -> size_t {
     unsafe {
@@ -76,7 +76,7 @@ pub unsafe extern "C" fn strlen(s: *const c_char) -> size_t {
     }
 }
 
-/// \`strnlen(s, max)\`：返回长度，最多 \`max\`（遇到 NUL 停止）。
+/// `strnlen(s, max)`：返回长度，最多 `max`（遇到 NUL 停止）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strnlen(s: *const c_char, max: size_t) -> size_t {
     unsafe {
@@ -88,7 +88,7 @@ pub unsafe extern "C" fn strnlen(s: *const c_char, max: size_t) -> size_t {
     }
 }
 
-/// \`strcmp(a, b)\`：按无符号字符序比较，返回 <0/0/>0。
+/// `strcmp(a, b)`：按无符号字符序比较，返回 <0/0/>0。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcmp(a: *const c_char, b: *const c_char) -> c_int {
     unsafe {
@@ -107,7 +107,7 @@ pub unsafe extern "C" fn strcmp(a: *const c_char, b: *const c_char) -> c_int {
     }
 }
 
-/// \`strncmp(a, b, n)\`：比较至多 n 字节。
+/// `strncmp(a, b, n)`：比较至多 n 字节。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strncmp(a: *const c_char, b: *const c_char, n: size_t) -> c_int {
     unsafe {
@@ -125,7 +125,7 @@ pub unsafe extern "C" fn strncmp(a: *const c_char, b: *const c_char, n: size_t) 
     0
 }
 
-/// \`strcpy(dst, src)\`：复制字符串（含 NUL）。dst 须足够大。
+/// `strcpy(dst, src)`：复制字符串（含 NUL）。dst 须足够大。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcpy(dst: *mut c_char, src: *const c_char) -> *mut c_char {
     unsafe {
@@ -142,7 +142,7 @@ pub unsafe extern "C" fn strcpy(dst: *mut c_char, src: *const c_char) -> *mut c_
     dst
 }
 
-/// \`strncpy(dst, src, n)\`：复制至多 n 字节。
+/// `strncpy(dst, src, n)`：复制至多 n 字节。
 ///
 /// 语义（C11 7.24.2.4）：若 src 长度 < n，剩余字节补 NUL；若 src 长度 >= n，
 /// 复制 n 字节且**不**写终止符（调用方须自行保证）。返回 dst。
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn strncpy(dst: *mut c_char, src: *const c_char, n: size_t
 }
 
 
-/// \`strcat(dst, src)\`：把 src 追加到 dst 末尾（含 NUL）。
+/// `strcat(dst, src)`：把 src 追加到 dst 末尾（含 NUL）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcat(dst: *mut c_char, src: *const c_char) -> *mut c_char {
     unsafe {
@@ -189,7 +189,7 @@ pub unsafe extern "C" fn strcat(dst: *mut c_char, src: *const c_char) -> *mut c_
     dst
 }
 
-/// \`strchr(s, c)\`：查找字符 c（含 NUL 处），返回指针或 NULL。
+/// `strchr(s, c)`：查找字符 c（含 NUL 处），返回指针或 NULL。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strchr(s: *const c_char, c: c_int) -> *mut c_char {
     let target = c as c_char;
@@ -208,7 +208,7 @@ pub unsafe extern "C" fn strchr(s: *const c_char, c: c_int) -> *mut c_char {
     }
 }
 
-/// \`strrchr(s, c)\`：查找字符 c 最后一次出现，返回指针或 NULL。
+/// `strrchr(s, c)`：查找字符 c 最后一次出现，返回指针或 NULL。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strrchr(s: *const c_char, c: c_int) -> *mut c_char {
     let target = c as c_char;
@@ -227,7 +227,7 @@ pub unsafe extern "C" fn strrchr(s: *const c_char, c: c_int) -> *mut c_char {
     }
 }
 
-/// \`strstr(haystack, needle)\`：在 haystack 中查找子串 needle，返回位置或 NULL。
+/// `strstr(haystack, needle)`：在 haystack 中查找子串 needle，返回位置或 NULL。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char {
     unsafe {
@@ -250,7 +250,7 @@ pub unsafe extern "C" fn strstr(haystack: *const c_char, needle: *const c_char) 
     }
 }
 
-/// \`strdup(s)\`：复制字符串到新分配内存。失败返回 NULL 置 ENOMEM。
+/// `strdup(s)`：复制字符串到新分配内存。失败返回 NULL 置 ENOMEM。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strdup(s: *const c_char) -> *mut c_char {
     unsafe {
@@ -286,7 +286,7 @@ pub unsafe extern "C" fn strndup(s: *const c_char, n: size_t) -> *mut c_char {
     }
 }
 
-/// \`strspn(s, accept)\`：返回 s 开头连续由 accept 中字符组成的长度。
+/// `strspn(s, accept)`：返回 s 开头连续由 accept 中字符组成的长度。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strspn(s: *const c_char, accept: *const c_char) -> size_t {
     unsafe {
@@ -322,7 +322,7 @@ pub unsafe extern "C" fn strspn(s: *const c_char, accept: *const c_char) -> size
     }
 }
 
-/// \`strcspn(s, reject)\`：返回 s 开头连续**不在** reject 中的字符数。
+/// `strcspn(s, reject)`：返回 s 开头连续**不在** reject 中的字符数。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcspn(s: *const c_char, reject: *const c_char) -> size_t {
     unsafe {
@@ -358,7 +358,7 @@ pub unsafe extern "C" fn strcspn(s: *const c_char, reject: *const c_char) -> siz
     }
 }
 
-/// \`strpbrk(s, accept)\`：返回 s 中第一个出现在 accept 中的字符指针，无则 NULL。
+/// `strpbrk(s, accept)`：返回 s 中第一个出现在 accept 中的字符指针，无则 NULL。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strpbrk(s: *const c_char, accept: *const c_char) -> *mut c_char {
     unsafe {
@@ -387,7 +387,7 @@ pub unsafe extern "C" fn strpbrk(s: *const c_char, accept: *const c_char) -> *mu
     }
 }
 
-/// \`strncat(dst, src, n)\`：把 src 至多 n 个字符追加到 dst 末尾并 NUL 终止。
+/// `strncat(dst, src, n)`：把 src 至多 n 个字符追加到 dst 末尾并 NUL 终止。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strncat(dst: *mut c_char, src: *const c_char, n: size_t) -> *mut c_char {
     unsafe {
@@ -409,10 +409,10 @@ pub unsafe extern "C" fn strncat(dst: *mut c_char, src: *const c_char, n: size_t
     }
 }
 
-/// \`strtok_r(s, delim, saveptr)\`：按分隔符切分字符串（线程安全版）。
+/// `strtok_r(s, delim, saveptr)`：按分隔符切分字符串（线程安全版）。
 ///
-/// 调用方提供 \`saveptr\`（指向保存切分位置的指针），故无内部静态状态，可并发
-/// 用于多个字符串/线程。首次调用传 s，后续传 NULL 继续。\`saveptr\` 非空必须有效。
+/// 调用方提供 `saveptr`（指向保存切分位置的指针），故无内部静态状态，可并发
+/// 用于多个字符串/线程。首次调用传 s，后续传 NULL 继续。`saveptr` 非空必须有效。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtok_r(s: *mut c_char, delim: *const c_char, saveptr: *mut *mut c_char) -> *mut c_char {
     unsafe {
@@ -485,10 +485,10 @@ pub unsafe extern "C" fn strtok_r(s: *mut c_char, delim: *const c_char, saveptr:
     }
 }
 
-/// \`strtok(s, delim)\`：按分隔符切分字符串（非线程安全，基于全局静态）。
+/// `strtok(s, delim)`：按分隔符切分字符串（非线程安全，基于全局静态）。
 ///
 /// **线程限制（S19 如实）**：用全局静态保存指针，仅适合单线程用户态；
-/// 多线程/并发请用 \`strtok_r\`（线程安全，显式 saveptr）。首次调用传 s，
+/// 多线程/并发请用 `strtok_r`（线程安全，显式 saveptr）。首次调用传 s，
 /// 后续传 NULL 继续。
 static STRTOK_SAVE: core::sync::atomic::AtomicPtr<c_char> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());

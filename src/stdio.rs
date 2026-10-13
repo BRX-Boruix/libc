@@ -2,13 +2,13 @@
 //!
 //! ## 真实数据链路（S06）
 //!
-//! - \`printf\`/\`puts\` 最终写到 fd 1（STDOUT）；\`fprintf\`/\`fwrite\` 写到 FILE
+//! - `printf`/`puts` 最终写到 fd 1（STDOUT）；`fprintf`/`fwrite` 写到 FILE
 //!   （经内核 fd 读写 syscall）。
-//! - 可变参数经 \`c_variadic\`（Rust nightly 特性）读取，与 C 调用约定一致。
+//! - 可变参数经 `c_variadic`（Rust nightly 特性）读取，与 C 调用约定一致。
 //!
 //! ## FILE* 流
 //!
-//! 提供最小 \`FILE\` 结构。默认**无缓冲直写**（本内核页缓存写即落盘，无缓冲
+//! 提供最小 `FILE` 结构。默认**无缓冲直写**（本内核页缓存写即落盘，无缓冲
 //! 期收益；S32 无优化无数据），结构保留缓冲字段以备将来引入。
 //!
 //! ## 错误处理（S09/S18）
@@ -947,7 +947,7 @@ pub unsafe extern "C" fn perror(s: *const c_char) {
     }
 }
 
-/// \`fgets(s, n, fp)\`：从 fp 读取至多 n-1 字符，遇换行或 EOF 停止，结果 NUL 终止。
+/// `fgets(s, n, fp)`：从 fp 读取至多 n-1 字符，遇换行或 EOF 停止，结果 NUL 终止。
 /// 返回 s；读到 EOF 且无字符时返回 NULL。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fgets(s: *mut c_char, n: c_int, fp: *mut FILE) -> *mut c_char {
@@ -1085,7 +1085,7 @@ pub unsafe extern "C" fn getline(
 }
 
 
-/// \`fputs(s, fp)\`：写字符串到 fp（不含 NUL）。成功返回非负，失败 EOF。
+/// `fputs(s, fp)`：写字符串到 fp（不含 NUL）。成功返回非负，失败 EOF。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fputs(s: *const c_char, fp: *mut FILE) -> c_int {
     if s.is_null() || fp.is_null() {
@@ -1309,7 +1309,7 @@ unsafe fn next_float_arg_gp(ap: &mut VaList) -> u64 {
     v
 }
 
-/// 从一个 VaList 读取 width/precision 的 \`*\` 占位。
+/// 从一个 VaList 读取 width/precision 的 `*` 占位。
 fn resolve_star(spec: &Spec, ap: &mut VaList) -> (i64, i64) {
     let mut width = spec.width;
     if width == -2 {
@@ -1521,14 +1521,14 @@ impl FdSink {
 
 // ---------- 公开 c_variadic 入口 ----------
 
-/// \`printf(fmt, ...)\`：格式化到 stdout（fd 1）。返回写出字符数或 -1。
+/// `printf(fmt, ...)`：格式化到 stdout（fd 1）。返回写出字符数或 -1。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn printf(fmt: *const c_char, ap: ...) -> c_int {
     stdio_init();
     vprintf(fmt, unsafe { core::mem::transmute::<_, VaList>(ap) })
 }
 
-/// \`vprintf(fmt, ap)\`。
+/// `vprintf(fmt, ap)`。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vprintf(fmt: *const c_char, ap: VaList<'_>) -> c_int {
     stdio_init();
@@ -1544,13 +1544,13 @@ pub unsafe extern "C" fn vprintf(fmt: *const c_char, ap: VaList<'_>) -> c_int {
     }
 }
 
-/// \`fprintf(fp, fmt, ...)\`：格式化到 FILE。
+/// `fprintf(fp, fmt, ...)`：格式化到 FILE。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fprintf(fp: *mut FILE, fmt: *const c_char, ap: ...) -> c_int {
     vfprintf(fp, fmt, unsafe { core::mem::transmute::<_, VaList>(ap) })
 }
 
-/// \`vfprintf(fp, fmt, ap)\`。
+/// `vfprintf(fp, fmt, ap)`。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vfprintf(fp: *mut FILE, fmt: *const c_char, ap: VaList<'_>) -> c_int {
     stdio_init();
@@ -1572,7 +1572,7 @@ pub unsafe extern "C" fn vfprintf(fp: *mut FILE, fmt: *const c_char, ap: VaList<
     }
 }
 
-/// \`sprintf(buf, fmt, ...)\`：格式化到字符串。返回写入字符数（不含 NUL）。
+/// `sprintf(buf, fmt, ...)`：格式化到字符串。返回写入字符数（不含 NUL）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sprintf(buf: *mut c_char, fmt: *const c_char, ap: ...) -> c_int {
     vsnprintf(buf, usize::MAX, fmt, unsafe { core::mem::transmute::<_, VaList>(ap) }) as c_int
@@ -1593,13 +1593,13 @@ pub unsafe extern "C" fn vsprintf(buf: *mut c_char, fmt: *const c_char, ap: VaLi
     unsafe { vsnprintf(buf, usize::MAX, fmt, ap) }
 }
 
-/// \`snprintf(buf, size, fmt, ...)\`：格式化到有界字符串，恒 NUL 终止（size>0）。
+/// `snprintf(buf, size, fmt, ...)`：格式化到有界字符串，恒 NUL 终止（size>0）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn snprintf(buf: *mut c_char, size: size_t, fmt: *const c_char, ap: ...) -> c_int {
     vsnprintf(buf, size, fmt, unsafe { core::mem::transmute::<_, VaList>(ap) }) as c_int
 }
 
-/// \`vsnprintf(buf, size, fmt, ap)\`。
+/// `vsnprintf(buf, size, fmt, ap)`。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vsnprintf(buf: *mut c_char, size: size_t, fmt: *const c_char, ap: VaList<'_>) -> c_int {
     stdio_init();
@@ -1630,7 +1630,7 @@ pub unsafe extern "C" fn vsnprintf(buf: *mut c_char, size: size_t, fmt: *const c
     }
 }
 
-/// \`puts(s)\`：输出字符串 + 换行。成功返回非负，失败 EOF。
+/// `puts(s)`：输出字符串 + 换行。成功返回非负，失败 EOF。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn puts(s: *const c_char) -> c_int {
     stdio_init();
@@ -1649,7 +1649,7 @@ pub unsafe extern "C" fn puts(s: *const c_char) -> c_int {
     }
 }
 
-/// \`putchar(c)\`：输出单字符到 stdout。
+/// `putchar(c)`：输出单字符到 stdout。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn putchar(c: c_int) -> c_int {
     stdio_init();
@@ -1662,7 +1662,7 @@ pub unsafe extern "C" fn putchar(c: c_int) -> c_int {
     }
 }
 
-/// \`getchar()\`：从 stdin 读一字符；EOF 或错误返回 EOF。
+/// `getchar()`：从 stdin 读一字符；EOF 或错误返回 EOF。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getchar() -> c_int {
     stdio_init();
@@ -1772,7 +1772,7 @@ fn write_uint_width(p: *mut u8, value: u64, len: &FScanLen) {
 }
 
 /// 10^k（整数 k，范围受限时退化到边界；用于 fscanf 实数组装）。
-/// 手动实现以在 no_std 下避开 \`f64::powi\` 的方法可用性问题。
+/// 手动实现以在 no_std 下避开 `f64::powi` 的方法可用性问题。
 pub fn f64_pow10(k: i32) -> f64 {
     // 预计算 1e0..1e308 与 1e-1..1e-308 的对数表太占内存；用连乘，够用。
     let mut r = 1.0f64;
@@ -1791,12 +1791,12 @@ pub fn f64_pow10(k: i32) -> f64 {
     r
 }
 
-/// \`fscanf(fp, fmt, ...)\`：从 fp 读取格式化输入。
+/// `fscanf(fp, fmt, ...)`：从 fp 读取格式化输入。
 ///
-/// 支持转换：\`%d %i %u %x %o %s %c %f %e %g %n %% %[\`（含大写 \`%F/%E/%G\`），
-/// 长度修饰符 \`hh h l ll z t L j\`，可选宽度（如 \`%5d\`）与抑制赋值
-/// （\`%*d\`）。整数目标指针宽度随长度修饰符变化；实数 \`%f→float*\`、
-/// \`%lf→double*\`、\`%Lf→long double*\`（本目标 long double≈f64，如实）。
+/// 支持转换：`%d %i %u %x %o %s %c %f %e %g %n %% %[`（含大写 `%F/%E/%G`），
+/// 长度修饰符 `hh h l ll z t L j`，可选宽度（如 `%5d`）与抑制赋值
+/// （`%*d`）。整数目标指针宽度随长度修饰符变化；实数 `%f→float*`、
+/// `%lf→double*`、`%Lf→long double*`（本目标 long double≈f64，如实）。
 /// **pushback（S19）**：FILE 带 1 字节 pushback 槽（ungetc），fscanf 读到不匹配
 /// 字符（非本转换数字/集合外/超宽/实数终止符）时压回供后续转换复用，避免字符丢失；
 /// 多字节 pushback 仅支持 1 槽。%lc/%ls（l 修饰宽字符）目标为 wchar_t*（x86_64 上 4 字节），

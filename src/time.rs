@@ -1,20 +1,20 @@
 //! 时间函数（C ABI）：time / clock / sleep / clock_gettime 简化。
 //!
 //! 真实数据链路（S06）：
-//! - \`time()\` 返回 Unix epoch 秒（wall clock），来自 SysFS \`/system/info/time\`
+//! - `time()` 返回 Unix epoch 秒（wall clock），来自 SysFS `/system/info/time`
 //!   （内核 RTC 直读 CMOS）。SysFS 不可用时返回 (time_t)-1 置 errno（S09）。
-//! - \`clock()\` 返回单调纳秒（内核 uptime_ms），换算为 CLOCKS_PER_SEC 单位。
-//! - \`sleep\` 经 libsys \`sleep(ns)\` 阻塞。
+//! - `clock()` 返回单调纳秒（内核 uptime_ms），换算为 CLOCKS_PER_SEC 单位。
+//! - `sleep` 经 libsys `sleep(ns)` 阻塞。
 
 use crate::ctypes::{c_char, c_int, c_ulong, size_t};
 use crate::errno::{set_errno, from_libsys};
 
-/// \`time_t\`：秒级时间类型（64 位）。
+/// `time_t`：秒级时间类型（64 位）。
 pub type time_t = i64;
-/// \`clock_t\`：时钟计数类型。
+/// `clock_t`：时钟计数类型。
 pub type clock_t = i64;
 
-/// 每秒时钟滴答数（与 \`clock()\` 返回值换算；本实现用纳秒）。
+/// 每秒时钟滴答数（与 `clock()` 返回值换算；本实现用纳秒）。
 pub const CLOCKS_PER_SEC: clock_t = 1_000_000_000;
 
 /// difftime(t1, t0)：两个时刻之差（秒，double）。
@@ -146,7 +146,7 @@ pub unsafe extern "C" fn mktime(t: *mut Tm) -> time_t {
     }
 }
 
-/// \`time(tloc)\`：返回 Unix epoch 秒；tloc 非空则写入。
+/// `time(tloc)`：返回 Unix epoch 秒；tloc 非空则写入。
 #[unsafe(no_mangle)]
 pub extern "C" fn time(tloc: *mut time_t) -> time_t {
     match libsys::read_wall_clock() {
@@ -185,7 +185,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// \`clock()\`：返回进程运行时间（本实现 = 系统单调纳秒）。
+/// `clock()`：返回进程运行时间（本实现 = 系统单调纳秒）。
 #[unsafe(no_mangle)]
 pub extern "C" fn clock() -> clock_t {
     // 单调时钟：内核 uptime_ms。返回纳秒（CLOCKS_PER_SEC=1e9）。
@@ -195,7 +195,7 @@ pub extern "C" fn clock() -> clock_t {
     }
 }
 
-/// \`sleep(seconds)\`：睡眠指定秒数。
+/// `sleep(seconds)`：睡眠指定秒数。
 #[unsafe(no_mangle)]
 pub extern "C" fn sleep(seconds: c_ulong) -> c_ulong {
     let ns = (seconds as u64).saturating_mul(1_000_000_000);
@@ -208,7 +208,7 @@ pub extern "C" fn sleep(seconds: c_ulong) -> c_ulong {
     }
 }
 
-/// \`usleep(usec)\`：睡眠指定微秒。
+/// `usleep(usec)`：睡眠指定微秒。
 #[unsafe(no_mangle)]
 pub extern "C" fn usleep(usec: c_ulong) -> c_int {
     let ns = (usec as u64).saturating_mul(1000);
@@ -221,7 +221,7 @@ pub extern "C" fn usleep(usec: c_ulong) -> c_int {
     }
 }
 
-/// \`nanosleep(req, rem)\`：睡眠指定纳秒。
+/// `nanosleep(req, rem)`：睡眠指定纳秒。
 #[unsafe(no_mangle)]
 pub extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> c_int {
     if req.is_null() {
@@ -243,7 +243,7 @@ pub extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> c_int 
     }
 }
 
-/// \`struct timespec\`（C 布局）。
+/// `struct timespec`（C 布局）。
 /// `struct timeval`（C 布局，与 `libc/include/sys/time.h` 同一约定）。
 #[repr(C)]
 #[derive(Clone, Copy)]
