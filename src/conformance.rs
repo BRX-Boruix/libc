@@ -1675,3 +1675,55 @@ fn env_round_trip() {
         // （不写一个恒失败的假测试。）
     }
 }
+
+
+// ===========================================================================
+// v* 变长入口（va_list 形态）
+// ===========================================================================
+
+/// 可变参数转发器：从测试里构造 VaList 需要 c_variadic（libc 自己开了），
+/// 故这里用一个 `...` 转发器把 ap 交给 vsnprintf/vsprintf——它们正是那两个导出的入口。
+unsafe extern "C" fn vsnprintf_forward(
+    buf: *mut c_char,
+    size: crate::ctypes::size_t,
+    fmt: *const c_char,
+    ap: ...
+) -> c_int {
+    unsafe {
+        crate::stdio::vsnprintf(
+            buf,
+            size,
+            fmt,
+            core::mem::transmute::<_, core::ffi::VaList>(ap),
+        )
+    }
+}
+
+unsafe extern "C" fn vsprintf_forward(buf: *mut c_char, fmt: *const c_char, ap: ...) -> c_int {
+    unsafe {
+        crate::stdio::vsprintf(buf, fmt, core::mem::transmute::<_, core::ffi::VaList>(ap))
+    }
+}
+
+/// vsnprintf / vsprintf：与 snprintf/sprintf 同引擎，只是参数来自 VaList。
+#[test]
+fn vsnprintf_and_vsprintf_entries() {
+    unsafe {
+        let mut buf = [0i8; 32];
+        let n = vsnprintf_forward(buf.as_mut_ptr(), 32, cs(b"%d-%s\0"), 7i32, cs(b"x\0"));
+        assert_eq!(n, 3);
+        assert_eq!((buf[0], buf[1], buf[2]), (b'7' as i8, b'-' as i8, b'x' as i8));
+        // 截断语义与非 v 变体一致：返回「本应写入」的长度。
+        let n2 = vsnprintf_forward(buf.as_mut_ptr(), 2, cs(b"%s\0"), cs(b"abcd\0"));
+        assert_eq!(n2, 4);
+        assert_eq!(buf[1], 0, "must still NUL-terminate");
+
+        let mut big = [0i8; 32];
+        let n3 = vsprintf_forward(big.as_mut_ptr(), cs(b"[%d]\0"), 42i32);
+        assert_eq!(n3, 4);
+        assert_eq!(
+            (big[0], big[1], big[2], big[3]),
+            (b'[' as i8, b'4' as i8, b'2' as i8, b']' as i8)
+        );
+    }
+}
