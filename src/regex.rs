@@ -304,10 +304,15 @@ impl<'a> Parser<'a> {
     }
 
     fn peek_quantifier(&self) -> Option<(u32, Option<u32>)> {
+        // **BRE 与 ERE 的区别就在这里**：POSIX BRE 里裸 `+`/`?` 是**普通字符**
+        // （量词形式是 `\+`/`\?`），只有 `*` 无条件当量词。此前这里漏了
+        // extended 守卫，于是 BRE 的 `a+b` 会被判成"连续量词"并误报 REG_BADRPT——
+        // 而 `consume_quantifier` 那一侧是有守卫的（只在 extended 下前进），
+        // 两侧不对称使位置根本不推进。见 conformance 的 regex_bre_plus_is_literal。
         match self.peek() {
             Some(b'*') => Some((0, None)),
-            Some(b'+') => Some((1, None)),
-            Some(b'?') => Some((0, Some(1))),
+            Some(b'+') if self.extended => Some((1, None)),
+            Some(b'?') if self.extended => Some((0, Some(1))),
             Some(b'\\') if !self.extended => match self.pat.get(self.pos + 1) {
                 Some(b'{') => self.parse_brace_at(self.pos + 2),
                 Some(b'?') => Some((0, Some(1))),
@@ -455,11 +460,13 @@ impl<'a> Parser<'a> {
                 }
             }
             b'*' | b'+' | b'?' => {
-                // 量词无原子可作用：POSIX 规定 BRE 里行首的 '*' 是字面量，
-                // 其余情形是错误。
-                if !self.extended && c == b'*' {
+                // 量词位置没有原子可作用。**BRE 与 ERE 不同**（POSIX 9.4.6/9.4.8）：
+                // BRE 里裸 `+`/`?` 是**普通字符**、行首的 `*` 也是字面量；
+                // ERE 里这三者都是错误。此前只给 `*` 开了 BRE 的口子，于是 `a+b` 在 BRE 下
+                // 走到这里被误报 REG_BADRPT（另一半原因见 peek_quantifier 的注释）。
+                if !self.extended {
                     self.pos += 1;
-                    self.emit_char(b'*');
+                    self.emit_char(c);
                 } else {
                     return Err(REG_BADRPT);
                 }

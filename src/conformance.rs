@@ -899,3 +899,85 @@ fn strptime_conversions() {
         assert!(crate::posix_batch4::strptime(cs(b"nope\0"), cs(b"%Y\0"), &mut tm).is_null());
     }
 }
+
+
+// ===========================================================================
+// wordexp / alphasort / regex
+// ===========================================================================
+
+/// **wordexp / glob / malloc 在宿主上不可测**：它们经 libc 的 `malloc`，而那条路最终
+/// 落到内核 `brk`（宿主上没有内核）⇒ 恒 `WRDE_NOSPACE`。这三项的真值只在真机
+/// `libccheck` 里验。此处**不写一个恒失败的假测试**，如实留白。
+///
+/// alphasort：按 d_name 字典序（C locale 下与 strcoll 等价，见其文档的诚实边界）。
+#[test]
+fn alphasort_orders_by_name() {
+    unsafe {
+        let mut a: crate::dirent::dirent = core::mem::zeroed();
+        let mut b: crate::dirent::dirent = core::mem::zeroed();
+        for (i, ch) in b"apple\0".iter().enumerate() {
+            a.d_name[i] = *ch as c_char;
+        }
+        for (i, ch) in b"banana\0".iter().enumerate() {
+            b.d_name[i] = *ch as c_char;
+        }
+        let pa: *const crate::dirent::dirent = &a;
+        let pb: *const crate::dirent::dirent = &b;
+        assert!(crate::dirent::alphasort(&pa, &pb) < 0);
+        assert!(crate::dirent::alphasort(&pb, &pa) > 0);
+        assert_eq!(crate::dirent::alphasort(&pa, &pa), 0);
+    }
+}
+
+/// ERE（REG_EXTENDED）：锚点、字符类、重复；未匹配返回非 0；regfree 释放。
+#[test]
+fn regex_ere_matching() {
+    unsafe {
+        const ERE: c_int = crate::regex::REG_EXTENDED;
+        let mut re: crate::regex::regex_t = core::mem::zeroed();
+        assert_eq!(crate::regex::regcomp(&mut re, cs(b"^a[0-9]+c$\0"), ERE), 0);
+        let mut m = [crate::regex::regmatch_t { rm_so: -1, rm_eo: -1 }];
+        assert_eq!(crate::regex::regexec(&re, cs(b"a123c\0"), 1, m.as_mut_ptr(), 0), 0);
+        assert_eq!((m[0].rm_so, m[0].rm_eo), (0, 5));
+        assert_ne!(crate::regex::regexec(&re, cs(b"b123c\0"), 1, m.as_mut_ptr(), 0), 0);
+        assert_ne!(crate::regex::regexec(&re, cs(b"a12xc\0"), 1, m.as_mut_ptr(), 0), 0);
+        crate::regex::regfree(&mut re);
+
+        // 捕获组：re_nsub 应报出组数。
+        let mut re2: crate::regex::regex_t = core::mem::zeroed();
+        assert_eq!(crate::regex::regcomp(&mut re2, cs(b"(a)(b)\0"), ERE), 0);
+        let nsub = re2.re_nsub;
+        assert_eq!(nsub, 2, "re_nsub must count capture groups");
+        let mut m2: [crate::regex::regmatch_t; 3] = core::mem::zeroed();
+        assert_eq!(crate::regex::regexec(&re2, cs(b"xab\0"), 3, m2.as_mut_ptr(), 0), 0);
+        assert_eq!((m2[1].rm_so, m2[1].rm_eo), (1, 2));
+        assert_eq!((m2[2].rm_so, m2[2].rm_eo), (2, 3));
+        crate::regex::regfree(&mut re2);
+    }
+}
+
+
+/// BRE（默认模式）：POSIX 规定裸 `+`/`?` 是**普通字符**，量词形式是 `\+`/`\?`。
+///
+/// 修复前 peek_quantifier 对裸 `+`/`?` 也返回量词，而 consume_quantifier 只在
+/// extended 下前进 ⇒ 位置不推进、下一轮被判成"连续量词" ⇒ regcomp("a+b") 误报 REG_BADRPT。
+#[test]
+fn regex_bre_plus_is_literal() {
+    unsafe {
+        // 裸 + 是字面量：a+b 匹配 "a+b"。
+        let mut re: crate::regex::regex_t = core::mem::zeroed();
+        assert_eq!(crate::regex::regcomp(&mut re, cs(b"a+b\0"), 0), 0);
+        let mut m = [crate::regex::regmatch_t { rm_so: -1, rm_eo: -1 }];
+        assert_eq!(crate::regex::regexec(&re, cs(b"xa+by\0"), 1, m.as_mut_ptr(), 0), 0);
+        assert_eq!((m[0].rm_so, m[0].rm_eo), (1, 4));
+        assert_ne!(crate::regex::regexec(&re, cs(b"aab\0"), 1, m.as_mut_ptr(), 0), 0);
+        crate::regex::regfree(&mut re);
+
+        // 转义的 \+ 才是量词。
+        let mut re2: crate::regex::regex_t = core::mem::zeroed();
+        assert_eq!(crate::regex::regcomp(&mut re2, cs(b"a\\+b\0"), 0), 0);
+        assert_eq!(crate::regex::regexec(&re2, cs(b"aaab\0"), 1, m.as_mut_ptr(), 0), 0);
+        assert_ne!(crate::regex::regexec(&re2, cs(b"a+b\0"), 1, m.as_mut_ptr(), 0), 0);
+        crate::regex::regfree(&mut re2);
+    }
+}
