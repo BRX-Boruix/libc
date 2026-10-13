@@ -26,7 +26,7 @@ pub struct bx_sem_t {
     /// 内核 SYNC 字 id（init 创建、destroy 销毁）。init 之后只读。
     pub park_id: u64,
     /// 是否已 init；未 init 的 wait/post 如实返回 -1，不假装成功。
-    pub init: i32,
+    pub _init: i32,
 }
 
 /// `sem_init(sem, pshared, value)`：创建计数为 `value` 的信号量。
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn sem_init(s: *mut bx_sem_t, pshared: c_int, value: c_uin
             p.count.store(value as i32, Ordering::Relaxed);
             p.epoch.store(0, Ordering::Relaxed);
             p.park_id = id;
-            p.init = 1;
+            p._init = 1;
             0
         }
         Err(e) => {
@@ -64,7 +64,7 @@ pub unsafe extern "C" fn sem_init(s: *mut bx_sem_t, pshared: c_int, value: c_uin
 /// `sem_wait(sem)`：计数 `> 0` 则递减返回；否则睡到被 post 唤醒（**绝不丢唤醒**，见模块头）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_wait(s: *mut bx_sem_t) -> c_int {
-    if s.is_null() || unsafe { (*s).init } == 0 {
+    if s.is_null() || unsafe { (*s)._init } == 0 {
         set_errno(EINVAL);
         return -1;
     }
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn sem_wait(s: *mut bx_sem_t) -> c_int {
 /// `sem_trywait(sem)`：非阻塞；计数为 0 时返回 -1 置 `EAGAIN`。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_trywait(s: *mut bx_sem_t) -> c_int {
-    if s.is_null() || unsafe { (*s).init } == 0 {
+    if s.is_null() || unsafe { (*s)._init } == 0 {
         set_errno(EINVAL);
         return -1;
     }
@@ -111,7 +111,7 @@ pub unsafe extern "C" fn sem_trywait(s: *mut bx_sem_t) -> c_int {
 /// `sem_post(sem)`：计数 +1；**先**把新 epoch 写进 SYNC 字**再**唤醒一个等待者。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_post(s: *mut bx_sem_t) -> c_int {
-    if s.is_null() || unsafe { (*s).init } == 0 {
+    if s.is_null() || unsafe { (*s)._init } == 0 {
         set_errno(EINVAL);
         return -1;
     }
@@ -126,20 +126,20 @@ pub unsafe extern "C" fn sem_post(s: *mut bx_sem_t) -> c_int {
 /// `sem_destroy(sem)`：销毁内核 SYNC 字并清 init 标志。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_destroy(s: *mut bx_sem_t) -> c_int {
-    if s.is_null() || unsafe { (*s).init } == 0 {
+    if s.is_null() || unsafe { (*s)._init } == 0 {
         set_errno(EINVAL);
         return -1;
     }
     let p = unsafe { &*s };
     let _ = libsys::sync_delete(p.park_id);
-    unsafe { (*s).init = 0 };
+    unsafe { (*s)._init = 0 };
     0
 }
 
 /// `sem_getvalue(sem, val)`：把当前计数写入 `val`。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_getvalue(s: *mut bx_sem_t, val: *mut c_int) -> c_int {
-    if s.is_null() || val.is_null() || unsafe { (*s).init } == 0 {
+    if s.is_null() || val.is_null() || unsafe { (*s)._init } == 0 {
         set_errno(EINVAL);
         return -1;
     }

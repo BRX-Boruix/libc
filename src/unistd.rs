@@ -1007,11 +1007,28 @@ pub extern "C" fn getpagesize() -> c_int {
     4096
 }
 
-/// pathconf(path, name)：按名字返回路径相关限制。
+/// `pathconf(path, name)`：按名字返回路径相关限制。
 ///
 /// 来路：GCC 宿主侧构建报 `call to undeclared function 'pathconf'` + `_PC_PATH_MAX` 未定义。
-/// **诚实边界（S09）**：本系统没有 per-文件系统的限制表，故只对**确实有定义**的几个名字
-/// 返回常量（路径/名字/管道缓冲上限），其余**如实返回 -1 并置 EINVAL**——不编造数值。
+///
+/// **每个值的真值来源（S09：逐项说明，不编造）**：
+///
+/// | 名字 | 值 | 来源 |
+/// | --- | --- | --- |
+/// | `_PC_PATH_MAX` | 4096 | 内核 `syscall::MAX_USER_PATH_BYTES`（超限即 `NameTooLong`） |
+/// | `_PC_NAME_MAX` | 255 | VFS `mount::MAX_NAME_BYTES`（末段名字契约，全部文件系统共用） |
+/// | `_PC_PIPE_BUF` | 4096 | 内核 `ipc::PIPE_CAPACITY`——单次搬运块大小。**披露**：这是"最大单次拷贝"，
+///   不是"并发写者的原子性保证"（后者 POSIX 有要求，本内核未单独论证） |
+/// | `_PC_LINK_MAX` | -1 | **无上限**：VFS 不设硬链接计数上限（RamFS 的 `nlink` 是 `u32`）。
+///   POSIX 正是用「返回 -1 且**不**改 errno」表示无限制 |
+///
+/// **已移除的编造值（本轮审查抓出）**：`_PC_MAX_CANON`/`_PC_MAX_INPUT` 曾报 255——那是
+/// **行规程（canonical mode）**的限制，而本系统按 ADR-042 没有 termios、没有 TTY（`ttyname`
+/// 同理）。为一个不存在的子系统报一个数就是凭空发明；现按本函数自己的规则如实 `EINVAL`。
+/// `_PC_LINK_MAX` 曾报 1 并写「无硬链接能力」——那句在 `link(2)` 落地后**已经不成立**。
+///
+/// 其余名字**如实返回 -1 并置 EINVAL**。`path` 仅作非空校验：本系统各文件系统共用同一套
+/// VFS 契约（见 `_PC_NAME_MAX`/`_PC_PATH_MAX` 的来源），故不存在 per-文件系统的差异表。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pathconf(path: *const c_char, name: c_int) -> crate::ctypes::c_long {
     if path.is_null() {
@@ -1022,9 +1039,8 @@ pub unsafe extern "C" fn pathconf(path: *const c_char, name: c_int) -> crate::ct
         _PC_PATH_MAX => 4096,
         _PC_NAME_MAX => 255,
         _PC_PIPE_BUF => 4096,
-        _PC_MAX_CANON | _PC_MAX_INPUT => 255,
-        // 无硬链接能力 ⇒ 如实报 1（只有一个名字指向该文件）；这是事实，不是占位。
-        _PC_LINK_MAX => 1,
+        // 无限制：POSIX 规定此时返回 -1 且**不得**改动 errno。
+        _PC_LINK_MAX => -1,
         _ => {
             set_errno(EINVAL);
             -1
@@ -1358,6 +1374,7 @@ mod a7_owner_truth_tests {
             owner_uid: 0, owner_gid: 0,
             is_terminal: 1,
             console_owner: 0,
+            ino: 7, nlink: 1,
         };
         assert_eq!(isatty_from_info(&tty), 1, "node says terminal -> 1");
 
@@ -1371,6 +1388,7 @@ mod a7_owner_truth_tests {
             owner_uid: 0, owner_gid: 0,
             is_terminal: 0,
             console_owner: 0,
+            ino: 42, nlink: 3,
         };
         assert_eq!(isatty_from_info(&file), 0, "redirected to a file -> 0 (was 1)");
 
@@ -1378,6 +1396,28 @@ mod a7_owner_truth_tests {
         let unknown = StatInfo { is_terminal: 0, ..tty };
         assert_eq!(isatty_from_info(&unknown), 0);
     }
+    /// `pathconf` 只报**有真值**的名字：没有 TTY 就没有行规程限制，如实 EINVAL 而不是
+    /// 发明一个数字（本轮审查抓出 `_PC_MAX_CANON`/`_PC_MAX_INPUT` 曾报 255）。
+    #[test]
+    fn pathconf_reports_only_backed_values() {
+        let path = b"/\0".as_ptr() as *const crate::ctypes::c_char;
+        unsafe {
+            assert_eq!(super::pathconf(path, super::_PC_NAME_MAX), 255);
+            assert_eq!(super::pathconf(path, super::_PC_PATH_MAX), 4096);
+            // 无上限：POSIX 编码 = 返回 -1 且**不**改 errno。
+            crate::errno::set_errno(0);
+            assert_eq!(super::pathconf(path, super::_PC_LINK_MAX), -1);
+            assert_eq!(crate::errno::errno(), 0, "a no-limit answer must not set errno");
+            // 不存在的子系统（无 canonical 模式）：如实 EINVAL。
+            crate::errno::set_errno(0);
+            assert_eq!(super::pathconf(path, super::_PC_MAX_CANON), -1);
+            assert_eq!(crate::errno::errno(), crate::errno::EINVAL);
+            crate::errno::set_errno(0);
+            assert_eq!(super::pathconf(path, super::_PC_MAX_INPUT), -1);
+            assert_eq!(crate::errno::errno(), crate::errno::EINVAL);
+        }
+    }
+
     #[test]
     fn stat_perm_bits_restores_three_segments() {
         // 三段忠实：任意 classic 组合无损还原（不再任一位抹平）。
@@ -1404,12 +1444,16 @@ mod a7_owner_truth_tests {
             owner_gid: 50,
             is_terminal: 0,
             console_owner: 0,
+            ino: 1234, nlink: 2,
         };
         let st: stat = stat_from_info(&info);
         assert_eq!(st.st_mode & 0o777, 0o640, "three-segment mode restore");
         assert_eq!(st.st_uid, 1000, "real owner uid (was hardcoded 0)");
         assert_eq!(st.st_gid, 50, "real owner gid (was hardcoded 0)");
         assert_eq!(st.st_size, 42);
+        // ino/nlink 也必须来自数据源（此前这两处没投影，st_ino/st_nlink 恒 0）。
+        assert_eq!(st.st_ino, 1234, "ino projected from StatInfo");
+        assert_eq!(st.st_nlink, 2, "nlink projected from StatInfo");
         // zero-owner 对照：0 是真值投影（数据源变更），非旧硬编码残留。
         let zero = StatInfo { owner_uid: 0, owner_gid: 0, ..info };
         let st2: stat = stat_from_info(&zero);

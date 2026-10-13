@@ -57,25 +57,34 @@ pub unsafe extern "C" fn swab(src: *const c_void, dst: *mut c_void, n: size_t) {
     }
 }
 
-/// random()：与 rand() 同一生成器（POSIX 要求两者是同一序列的两个接口，故共用实现）。
+/// `random()` 的生成器状态：模块级、私有、非线程安全（POSIX 只要求同一线程内可复现）。
+///
+/// **为什么必须在模块级**：Rust 的**函数内** `static` 是每个函数各自一份的独立对象。
+/// 本文件此前在 `random()` 与 `srandom()` 里各声明了一个 `static mut STATE`，于是
+/// `srandom` 写进的那份没有任何读者——**播种是个空操作**（实测：连续两次
+/// `srandom(12345)` 之后 `random()` 给出 1093944153 而非同一个值）。
+static mut RANDOM_STATE: u64 = 1;
+
+/// `random()`：返回 `[0, 2^31-1]` 的伪随机数（POSIX 的取值域）。
+///
+/// 生成器是 64 位 LCG 取高 31 位。**诚实边界**：这不是 glibc 的 additive-feedback
+/// 算法，故同一 seed 只在**本实现内**可复现，**不承诺**与其他 libc 逐值相同。
+/// POSIX 也没有要求 `random` 与 `rand` 共用一条序列（glibc 恰好共用）——本实现刻意分开：
+/// `srand` 不影响 `random`，`srandom` 不影响 `rand`。
 #[unsafe(no_mangle)]
 pub extern "C" fn random() -> c_long {
-    // 本模块自有的简单 LCG（POSIX 未规定 random 与 rand 必须同源；这里刻意**不**依赖 rand，
-    // 以免把两个接口的语义耦死）。状态是模块私有、非线程安全——与 POSIX 对 random 的要求一致。
-    static mut STATE: u64 = 1;
     unsafe {
-        STATE = STATE.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((STATE >> 33) & 0x7FFF_FFFF) as c_long
+        RANDOM_STATE = RANDOM_STATE
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((RANDOM_STATE >> 33) & 0x7FFF_FFFF) as c_long
     }
 }
 
-/// srandom(seed)：见 random()。
+/// `srandom(seed)`：给 `random()` 播种（同一 seed ⇒ 同一序列）。
 #[unsafe(no_mangle)]
 pub extern "C" fn srandom(seed: c_uint) {
-    static mut STATE: u64 = 1;
-    unsafe {
-        STATE = seed as u64 | 1; // 非零初值
-    }
+    unsafe { RANDOM_STATE = seed as u64 }
 }
 
 /// brk(addr)：把数据段断点设为 addr（POSIX/传统 Unix）。成功 0，失败 -1 置 errno。
@@ -200,5 +209,27 @@ pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut crate::unistd::sta
             return 0;
         }
         crate::unistd::stat(path, buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `srandom(seed)` 必须真的给 `random()` 播种。
+    ///
+    /// 红阶段实测：`srandom` 与 `random` 各自声明了一个**函数内** `static mut STATE`
+    /// （Rust 里这是两个互不相干的对象），于是 `srandom` 写的那份没有任何读者——
+    /// 播种是个空操作。
+    #[test]
+    fn srandom_seeds_random() {
+        srandom(12345);
+        let a = random();
+        srandom(12345);
+        let b = random();
+        assert_eq!(a, b, "the same seed must reproduce the same value");
+        srandom(67890);
+        let c = random();
+        assert_ne!(a, c, "a different seed must produce a different sequence");
     }
 }
