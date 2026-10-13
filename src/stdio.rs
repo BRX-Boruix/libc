@@ -924,7 +924,12 @@ pub unsafe extern "C" fn rewind(fp: *mut FILE) {
         if fp.is_null() {
             return;
         }
-        let _ = crate::unistd::lseek((*fp).fd as c_int, 0, 0 /* SEEK_SET */);
+        // 与 fseek 同一理由：先把写缓冲落盘再复位位置。
+        let f = &mut *fp;
+        if f.mode.can_write() {
+            let _ = wflush(f);
+        }
+        let _ = crate::unistd::lseek(f.fd as c_int, 0, 0 /* SEEK_SET */);
         clearerr(fp);
     }
 }
@@ -1151,6 +1156,12 @@ pub unsafe extern "C" fn fseek(fp: *mut FILE, offset: c_long, whence: c_int) -> 
         return -1;
     }
     let f = &mut *fp;
+    // **重定位前必须先冲刷写缓冲**（POSIX：fseek 之后「文件位置指示符」立即生效）。
+    // 留到重定位之后再写，缓冲里的字节会落在**错误的偏移**上——实测写 13 字节后
+    // fseek 到 5，那 13 字节会被写到偏移 5 而不是 0。这条与 ftell 的缓冲记账是一对。
+    if f.mode.can_write() && !wflush(f) {
+        return -1;
+    }
     f.eof = false;
     f.pushback = -1;
     // 错误标志按 POSIX **不**由 fseek 清除（那是 clearerr/rewind 的事）。
@@ -1171,7 +1182,23 @@ pub unsafe extern "C" fn ftell(fp: *mut FILE) -> c_long {
         set_errno(EINVAL);
         return -1;
     }
-    crate::unistd::lseek((*fp).fd as c_int, 0, 1 /* SEEK_CUR */)
+    let f = &*fp;
+    let base = crate::unistd::lseek(f.fd as c_int, 0, 1 /* SEEK_CUR */);
+    if base < 0 {
+        return base;
+    }
+    // POSIX：ftell 返回的是**流的**文件位置指示符，故必须把「已写入但尚未冲刷」的
+    // 缓冲字节算进去（fd 位置只反映已落盘的部分）。修复前 ftell 直接返回 lseek 结果：
+    // 写 13 字节（全在写缓冲里）后 ftell 返回 **0**。
+    let mut pos = base;
+    if f.mode.can_write() {
+        pos += f.buf_len as c_long;
+    }
+    // 读侧：ungetc 回退的那 1 字节不在 fd 位置上。
+    if f.pushback >= 0 {
+        pos -= 1;
+    }
+    pos
 }
 
 // ---------- 内部辅助 ----------
@@ -1482,9 +1509,15 @@ impl FmtSink for CounterSink {
 }
 
 /// 输出到 fd 的 sink。
+///
+/// `file@BT@：非空时输出**必须经该流的写缓冲**（@BT@wbuf_put@BT@），而不是直接落 fd。
+/// 为什么：@BT@fputs@BT@/@BT@fwrite@BT@/@BT@fputc@BT@ 是走缓冲的，printf 家族若直写 fd，两者在同一流上
+/// 就会**乱序**——实测 @BT@fputs("hello\n")@BT@ 之后 @BT@fprintf(" n=%d", 42)@BT@ 得到
+/// @BT@" n=42hello\n"@BT@（13 字节，但顺序完全错）。这正是本结构加这个字段的原因。
 struct FdSink {
     fd: u64,
     wrote: ssize_t,
+    file: *mut FILE,
 }
 impl FmtSink for FdSink {
     fn write(&mut self, bytes: &[u8]) -> Result<(), ()> {
@@ -1513,7 +1546,14 @@ impl FdSink {
         if bytes.is_empty() {
             return;
         }
-        // 经 FILE 层的同一条 I/O 单点（printf 家族也必须认 fd 位置表）。
+        // **必须与 fputs/fwrite 走同一条写缓冲**（见 FdSink 的说明）。
+        if !self.file.is_null() {
+            if unsafe { wbuf_put(&mut *self.file, bytes, false) } {
+                self.wrote += bytes.len() as ssize_t;
+            }
+            return;
+        }
+        // 无 FILE（理论上的兜底路径）：经 FILE 层的同一条 I/O 单点直写。
         let n = fio_write(self.fd, bytes);
         if n >= 0 {
             self.wrote += n as ssize_t;
@@ -1538,7 +1578,7 @@ pub unsafe extern "C" fn vprintf(fmt: *const c_char, ap: VaList<'_>) -> c_int {
         set_errno(EINVAL);
         return -1;
     }
-    let mut sink = FdSink { fd: 1, wrote: 0 };
+    let mut sink = FdSink { fd: 1, wrote: 0, file: stdout };
     let mut ap = ap;
     match vformat_to_sink(fmt, &mut ap, &mut sink) {
         Ok(n) => n as c_int,
@@ -1566,7 +1606,7 @@ pub unsafe extern "C" fn vfprintf(fp: *mut FILE, fmt: *const c_char, ap: VaList<
         return -1;
     }
     let fd = f.fd;
-    let mut sink = FdSink { fd, wrote: 0 };
+    let mut sink = FdSink { fd, wrote: 0, file: fp };
     let mut ap = ap;
     match vformat_to_sink(fmt, &mut ap, &mut sink) {
         Ok(n) => n as c_int,
@@ -1641,7 +1681,7 @@ pub unsafe extern "C" fn puts(s: *const c_char) -> c_int {
         return EOF;
     }
     let bytes = unsafe { cstr_bytes(s) };
-    let mut sink = FdSink { fd: 1, wrote: 0 };
+    let mut sink = FdSink { fd: 1, wrote: 0, file: stdout };
     sink.write(&bytes).ok();
     sink.write(b"\n").ok();
     if sink.wrote >= 0 {
@@ -1656,11 +1696,16 @@ pub unsafe extern "C" fn puts(s: *const c_char) -> c_int {
 pub unsafe extern "C" fn putchar(c: c_int) -> c_int {
     stdio_init();
     let b = [(c & 0xFF) as u8; 1];
-    match fio_write(1, &b) {
-        n if n >= 0 => c & 0xFF,
-        _ => {
-            EOF
+    // 与 puts/printf 同源：走 stdout 流的写缓冲，否则与 fputs 乱序。
+    if stdout.is_null() {
+        match fio_write(1, &b) {
+            n if n >= 0 => c & 0xFF,
+            _ => EOF,
         }
+    } else if wbuf_put(&mut *stdout, &b, false) {
+        c & 0xFF
+    } else {
+        EOF
     }
 }
 
