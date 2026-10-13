@@ -13,8 +13,8 @@
 //! ## 诚实边界（S09，逐条可复核）
 //!
 //! - **不支持**：花括号展开 `{a,b}`（GNU 扩展，非 POSIX）、`GLOB_TILDE`、`GLOB_BRACE`、
-//!   `GLOB_ONLYDIR`、`GLOB_ALTDIRFUNC`。传入这些位一律 `GLOB_NOSPACE`？——不，**如实返回
-//!   `GLOB_NOMATCH` 且不静默忽略**：见 `glob()` 里的未定义位检查（返回 `GLOB_ABORTED`）。
+//!   `GLOB_ONLYDIR`、`GLOB_ALTDIRFUNC`。传入这些**未定义**位如实报错：置 `ENOTSUP`
+//!   并返回 `GLOB_ABORTED`（见 `glob()` 的未定义位检查），**绝不静默忽略**。
 //! - **`errfunc`**：会被调用（路径 + errno）；返回非 0 则中止并返回 `GLOB_ABORTED`。
 //! - **`GLOB_ERR`**：打开目录失败时中止；未设时忽略该目录（POSIX）。
 //! - `gl_pathv` 的字符串与数组都由 `malloc` 分配，`globfree` 负责释放（POSIX 语义）。

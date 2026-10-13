@@ -1,8 +1,9 @@
 //! 字符分类与转换函数（C ABI）。
 //!
 //! 输入约定（C11）：\`isxxx\` 系列参数须为 \`unsigned char\` 的值或 EOF；负数
-//! （非 EOF）是未定义行为。本实现把参数截断为 u8 处理，并**不**对 EOF 特判
-//! （调用方不应传入 EOF 到这些函数，C 契约）。全部纯逻辑、可移植。
+//! （非 EOF 的负值）是未定义行为。**EOF 是合法实参**（C 标准明写参数须为
+//! `unsigned char` 可表示值**或** EOF）：`isxxx(EOF)` 一律 0，`tolower`/`toupper`(EOF)
+//! 原样返回 EOF——本实现显式处理，不靠 u8 截断的巧合。全部纯逻辑、可移植。
 
 use crate::ctypes::c_int;
 
@@ -110,6 +111,9 @@ pub extern "C" fn isblank(c: c_int) -> c_int {
 /// \`tolower(c)\`：转小写（非字母原样）。
 #[unsafe(no_mangle)]
 pub extern "C" fn tolower(c: c_int) -> c_int {
+    if c == crate::ctypes::EOF {
+        return crate::ctypes::EOF;
+    }
     let c = u(c);
     if c >= b'A' && c <= b'Z' {
         (c + 32) as c_int
@@ -121,10 +125,67 @@ pub extern "C" fn tolower(c: c_int) -> c_int {
 /// \`toupper(c)\`：转大写（非字母原样）。
 #[unsafe(no_mangle)]
 pub extern "C" fn toupper(c: c_int) -> c_int {
+    if c == crate::ctypes::EOF {
+        return crate::ctypes::EOF;
+    }
     let c = u(c);
     if c >= b'a' && c <= b'z' {
         (c - 32) as c_int
     } else {
         c as c_int
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// C 标准**明确允许**把 EOF 传给这些函数（参数须为 `unsigned char` 可表示值**或** EOF），
+    /// 这不是未定义行为：`isxxx(EOF)` 必须为 0，`tolower`/`toupper`(EOF) 必须**原样返回 EOF**。
+    /// 修复前 tolower/toupper 把 EOF 截断成 255 返回。
+    #[test]
+    fn eof_is_a_legal_argument() {
+        const EOF: c_int = -1;
+        assert_eq!(isalpha(EOF), 0);
+        assert_eq!(isdigit(EOF), 0);
+        assert_eq!(isalnum(EOF), 0);
+        assert_eq!(isspace(EOF), 0);
+        assert_eq!(isprint(EOF), 0);
+        assert_eq!(iscntrl(EOF), 0);
+        assert_eq!(ispunct(EOF), 0);
+        assert_eq!(isgraph(EOF), 0);
+        assert_eq!(isxdigit(EOF), 0);
+        assert_eq!(isascii(EOF), 0);
+        assert_eq!(tolower(EOF), EOF, "tolower(EOF) must return EOF unchanged");
+        assert_eq!(toupper(EOF), EOF, "toupper(EOF) must return EOF unchanged");
+    }
+
+    /// 可移植子集：0..=127 的分类与 ASCII 一致；tolower/toupper 对非字母原样返回。
+    #[test]
+    fn ascii_classification_and_case_mapping() {
+        assert_eq!(isalpha(b'a' as c_int), 1);
+        assert_eq!(isalpha(b'Z' as c_int), 1);
+        assert_eq!(isalpha(b'0' as c_int), 0);
+        assert_eq!(isdigit(b'7' as c_int), 1);
+        assert_eq!(isxdigit(b'F' as c_int), 1);
+        assert_eq!(isxdigit(b'g' as c_int), 0);
+        assert_eq!(isspace(0x0b), 1);
+        assert_eq!(isspace(0x0a), 1);
+        assert_eq!(isblank(b' ' as c_int), 1);
+        assert_eq!(isblank(0x0a), 0);
+        assert_eq!(iscntrl(0x1F), 1);
+        assert_eq!(iscntrl(0x7F), 1);
+        assert_eq!(isprint(0x7E), 1);
+        assert_eq!(isprint(0x7F), 0);
+        assert_eq!(isgraph(b' ' as c_int), 0);
+        assert_eq!(ispunct(b'!' as c_int), 1);
+        assert_eq!(tolower(b'A' as c_int), b'a' as c_int);
+        assert_eq!(tolower(b'a' as c_int), b'a' as c_int);
+        assert_eq!(tolower(b'!' as c_int), b'!' as c_int);
+        assert_eq!(toupper(b'z' as c_int), b'Z' as c_int);
+        assert_eq!(toupper(b'0' as c_int), b'0' as c_int);
+        assert_eq!(isascii(127), 1);
+        assert_eq!(isascii(128), 0);
     }
 }

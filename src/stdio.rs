@@ -1226,10 +1226,17 @@ pub unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
 }
 
 /// 内部：把格式化结果写到内存缓冲的 sink（sprintf/snprintf 用）。
+///
+/// **两个计数必须分开**（C11 7.21.6.5）：
+/// - `pos`：**实际写进缓冲**的字节数（受容量约束，用于放结尾 NUL）；
+/// - `total`：**本应写入**的字节数（不受容量约束，就是 `snprintf` 的返回值）。
+///
+/// 此前只有一个 `pos` 兼任两者，于是 `snprintf(buf, 4, "%s", "hello")` 返回 4 而不是 5——
+/// 而标准明确要求返回 5。调用方据此判断"放得下吗"会得到**相反**的答案。
 struct MemSink<'a> {
     buf: &'a mut [u8],
     pos: usize,
-    truncated: bool,
+    total: usize,
 }
 impl FmtSink for MemSink<'_> {
     fn write(&mut self, bytes: &[u8]) -> Result<(), ()> {
@@ -1237,9 +1244,8 @@ impl FmtSink for MemSink<'_> {
             if self.pos < self.buf.len() {
                 self.buf[self.pos] = b;
                 self.pos += 1;
-            } else {
-                self.truncated = true;
             }
+            self.total += 1;
         }
         Ok(())
     }
@@ -1247,13 +1253,12 @@ impl FmtSink for MemSink<'_> {
         if self.pos < self.buf.len() {
             self.buf[self.pos] = b;
             self.pos += 1;
-        } else {
-            self.truncated = true;
         }
+        self.total += 1;
         Ok(())
     }
     fn count(&self) -> usize {
-        self.pos
+        self.total
     }
 }
 // ---------- printf 核心（经 VaList 读取可变参数） ----------
@@ -1450,7 +1455,7 @@ fn vformat_mem(
     let mut mem = MemSink {
         buf: unsafe { core::slice::from_raw_parts_mut(buf, cap) },
         pos: 0,
-        truncated: false,
+        total: 0,
     };
     let fmt_bytes = unsafe { cstr_bytes(fmt) };
     parse_and_format(&fmt_bytes, &mut mem, |spec, sink| {
@@ -1458,11 +1463,12 @@ fn vformat_mem(
         render_spec(spec, before, ap, sink)?;
         Ok(())
     })?;
-    // NUL 终止。
-    if mem.pos < cap {
-        unsafe { *buf.add(mem.pos) = 0; }
-    }
-    Ok(mem.pos as ssize_t)
+    // NUL 终止：C 要求**恒**终止（cap>=1 已由上面的分支保证）。
+    // 缓冲被写满时 NUL 落在最后一个字节（覆盖最后一个字符）——这正是标准规定的形态。
+    let end = mem.pos.min(cap - 1);
+    unsafe { *buf.add(end) = 0; }
+    // 返回值是「本应写入的长度」，不是实际写入的长度。
+    Ok(mem.total as ssize_t)
 }
 
 /// 只计数不输出的 sink。

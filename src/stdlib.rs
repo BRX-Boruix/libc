@@ -899,6 +899,12 @@ fn fast_decimal(
         Some(q as f64)
     }
 }
+/// 该字节是不是十六进制数字（用于判断 `0x` 前缀后面是否真有数字）。
+#[inline]
+fn is_hex_digit(c: crate::ctypes::c_char) -> bool {
+    matches!(c as u8, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+}
+
 /// 通用有符号解析。
 unsafe fn strtox<T>(
     s: *const crate::ctypes::c_char,
@@ -934,7 +940,13 @@ unsafe fn strtox<T>(
                 base = 10;
             }
         }
-        if base == 16 && *p == b'0' as crate::ctypes::c_char && (*(p.add(1)) | 0x20) == b'x' as crate::ctypes::c_char {
+        // 只有**后面确实跟着十六进制数字**时才消费 "0x"（C11 7.22.1.4 的最长有效
+        // 主题序列："0x" 里没有数字，主题序列只能是 "0"，endptr 必须停在 'x'）。
+        if base == 16
+            && *p == b'0' as crate::ctypes::c_char
+            && (*(p.add(1)) | 0x20) == b'x' as crate::ctypes::c_char
+            && is_hex_digit(*p.add(2))
+        {
             p = p.add(2);
         }
         let mut acc: i64 = 0;
@@ -1011,7 +1023,13 @@ unsafe fn strtoux<T>(
                 base = 10;
             }
         }
-        if base == 16 && *p == b'0' as crate::ctypes::c_char && (*(p.add(1)) | 0x20) == b'x' as crate::ctypes::c_char {
+        // 只有**后面确实跟着十六进制数字**时才消费 "0x"（C11 7.22.1.4 的最长有效
+        // 主题序列："0x" 里没有数字，主题序列只能是 "0"，endptr 必须停在 'x'）。
+        if base == 16
+            && *p == b'0' as crate::ctypes::c_char
+            && (*(p.add(1)) | 0x20) == b'x' as crate::ctypes::c_char
+            && is_hex_digit(*p.add(2))
+        {
             p = p.add(2);
         }
         let mut acc: u64 = 0;
@@ -1040,11 +1058,14 @@ unsafe fn strtoux<T>(
             }
             return 0;
         }
-        if overflow {
-            set_errno(ERANGE);
-        }
         if !endptr.is_null() {
             *endptr = p;
+        }
+        if overflow {
+            // C11 7.22.1.4：值超出可表示范围时**返回 ULONG_MAX** 并置 ERANGE，
+            // 与符号无关（此前对饱和值再取负，负向溢出会返回 1）。
+            set_errno(ERANGE);
+            return max;
         }
         if neg {
             acc.wrapping_neg()

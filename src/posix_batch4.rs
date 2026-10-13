@@ -64,6 +64,14 @@ pub const FNM_FILE_NAME: c_int = FNM_PATHNAME;
 /// 本实现认得的全部旗标位（`FNM_FILE_NAME` 与 `FNM_PATHNAME` 同位，故不另计）。
 const FNM_KNOWN: c_int = FNM_PATHNAME | FNM_NOESCAPE | FNM_PERIOD | FNM_LEADING_DIR | FNM_CASEFOLD;
 
+/// `si` 处是不是**前导句点**：串的首字符，或（FNM_PATHNAME 下）紧跟 `/` 之后的句点。
+/// POSIX 7.3.2 规定 `*`/`?`/`[...]` 都不得匹配前导句点。
+#[inline]
+fn lead_period(s: &[u8], si: usize, pathname: bool) -> bool {
+    si < s.len() && s[si] == b'.' && (si == 0 || (pathname && s[si - 1] == b'/'))
+}
+
+
 /// 在 `s` 的 `[i..]` 上匹配 `p` 的 `[j..]`（递归回溯）。
 ///
 /// 为什么用递归而不是手写状态机：模式语言的 `*`/`?`/`[...]` 组合只有回溯最直观，
@@ -75,7 +83,7 @@ fn fnm(p: &[u8], s: &[u8], flags: c_int) -> bool {
     let period = flags & FNM_PERIOD != 0;
     let casefold = flags & FNM_CASEFOLD != 0;
     let leading_dir = flags & FNM_LEADING_DIR != 0;
-    fnm_at(p, s, flags, pathname, noescape, period, casefold, leading_dir, true)
+    fnm_at(p, s, flags, pathname, noescape, period, casefold, leading_dir)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -88,7 +96,6 @@ fn fnm_at(
     period: bool,
     casefold: bool,
     leading_dir: bool,
-    mut at_start: bool,
 ) -> bool {
     // ASCII 大小写折叠（FNM_CASEFOLD）；无 locale 数据，故只折 ASCII。
     let fc = |b: u8| if casefold { b.to_ascii_lowercase() } else { b };
@@ -111,8 +118,10 @@ fn fnm_at(
                     while k < p.len() && p[k] == b'*' {
                         k += 1;
                     }
-                    // FNM_PERIOD：'*' 不匹配开头的 '.'（除非模式本身以 '.' 开头）。
-                    if period && at_start && si == 0 && !s.is_empty() && s[0] == b'.' {
+                    // FNM_PERIOD：'*' 不得匹配前导句点——**立即失败**，不退化成"匹配 0 个字符"。
+                    // 后者会让 "*.c" 匹配 ".hidden.c"（星号退到 0 长度、再由模式里的 '.' 去配），
+                    // 而 shell/glibc 的语义是"前导句点必须由**同一位置**的显式句点匹配"。
+                    if period && lead_period(s, si, pathname) {
                         return false;
                     }
                     // FNM_PATHNAME：'*' 不跨 '/'。
@@ -128,13 +137,18 @@ fn fnm_at(
                     if pathname && s[si] == b'/' {
                         return false;
                     }
-                    matched_len = Some(1);
+                    if !(period && lead_period(s, si, pathname)) {
+                        matched_len = Some(1);
+                    }
                 }
                 b'[' => {
                     if pathname && s[si] == b'/' {
                         return false;
                     }
-                    if let Some((consumed, hit)) = match_bracket(&p[pi..], s[si], noescape, casefold) {
+                    if period && lead_period(s, si, pathname) {
+                        // FNM_PERIOD：括号表达式不得匹配前导句点（模式里显式写 '.' 才行）。
+                        matched_len = None;
+                    } else if let Some((consumed, hit)) = match_bracket(&p[pi..], s[si], noescape, casefold) {
                         if hit {
                             matched_len = Some(consumed);
                         } else {
@@ -165,7 +179,6 @@ fn fnm_at(
             Some(n) => {
                 pi += n;
                 si += 1;
-                at_start = false;
             }
             None => match star {
                 Some((sp, ss)) => {
@@ -176,8 +189,7 @@ fn fnm_at(
                     star = Some((sp, ss + 1));
                     pi = sp;
                     si = ss + 1;
-                    at_start = false;
-                }
+                    }
                 None => return false,
             },
         }
@@ -242,10 +254,12 @@ fn match_bracket(p: &[u8], c: u8, noescape: bool, casefold: bool) -> Option<(usi
 /// `fnmatch(pattern, string, flags)`：shell 风格通配匹配。匹配返回 0，不匹配返回 `FNM_NOMATCH`。
 ///
 /// 支持：`*`、`?`、`[...]`（含 `!`/`^` 取反与 `a-z` 范围）、`\\` 转义；
-/// 标志：`FNM_PATHNAME`（`*`/`?`/`[]` 不跨 `/`）、`FNM_NOESCAPE`、`FNM_PERIOD`（开头 `.` 不被 `*` 匹配）。
+/// 标志：`FNM_PATHNAME`（`*`/`?`/`[]` 不跨 `/`）、`FNM_NOESCAPE`、`FNM_PERIOD`、
+/// `FNM_LEADING_DIR`、`FNM_CASEFOLD`（GNU 扩展，**已支持**：ASCII 折叠——本系统无 locale 数据，非 ASCII 不折）。
 ///
-/// **诚实边界**：`FNM_CASEFOLD`（GNU 扩展）**不支持**——传入未定义位**不静默忽略**，
-/// 一律 `EINVAL` + 返回 `FNM_NOMATCH`。
+/// **诚实边界**：只有**未定义**的旗标位才 `EINVAL` + `FNM_NOMATCH`（不静默忽略）。
+/// `FNM_PERIOD` 按 POSIX 7.3.2：前导句点（串首字符，或 FNM_PATHNAME 下紧跟 `/` 之后的句点）
+/// 必须由**同一位置**的显式句点匹配——`*`/`?`/`[...]` 都不得匹配它。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fnmatch(pattern: *const c_char, string: *const c_char, flags: c_int) -> c_int {
     if pattern.is_null() || string.is_null() {

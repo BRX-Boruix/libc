@@ -116,6 +116,10 @@ pub mod unistd;
 pub mod wchar;
 pub mod wcwidth;
 
+// 全库转译审查的**符合性测试组**（按标准条款组织，只编进测试目标）。
+#[cfg(test)]
+mod conformance;
+
 /// 初始化 libc（标准流等）。幂等，可安全多次调用。
 #[unsafe(no_mangle)]
 pub extern "C" fn libc_initialize() {
