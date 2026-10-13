@@ -43,7 +43,14 @@ pub unsafe extern "C" fn gets(s: *mut c_char) -> *mut c_char {
 /// `confstr(name, buf, len)`：取配置定义字符串（POSIX `<unistd.h>`）。
 ///
 /// 本系统只有 C locale、且是单一系统的 sysroot，故可定义的项有限。已定义：
-/// - `_CS_PATH`(1)：命令搜索路径 `/programs:/bin`（与 shell/init 的约定一致）；
+/// - `_CS_PATH`(1)：命令搜索路径。**取值必须与 shell 的 `DEFAULT_PATH` 一致**——
+///   真值在 `shell/src/env.rs`（`/programs:/volumes/BORUIX_DATA/3p`）。
+///
+///   **诚实边界（S13）**：这是**两处真值源**（libc 的 `confstr` 与 shell 的 `env.rs`），
+///   违反了单点定义。此处只硬编码一份**已核对**的副本，并由
+///   `tools/checks/dist/confstr_path_agrees.py` 门禁保证两者不漂移。
+///   （教训：本项初版写的是 `/programs:/bin` 并声称「与 shell/init 的约定一致」——
+///   那句话**是假的**，值是编的。项目所有者质疑 `ttyname` 的同类问题后全面复查时抓出。）
 /// - `_CS_GNU_LIBC_VERSION`(2)：`boruix 0.1.0`——**如实标注是 boruix 而非 glibc**，
 ///   不给一个会被误认为真 glibc 的字符串。
 ///
@@ -52,7 +59,8 @@ pub unsafe extern "C" fn gets(s: *mut c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn confstr(name: c_int, buf: *mut c_char, len: usize) -> usize {
     let v: &[u8] = match name {
-        1 => b"/programs:/bin\0",
+        // 与 shell/src/env.rs 的 DEFAULT_PATH 逐字节一致（有门禁核对）。
+        1 => b"/programs:/volumes/BORUIX_DATA/3p\0",
         2 => b"boruix 0.1.0\0",
         _ => {
             crate::errno::set_errno(crate::errno::EINVAL);
@@ -71,8 +79,17 @@ pub unsafe extern "C" fn confstr(name: c_int, buf: *mut c_char, len: usize) -> u
 
 /// `nl_langinfo(item)`：取当前 locale 的本地化信息（POSIX `<langinfo.h>`）。
 ///
-/// 本系统只有 C locale（无 locale 数据库，`setlocale` 已判不支持）⇒ 返回 C locale 的
-/// **规范值**（POSIX 明确规定），不是编造。
+/// 本系统只有 C locale（无 locale 数据库，`setlocale` 已判不支持）⇒ 返回 C locale 的值。
+///
+/// **诚实边界（S09）**：**POSIX 并未把 C locale 的每一项都钉死**——`CODESET` 的实现取值就是
+/// 各系统自定（glibc 用 `ANSI_X3.4-1968`、FreeBSD 用 `US-ASCII`）。故本文件里的取值是
+/// **本实现的 C locale 取值**，逐项如实，但**不声称**与 glibc/BSD 逐字节相同：
+/// 日期/时间格式与 AM/PM、星期与月份名（含缩写）、`RADIXCHAR`/`THOUSEP`/`YESEXPR`/`NOEXPR`
+/// 按 POSIX 的 C locale 定义；**`CODESET` 取 `ASCII`**——它如实描述本系统（纯 ASCII、
+/// 无字符集子系统），但**不是** glibc/BSD 的那个名字。
+///
+/// （本项初版此处写的是「**规范值**（POSIX **明确规定**）」——那是**过度声明**；
+/// 项目所有者质疑 `ttyname` 的同类问题后全面复查时订正。）
 ///
 /// **编号来源是实测**：从 `envfiles/msys2/.../include/langinfo.h` 的枚举逐项解析得到
 /// （0=CODESET、1..6=D_T_FMT..PM_STR、7..13=DAY_1..7、14..20=ABDAY、21..32=MON、

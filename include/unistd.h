@@ -37,6 +37,10 @@ int isatty(int fd);
 /* confstr：取配置定义字符串（POSIX）。返回值=所需长度（含 NUL）；name 无值时返回 0 置 EINVAL。
  * 已定义 _CS_PATH(1) 与 _CS_GNU_LIBC_VERSION(2)——后者如实标注是 boruix 而非 glibc。 */
 size_t confstr(int name, char *buf, size_t len);
+/* _CS_PATH 的取值必须与 shell/src/env.rs 的 DEFAULT_PATH 一致（两处真值源，违反 S13 单点；
+ * 由 tools/checks/dist/confstr_path_agrees.py 门禁保证不漂移）。 */
+#define _CS_PATH 1
+#define _CS_GNU_LIBC_VERSION 2
 
 /* getgroups：查询调用进程的补充组集合（POSIX）。
  * size == 0（list 可为 NULL）⇒ 只返回所需条数；否则写入至多 size 个并返回实际条数；
