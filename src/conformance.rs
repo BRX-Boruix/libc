@@ -743,3 +743,159 @@ fn strcoll_and_strxfrm_in_c_locale() {
         assert_eq!(dst[..4], [b'a' as i8, b'b' as i8, b'c' as i8, 0]);
     }
 }
+
+
+// ===========================================================================
+// getopt / strptime
+// ===========================================================================
+
+/// getopt 的状态（optind/optarg/optopt）按 POSIX 是**进程级全局**，故本组必须互斥。
+static GETOPT_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+unsafe fn cbytes(p: *const c_char) -> alloc::vec::Vec<u8> {
+    let mut v = alloc::vec::Vec::new();
+    if p.is_null() {
+        return v;
+    }
+    let mut q = p as *const u8;
+    while unsafe { *q } != 0 {
+        v.push(unsafe { *q });
+        q = unsafe { q.add(1) };
+    }
+    v
+}
+
+/// 用一组字节串构造 argv（返回的 Vec 必须活到解析结束）。
+fn make_argv(items: &[&[u8]]) -> (alloc::vec::Vec<alloc::vec::Vec<u8>>, alloc::vec::Vec<*mut c_char>) {
+    let mut bufs: alloc::vec::Vec<alloc::vec::Vec<u8>> = items
+        .iter()
+        .map(|s| {
+            let mut v = s.to_vec();
+            v.push(0);
+            v
+        })
+        .collect();
+    let ptrs = bufs
+        .iter_mut()
+        .map(|v| v.as_mut_ptr() as *mut c_char)
+        .collect();
+    (bufs, ptrs)
+}
+
+/// POSIX getopt：选项字符、optarg、optind、未知选项、缺参数、双横线终止。
+#[test]
+fn getopt_posix_semantics() {
+    let _g = GETOPT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        let (_b, mut argv) = make_argv(&[b"prog", b"-a", b"-b", b"value", b"-c"]);
+        let argc = argv.len() as c_int;
+        let os = b"ab:c\0";
+        crate::posix_batch4::optind = 1;
+        let f = |argv: &mut alloc::vec::Vec<*mut c_char>| {
+            crate::posix_batch4::getopt(argc, argv.as_ptr(), os.as_ptr() as *const c_char)
+        };
+        assert_eq!(f(&mut argv), b'a' as c_int);
+        assert_eq!(f(&mut argv), b'b' as c_int);
+        let oa = crate::posix_batch4::optarg;
+        assert_eq!(cbytes(oa), b"value");
+        assert_eq!(f(&mut argv), b'c' as c_int);
+        assert_eq!(f(&mut argv), -1, "exhausted options return -1");
+        let ind = crate::posix_batch4::optind;
+        assert_eq!(ind, 5);
+    }
+}
+
+/// 同一 argv 项内连写（-ab value）与紧跟形式（-bvalue）。
+#[test]
+fn getopt_clustered_and_attached() {
+    let _g = GETOPT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        let os = b"ab:c\0";
+        let (_b1, mut argv1) = make_argv(&[b"prog", b"-ab", b"value"]);
+        crate::posix_batch4::optind = 1;
+        assert_eq!(crate::posix_batch4::getopt(3, argv1.as_ptr(), os.as_ptr() as *const c_char), b'a' as c_int);
+        assert_eq!(crate::posix_batch4::getopt(3, argv1.as_ptr(), os.as_ptr() as *const c_char), b'b' as c_int);
+        let oa = crate::posix_batch4::optarg;
+        assert_eq!(cbytes(oa), b"value");
+
+        let (_b2, mut argv2) = make_argv(&[b"prog", b"-bvalue"]);
+        crate::posix_batch4::optind = 1;
+        assert_eq!(crate::posix_batch4::getopt(2, argv2.as_ptr(), os.as_ptr() as *const c_char), b'b' as c_int);
+        let oa = crate::posix_batch4::optarg;
+        assert_eq!(cbytes(oa), b"value");
+    }
+}
+
+/// 未知选项返回 '?' 并置 optopt；缺参数返回 '?'（optstring 不以 ':' 开头）。
+#[test]
+fn getopt_unknown_and_missing_argument() {
+    let _g = GETOPT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        let os = b"ab:c\0";
+        let (_b1, mut argv1) = make_argv(&[b"prog", b"-z"]);
+        crate::posix_batch4::optind = 1;
+        crate::posix_batch4::optopt = 0;
+        assert_eq!(crate::posix_batch4::getopt(2, argv1.as_ptr(), os.as_ptr() as *const c_char), b'?' as c_int);
+        let oo = crate::posix_batch4::optopt;
+        assert_eq!(oo, b'z' as c_int);
+
+        let (_b2, mut argv2) = make_argv(&[b"prog", b"-b"]);
+        crate::posix_batch4::optind = 1;
+        crate::posix_batch4::optopt = 0;
+        assert_eq!(crate::posix_batch4::getopt(2, argv2.as_ptr(), os.as_ptr() as *const c_char), b'?' as c_int);
+        let oo2 = crate::posix_batch4::optopt;
+        assert_eq!(oo2, b'b' as c_int);
+
+        let os2 = b":ab:c\0";
+        let (_b3, mut argv3) = make_argv(&[b"prog", b"-b"]);
+        crate::posix_batch4::optind = 1;
+        assert_eq!(crate::posix_batch4::getopt(2, argv3.as_ptr(), os2.as_ptr() as *const c_char), b':' as c_int);
+    }
+}
+
+/// 双横线终止选项解析，且 optind 指向其后的第一个参数。
+#[test]
+fn getopt_double_dash_terminates() {
+    let _g = GETOPT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        let os = b"a\0";
+        let (_b, mut argv) = make_argv(&[b"prog", b"--", b"-a"]);
+        crate::posix_batch4::optind = 1;
+        assert_eq!(crate::posix_batch4::getopt(3, argv.as_ptr(), os.as_ptr() as *const c_char), -1);
+        let ind2 = crate::posix_batch4::optind;
+        assert_eq!(ind2, 2, "optind must point past the terminator");
+    }
+}
+
+/// strptime：字段解析、endptr、两位年份规则、%p 与 %I 组合、失败返回 NULL。
+#[test]
+fn strptime_conversions() {
+    unsafe {
+        let mut tm = crate::time::Tm {
+            tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 1, tm_mon: 0, tm_year: 70,
+            tm_wday: 0, tm_yday: 0, tm_isdst: 0,
+        };
+        let src = b"2001-09-09 01:46:40 rest\0";
+        let fmt = b"%Y-%m-%d %H:%M:%S\0";
+        let end = crate::posix_batch4::strptime(cs(src), cs(fmt), &mut tm);
+        assert!(!end.is_null());
+        assert_eq!((tm.tm_year, tm.tm_mon, tm.tm_mday), (101, 8, 9));
+        assert_eq!((tm.tm_hour, tm.tm_min, tm.tm_sec), (1, 46, 40));
+        assert_eq!(*end, b' ' as c_char, "endptr must point at the first unprocessed char");
+
+        let mut t68 = tm;
+        assert!(!crate::posix_batch4::strptime(cs(b"68\0"), cs(b"%y\0"), &mut t68).is_null());
+        assert_eq!(t68.tm_year, 168);
+        let mut t69 = tm;
+        assert!(!crate::posix_batch4::strptime(cs(b"69\0"), cs(b"%y\0"), &mut t69).is_null());
+        assert_eq!(t69.tm_year, 69);
+
+        let mut tp = tm;
+        let e = crate::posix_batch4::strptime(cs(b"01:30 PM\0"), cs(b"%I:%M %p\0"), &mut tp);
+        assert!(!e.is_null());
+        assert_eq!(tp.tm_hour, 13);
+        assert_eq!(tp.tm_min, 30);
+
+        assert!(crate::posix_batch4::strptime(cs(b"nope\0"), cs(b"%Y\0"), &mut tm).is_null());
+    }
+}
