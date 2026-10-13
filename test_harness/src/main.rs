@@ -1,6 +1,6 @@
 //! libc 纯逻辑模块的 host 单测（不链接 libsys/裸机运行时）。
 //!
-//! 通过 \`#[path]\` 直接 include libc 的纯逻辑源文件（stdio_format、float、
+//! 通过 `#[path]` 直接 include libc 的纯逻辑源文件（stdio_format、float、
 //! string、ctype、stdlib），在 host std 环境下做对抗性单测（S23/S30/S31）。
 //! 系统调用相关函数（malloc/printf 输出/文件 IO）由内核 shell 验证层负责
 //! 端到端验收。
