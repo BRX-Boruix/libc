@@ -1138,3 +1138,52 @@ fn printf_float_specifiers() {
     assert_eq!(float_fmt(b"%+f", 1.0), b"+1.000000");
     assert_eq!(float_fmt(b"% f", 1.0), b" 1.000000");
 }
+
+
+// ===========================================================================
+// locale.h / wcwidth
+// ===========================================================================
+
+/// POSIX：setlocale 返回的字符串**可以再喂回** setlocale 并得到同一 locale。
+/// 这条正是旧值 "C.UTF-8" 栽的地方——本实现只认 "C"/"POSIX"，旧返回值自己不被接受。
+#[test]
+fn setlocale_round_trip() {
+    unsafe {
+        let cur = crate::locale::setlocale(0, core::ptr::null());
+        assert!(!cur.is_null());
+        let cur_b = cbytes(cur);
+        let again = crate::locale::setlocale(0, cur);
+        assert!(!again.is_null(), "the returned name must be accepted again");
+        assert_eq!(cbytes(again), cur_b);
+
+        assert!(!crate::locale::setlocale(0, cs(b"C\0")).is_null());
+        assert!(!crate::locale::setlocale(0, cs(b"POSIX\0")).is_null());
+        assert!(crate::locale::setlocale(0, cs(b"zh_CN.UTF-8\0")).is_null());
+    }
+}
+
+/// localeconv：C locale 的定点与分隔符（C11 7.11.2.1）。
+#[test]
+fn localeconv_c_locale() {
+    unsafe {
+        let lc = crate::locale::localeconv();
+        assert!(!lc.is_null());
+        assert_eq!(cbytes((*lc).decimal_point), b".");
+        assert_eq!(cbytes((*lc).thousands_sep), b"");
+        assert_eq!(cbytes((*lc).grouping), b"");
+    }
+}
+
+/// wcwidth：可打印 ASCII 1 列、东亚宽 2 列、组合符号 0 列、C0 控制不可打印 -1、NUL 0。
+#[test]
+fn wcwidth_classes() {
+    unsafe {
+        assert_eq!(crate::wcwidth::wcwidth(b'A' as wchar_t), 1);
+        assert_eq!(crate::wcwidth::wcwidth(0x4E2D), 2, "CJK ideograph is double width");
+        assert_eq!(crate::wcwidth::wcwidth(0x0300), 0, "combining grave is zero width");
+        assert_eq!(crate::wcwidth::wcwidth(0), 0, "NUL is zero width");
+        assert_eq!(crate::wcwidth::wcwidth(0x1F), -1, "C0 control is not printable");
+        let s = [b'A' as wchar_t, 0x4E2D, 0];
+        assert_eq!(crate::wcwidth::wcswidth(s.as_ptr(), 2), 3);
+    }
+}

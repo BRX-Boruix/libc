@@ -7,11 +7,14 @@
 
 use crate::ctypes::c_char;
 
-/// 当前 locale 名（恒为 C.UTF-8；静态存储，POSIX 允许返回静态指针）。
-static C_LOCALE: [c_char; 8] = [
-    b'C' as c_char, b'.' as c_char, b'U' as c_char, b'T' as c_char, b'F' as c_char, b'-' as c_char,
-    b'8' as c_char, 0,
-];
+/// 当前 locale 名（恒为 "C"；静态存储，POSIX 允许返回静态指针）。
+///
+/// **为什么不是 "C.UTF-8"**（此前是，本轮订正）：POSIX 要求 setlocale 返回的字符串
+/// **可以再喂回 setlocale** 并得到同一 locale。旧值 "C.UTF-8" 恰恰不被本实现接受
+/// （只认 "C"/"POSIX"）⇒ `setlocale(LC_ALL, setlocale(LC_ALL, NULL))` 会返回 NULL。
+/// 而且本系统的多字节编码是**逐字节**（见 wchar.rs 的诚实说明），不是 UTF-8——
+/// 叫 "C.UTF-8" 本身也不准确。返回 "C" 同时满足可回喂与如实。
+static C_LOCALE: [c_char; 2] = [b'C' as c_char, 0];
 
 /// struct lconv（只含有数据来源的字段；与 <locale.h> 逐字段一致）。
 #[repr(C)]
