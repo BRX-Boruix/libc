@@ -37,11 +37,16 @@ pub static __boruix_nan: f64 = f64::from_bits(0x7FF8_0000_0000_0000);
 pub static __boruix_inf: f64 = f64::from_bits(0x7FF0_0000_0000_0000);
 
 /// `<math.h>` 的 `FP_*` 取值（与头文件**必须一致**）。
-const FP_NAN: c_int = 0;
-const FP_INFINITE: c_int = 1;
-const FP_ZERO: c_int = 2;
-const FP_SUBNORMAL: c_int = 3;
-const FP_NORMAL: c_int = 4;
+///
+/// **必须是 `pub`**：它们与头文件的 `#define` 是同一份契约，而
+/// tools/checks/dist/abi_mirrors_agree.py 的「C 头常量」一类只比 `pub const` ——
+/// 此前它们是私有的，于是这条"必须一致"**没有任何东西在核对**（本轮把门禁扩到非 pub
+/// 常量，同时把它们改成 pub，双保险）。
+pub const FP_NAN: c_int = 0;
+pub const FP_INFINITE: c_int = 1;
+pub const FP_ZERO: c_int = 2;
+pub const FP_SUBNORMAL: c_int = 3;
+pub const FP_NORMAL: c_int = 4;
 
 /// `fpclassify(x)`：返回 `FP_*` 分类码。
 #[unsafe(no_mangle)]

@@ -678,6 +678,7 @@ use crate::ctypes::wchar_t;
 /// 下面钉住的是 POSIX 对**返回值与控制流**的规定，与编码选择无关。
 #[test]
 fn wchar_conversion_contract() {
+    let _g = ERRNO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         let mut wc: wchar_t = 0;
         let np: *mut crate::ctypes::c_void = core::ptr::null_mut();
@@ -710,6 +711,7 @@ fn wchar_conversion_contract() {
 /// len == 0 时**不得写入任何元素**——连结尾 NUL 也不行（调用方只给了 0 个位置）。
 #[test]
 fn wchar_zero_length_writes_nothing() {
+    let _g = ERRNO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         let np: *mut crate::ctypes::c_void = core::ptr::null_mut();
         // 空源 + len==0：转换出 0 个宽字符，且**一个元素都不许写**（连结尾 NUL 也不行）。
@@ -1185,5 +1187,491 @@ fn wcwidth_classes() {
         assert_eq!(crate::wcwidth::wcwidth(0x1F), -1, "C0 control is not printable");
         let s = [b'A' as wchar_t, 0x4E2D, 0];
         assert_eq!(crate::wcwidth::wcswidth(s.as_ptr(), 2), 3);
+    }
+}
+
+
+// ===========================================================================
+// 浮点：十进制往返与 strtod 的严格舍入声明
+// ===========================================================================
+
+unsafe fn parse_f64(s: &[u8]) -> f64 {
+    let mut buf = s.to_vec();
+    buf.push(0);
+    crate::stdlib::strtod(buf.as_ptr() as *const c_char, core::ptr::null_mut())
+}
+
+/// **往返**：C11 5.2.4.2.2 规定 double 的 DECIMAL_DIG = 17，即用 17 位有效数字打印后
+/// 再解析回来必须**逐位相同**。这一条同时压住格式化（float/float_bigint）与解析
+/// （strtod_exact）两侧——任何一边的舍入有偏差都会在这里现形。
+#[test]
+fn float_decimal_round_trip() {
+    let cases: &[f64] = &[
+        0.0, 1.0, -1.0, 0.1, 1.0 / 3.0, 2.0 / 3.0,
+        1e-300, 1e300, 1e20, 1e-20, 1e17, 123456789.123456789,
+        f64::MIN_POSITIVE, 5e-324, 2.2250738585072011e-308, 1.7976931348623157e308,
+        9007199254740992.0, 3.141592653589793, -2.718281828459045,
+    ];
+    for &v in cases {
+        let s = float_fmt(b"%.16e", v);
+        let back = unsafe { parse_f64(&s) };
+        assert_eq!(
+            back.to_bits(),
+            v.to_bits(),
+            "round trip failed: {} -> {}",
+            v,
+            core::str::from_utf8(&s).unwrap_or("?")
+        );
+    }
+}
+
+/// strtod 的**严格正确舍入**声明（模块文档明写）：边界与半值必须按 round-half-even 落位。
+#[test]
+fn strtod_strict_rounding() {
+    let _g = ERRNO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        // 0.1 在二进制里是无限循环小数：必须落到最近的双精度值。
+        assert_eq!(parse_f64(b"0.1").to_bits(), 0.1f64.to_bits());
+        // 2^53+1 不可表示 ⇒ 落到 2^53（round-half-even）。
+        assert_eq!(parse_f64(b"9007199254740993"), 9007199254740992.0);
+        // 模块文档点名的边界：**最大次正规数**（不是最小正规数）。这是 strtod 的经典难题
+        // （Gay 的测试向量）：该串恰好落在最大次正规与最小正规之间，正确答案是**向下**
+        // 落到最大次正规 0x000FFFFFFFFFFFFF。
+        assert_eq!(
+            parse_f64(b"2.2250738585072011e-308").to_bits(),
+            0x000F_FFFF_FFFF_FFFF,
+            "must round DOWN to the largest subnormal, not up to MIN_POSITIVE"
+        );
+        // 下溢到 0 与上溢到 inf，都置 ERANGE。
+        crate::errno::set_errno(0);
+        assert_eq!(parse_f64(b"1e-400"), 0.0);
+        assert_eq!(crate::errno::errno(), crate::errno::ERANGE);
+        crate::errno::set_errno(0);
+        assert!(parse_f64(b"1e309").is_infinite());
+        assert_eq!(crate::errno::errno(), crate::errno::ERANGE);
+        // 最大有限数恰好可表示 ⇒ 不得置 ERANGE。
+        crate::errno::set_errno(0);
+        assert_eq!(parse_f64(b"1.7976931348623157e308"), f64::MAX);
+        assert_eq!(crate::errno::errno(), 0);
+    }
+}
+
+
+// ===========================================================================
+// 覆盖面补齐：纯逻辑族的剩余导出（见 libc/tools/audit_conformance_coverage.py）
+// ===========================================================================
+
+/// 类型分类宏族（math_classify）：C11 7.12.3 的分类与符号位。
+#[test]
+fn math_classify_macros() {
+    use crate::math_classify::*;
+    assert_eq!(fpclassify(f64::NAN), FP_NAN);
+    assert_eq!(fpclassify(f64::INFINITY), FP_INFINITE);
+    assert_eq!(fpclassify(0.0), FP_ZERO);
+    assert_eq!(fpclassify(1e-320), FP_SUBNORMAL);
+    assert_eq!(fpclassify(1.0), FP_NORMAL);
+    assert_eq!(isnan(f64::NAN), 1);
+    assert_eq!(isnan(1.0), 0);
+    // POSIX 只要求「非 0」；本实现与 glibc 一样**带上符号**（+1 / -1），见 isinf 的文档。
+    assert_eq!(isinf(f64::INFINITY), 1);
+    assert_eq!(isinf(f64::NEG_INFINITY), -1);
+    assert_eq!(isinf(1.0), 0);
+    assert_eq!(isfinite(1.0), 1);
+    assert_eq!(isfinite(f64::NAN), 0);
+    assert_eq!(isnormal(1.0), 1);
+    assert_eq!(isnormal(0.0), 0);
+    assert_eq!(isnormal(1e-320), 0);
+    assert_eq!(signbit(-0.0), 1);
+    assert_eq!(signbit(0.0), 0);
+    assert_eq!(signbit(-1.0), 1);
+}
+
+/// frexp/ldexp：C11 7.12.6.3/7.12.6.6——frexp 拆成 [0.5,1) × 2^e，ldexp 反向。
+#[test]
+fn frexp_and_ldexp() {
+    unsafe {
+        let mut e: c_int = 0;
+        assert_eq!(crate::math_decomp::frexp(0.0, &mut e), 0.0);
+        let m = crate::math_decomp::frexp(8.0, &mut e);
+        assert_eq!(m, 0.5);
+        assert_eq!(e, 4, "8 = 0.5 x 2^4");
+        assert_eq!(crate::math_decomp::ldexp(0.5, 4), 8.0);
+        assert_eq!(crate::math_decomp::ldexp(1.0, 0), 1.0);
+        // 往返
+        let x = 1234.5678;
+        let m2 = crate::math_decomp::frexp(x, &mut e);
+        assert_eq!(crate::math_decomp::ldexp(m2, e), x);
+    }
+}
+
+/// 宽字符串族（wchar.h）：长度/比较/拷贝/拼接/查找。
+#[test]
+fn wide_string_ops() {
+    unsafe {
+        let a = [b'h' as wchar_t, b'i' as wchar_t, 0];
+        let b = [b'h' as wchar_t, b'o' as wchar_t, 0];
+        assert_eq!(crate::wchar::wcslen(a.as_ptr()), 2);
+        assert!(crate::wchar::wcscmp(a.as_ptr(), b.as_ptr()) < 0);
+        assert_eq!(crate::wchar::wcscmp(a.as_ptr(), a.as_ptr()), 0);
+
+        let mut dst = [0 as wchar_t; 8];
+        crate::wchar::wcscpy(dst.as_mut_ptr(), a.as_ptr());
+        assert_eq!(&dst[..3], &[b'h' as wchar_t, b'i' as wchar_t, 0]);
+
+        crate::wchar::wcscat(dst.as_mut_ptr(), b.as_ptr());
+        assert_eq!(&dst[..5], &[b'h' as wchar_t, b'i' as wchar_t, b'h' as wchar_t, b'o' as wchar_t, 0]);
+
+        // wcsncpy：不足补 NUL（C11 7.29.4.2.2）。
+        let mut pad = [0x7FFF as wchar_t; 5];
+        crate::wchar::wcsncpy(pad.as_mut_ptr(), a.as_ptr(), 5);
+        assert_eq!(pad, [b'h' as wchar_t, b'i' as wchar_t, 0, 0, 0]);
+
+        let hit = crate::wchar::wcschr(a.as_ptr(), b'i' as wchar_t);
+        // 注意元素宽度：wchar_t 是 4 字节，第 1 个元素在 base+4（不是 base+1）。
+        assert_eq!(hit, a.as_ptr().add(1) as *mut wchar_t);
+        assert!(crate::wchar::wcschr(a.as_ptr(), b'z' as wchar_t).is_null());
+    }
+}
+
+/// BSD 传统字节操作：bzero 清零、bcopy 允许重叠、swab 交换相邻字节对。
+#[test]
+fn bsd_byte_ops() {
+    unsafe {
+        let mut b = [0xAAu8; 4];
+        crate::posix_batch2::bzero(b.as_mut_ptr() as *mut c_void, 4);
+        assert_eq!(b, [0, 0, 0, 0]);
+
+        let mut o = *b"abcdef";
+        crate::posix_batch2::bcopy(o.as_ptr() as *const c_void, o.as_mut_ptr().add(1) as *mut c_void, 4);
+        // 数组没有 NUL 终止符：拷 4 字节到 o[1..5] ⇒ "a" + "abcd" + "f"。
+        assert_eq!(&o, b"aabcdf");
+
+        let src = *b"abcd";
+        let mut d = [0u8; 4];
+        crate::posix_batch2::swab(src.as_ptr() as *const c_void, d.as_mut_ptr() as *mut c_void, 4);
+        assert_eq!(&d, b"badc");
+        // n <= 1 不做任何事。
+        let mut one = [0x55u8; 2];
+        crate::posix_batch2::swab(src.as_ptr() as *const c_void, one.as_mut_ptr() as *mut c_void, 1);
+        assert_eq!(one[0], 0x55);
+    }
+}
+
+/// 字符串族剩余：strnlen 有界、strcat 追加、strerror 对未知 errno 不崩。
+#[test]
+fn string_extras() {
+    unsafe {
+        assert_eq!(crate::string::strnlen(cs(b"abc\0"), 10), 3);
+        assert_eq!(crate::string::strnlen(cs(b"abc\0"), 2), 2, "must respect the bound");
+
+        let mut buf = [0u8; 16];
+        buf[..2].copy_from_slice(b"a\0");
+        crate::string::strcat(buf.as_mut_ptr() as *mut c_char, cs(b"bc\0"));
+        assert_eq!(&buf[..4], b"abc\0");
+
+        // strerror 必须对**任意** errno 返回非空串（未知的也不能崩、不能返回 NULL）。
+        for e in [0, 2, 22, 12345] {
+            let p = crate::string::strerror(e);
+            assert!(!p.is_null());
+            assert_ne!(*p, 0, "strerror({}) must not be empty", e);
+        }
+    }
+}
+
+/// 整数转换族的剩余入口：atof / strtoll / strtoull / strtoimax / strtoumax / imaxabs / imaxdiv。
+#[test]
+fn stdlib_conversion_extras() {
+    unsafe {
+        assert_eq!(crate::stdlib::atof(cs(b"1.5\0")), 1.5);
+        assert_eq!(crate::stdlib::atof(cs(b"nope\0")), 0.0);
+
+        let mut e: *const c_char = core::ptr::null();
+        assert_eq!(crate::stdlib::strtoll(cs(b"-9223372036854775808\0"), &mut e, 10), i64::MIN);
+        assert_eq!(crate::stdlib::strtoull(cs(b"18446744073709551615\0"), &mut e, 10), u64::MAX);
+        assert_eq!(crate::stdlib::strtoimax(cs(b"-42\0"), &mut e, 10), -42);
+        assert_eq!(crate::stdlib::strtoumax(cs(b"42\0"), &mut e, 10), 42);
+        assert_eq!(crate::stdlib::imaxabs(-7), 7);
+        let d = crate::stdlib::imaxdiv(-7, 2);
+        assert_eq!((d.quot, d.rem), (-3, -1));
+    }
+}
+
+/// difftime 返回秒差（C11 7.27.2.2）。
+#[test]
+fn difftime_seconds() {
+    assert_eq!(crate::time::difftime(100, 40), 60.0);
+    assert_eq!(crate::time::difftime(40, 100), -60.0);
+    assert_eq!(crate::time::difftime(7, 7), 0.0);
+}
+
+/// confstr / nl_langinfo：只报**有真值**的名字（无 locale 数据库）。
+#[test]
+fn confstr_and_langinfo() {
+    unsafe {
+        // _CS_PATH = 1：与 shell 的 DEFAULT_PATH 逐字节一致（有门禁核对）。
+        let mut buf = [0i8; 128];
+        let n = crate::posix_batch7::confstr(1, buf.as_mut_ptr(), buf.len());
+        assert!(n > 0);
+        assert_eq!(cbytes(buf.as_ptr()), b"/programs:/volumes/BORUIX_DATA/3p");
+        // 未知名字返回 0（POSIX：该名字无值）。
+        assert_eq!(crate::posix_batch7::confstr(9999, buf.as_mut_ptr(), buf.len()), 0);
+
+        // nl_langinfo：CODESET 必须是本实现自己的取值，且非空。
+        let p = crate::posix_batch7::nl_langinfo(14);
+        assert!(!p.is_null());
+        assert_ne!(*p, 0);
+    }
+}
+
+/// regerror：把错误码写成可读文本（POSIX 7.8.2）。
+#[test]
+fn regex_error_text() {
+    unsafe {
+        let mut re: crate::regex::regex_t = core::mem::zeroed();
+        let mut buf = [0i8; 64];
+        let n = crate::regex::regerror(0, &re, buf.as_mut_ptr(), buf.len());
+        assert!(n > 0, "regerror must return the message length");
+        assert!(n <= buf.len());
+        let s = cbytes(buf.as_ptr());
+        assert!(!s.is_empty());
+    }
+}
+
+/// ctype 的剩余两项。
+#[test]
+fn ctype_case_predicates() {
+    assert_eq!(crate::ctype::islower(b'a' as c_int), 1);
+    assert_eq!(crate::ctype::islower(b'A' as c_int), 0);
+    assert_eq!(crate::ctype::isupper(b'A' as c_int), 1);
+    assert_eq!(crate::ctype::isupper(b'a' as c_int), 0);
+    assert_eq!(crate::ctype::islower(-1), 0, "EOF is neither");
+    assert_eq!(crate::ctype::isupper(-1), 0);
+}
+
+
+// ===========================================================================
+// 覆盖面补齐（第二批）：系统问询族的失败路径 + 纯逻辑剩余项
+// ===========================================================================
+
+/// getpagesize：本系统页大小 4 KiB（与门禁的「数值镜像」同源）。
+#[test]
+fn getpagesize_is_4k() {
+    assert_eq!(crate::unistd::getpagesize(), 4096);
+}
+
+/// sysconf：**不支持的名字**必须如实 -1 + EINVAL（POSIX 允许；不得编造返回值）。
+/// 支持的名字（_SC_NPROCESSORS_ONLN）走内核，成功路径由真机覆盖。
+#[test]
+fn sysconf_unknown_name_is_einval() {
+    let _g = ERRNO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    crate::errno::set_errno(0);
+    assert_eq!(crate::unistd::sysconf(12345), -1);
+    assert_eq!(crate::errno::errno(), crate::errno::EINVAL);
+}
+
+/// gethostname：本系统没有主机名 ⇒ 如实写**空串**并返回 0（不编 localhost）。
+#[test]
+fn gethostname_is_empty_not_fabricated() {
+    unsafe {
+        let mut buf = [0x7Fi8; 8];
+        assert_eq!(crate::posix_batch5::gethostname(buf.as_mut_ptr(), buf.len()), 0);
+        assert_eq!(buf[0], 0, "must be an empty string, not a fabricated name");
+        assert_eq!(buf[1], 0x7F, "must not write beyond the NUL");
+        assert_eq!(crate::posix_batch5::gethostname(core::ptr::null_mut(), 8), -1);
+        assert_eq!(crate::posix_batch5::gethostname(buf.as_mut_ptr(), 0), -1);
+    }
+}
+
+/// uname：sysname/machine 是**事实**；nodename 必须为空（本系统无主机名概念）。
+#[test]
+fn uname_fields_have_real_sources() {
+    unsafe {
+        let mut u: crate::posix_batch5::utsname = core::mem::zeroed();
+        assert_eq!(crate::posix_batch5::uname(&mut u), 0);
+        assert_eq!(cbytes(u.sysname.as_ptr()), b"Boruix");
+        assert_eq!(cbytes(u.machine.as_ptr()), b"x86_64");
+        assert_eq!(
+            cbytes(u.nodename.as_ptr()),
+            b"",
+            "no hostname concept -> empty, not a fabricated localhost"
+        );
+        assert_eq!(crate::posix_batch5::uname(core::ptr::null_mut()), -1);
+    }
+}
+
+/// rand/srand：同一 seed 必须复现同一序列，取值落在 [0, RAND_MAX]（C11 7.22.2.1/2）。
+#[test]
+fn rand_srand_reproducible() {
+    let _g = ERRNO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        crate::stdlib::srand(12345);
+        let a = crate::stdlib::rand();
+        let b = crate::stdlib::rand();
+        crate::stdlib::srand(12345);
+        assert_eq!(crate::stdlib::rand(), a, "same seed must reproduce the sequence");
+        assert_eq!(crate::stdlib::rand(), b);
+        for _ in 0..8 {
+            let v = crate::stdlib::rand();
+            assert!((0..=i32::MAX).contains(&v), "rand must stay within [0, RAND_MAX]");
+        }
+    }
+}
+
+/// 信号集操作（POSIX 7.14.1.1）：置空/填满/增删/判定 + 非法信号号如实 EINVAL。
+#[test]
+fn sigset_operations() {
+    let _g = ERRNO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        let mut s: crate::signal::sigset_t = 0;
+        assert_eq!(crate::signal::sigemptyset(&mut s), 0);
+        assert_eq!(s, 0);
+        assert_eq!(crate::signal::sigismember(&s, 2), 0);
+        assert_eq!(crate::signal::sigaddset(&mut s, 2), 0);
+        assert_eq!(crate::signal::sigismember(&s, 2), 1);
+        assert_eq!(crate::signal::sigdelset(&mut s, 2), 0);
+        assert_eq!(crate::signal::sigismember(&s, 2), 0);
+        assert_eq!(crate::signal::sigfillset(&mut s), 0);
+        // 满集 = 内核 SignalSet::all() = u64::MAX（含 bit63）。
+        assert_eq!(s, u64::MAX);
+        assert_eq!(crate::signal::sigismember(&s, 1), 1);
+        assert_eq!(crate::signal::sigismember(&s, 63), 1);
+
+        // 信号号 0 与 >= NSIG 都不是合法信号（POSIX：EINVAL，不静默夹取）。
+        crate::errno::set_errno(0);
+        assert_eq!(crate::signal::sigaddset(&mut s, 0), -1);
+        assert_eq!(crate::errno::errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(crate::signal::sigismember(&s, 64), -1);
+        assert_eq!(crate::errno::errno(), crate::errno::EINVAL);
+    }
+}
+
+/// strtold：本目标 long double ≈ f64，行为与 strtod 一致。
+#[test]
+fn strtold_matches_strtod() {
+    unsafe {
+        let mut e: *const c_char = core::ptr::null();
+        assert_eq!(crate::stdlib::strtold(cs(b"2.5\0"), &mut e), 2.5);
+        assert!(crate::stdlib::strtold(cs(b"inf\0"), &mut e).is_infinite());
+    }
+}
+
+/// wordfree：NULL 安全（POSIX 对该情形未定义，取最保守行为）。
+#[test]
+fn wordfree_is_null_safe() {
+    unsafe {
+        crate::posix_batch5::wordfree(core::ptr::null_mut());
+    }
+}
+
+/// getopt_long：长选项（GNU 扩展）——名字匹配、需参数、结束。
+#[test]
+fn getopt_long_basics() {
+    let _g = GETOPT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        use crate::posix_batch4::{getopt_long, no_argument, option, required_argument};
+        let (_b, mut argv) = make_argv(&[b"prog", b"--verbose", b"--out", b"x"]);
+        let longs = [
+            option {
+                name: b"verbose\0".as_ptr() as *const c_char,
+                has_arg: no_argument,
+                flag: core::ptr::null_mut(),
+                val: b'v' as c_int,
+            },
+            option {
+                name: b"out\0".as_ptr() as *const c_char,
+                has_arg: required_argument,
+                flag: core::ptr::null_mut(),
+                val: b'o' as c_int,
+            },
+            option {
+                name: core::ptr::null(),
+                has_arg: 0,
+                flag: core::ptr::null_mut(),
+                val: 0,
+            },
+        ];
+        crate::posix_batch4::optind = 1;
+        let os = b"\0";
+        let f = |argv: &mut alloc::vec::Vec<*mut c_char>| {
+            getopt_long(
+                4,
+                argv.as_ptr(),
+                os.as_ptr() as *const c_char,
+                longs.as_ptr(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(f(&mut argv), b'v' as c_int);
+        assert_eq!(f(&mut argv), b'o' as c_int);
+        let oa = crate::posix_batch4::optarg;
+        assert_eq!(cbytes(oa), b"x");
+        assert_eq!(f(&mut argv), -1);
+    }
+}
+
+
+// ===========================================================================
+// 覆盖面补齐（第三批）：exec 族的如实失败、环境变量族
+// ===========================================================================
+
+/// exec 族：本系统**没有替换进程映像的 syscall**（只有派生）⇒ 如实 ENOTSUP，
+/// 绝不返回"成功"。system 无命令处理器 ⇒ 按 POSIX 返回 1（cmd == NULL 时）。
+#[test]
+fn exec_family_honestly_fails() {
+    let _g = ERRNO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        crate::errno::set_errno(0);
+        assert_eq!(crate::exec::execv(cs(b"/programs/nope.elf\0"), core::ptr::null()), -1);
+        assert_eq!(crate::errno::errno(), crate::errno::ENOTSUP);
+        crate::errno::set_errno(0);
+        assert_eq!(
+            crate::exec::execve(cs(b"/programs/nope.elf\0"), core::ptr::null(), core::ptr::null()),
+            -1
+        );
+        assert_eq!(crate::errno::errno(), crate::errno::ENOTSUP);
+        crate::errno::set_errno(0);
+        assert_eq!(crate::unistd::execvp(cs(b"nope\0"), core::ptr::null()), -1);
+
+        // system(NULL)：POSIX 规定此时返回非 0（有命令处理器）；本系统没有 ⇒ 返回 1。
+        assert_eq!(crate::exec::system(core::ptr::null()), 1);
+        // 非 NULL：无 shell 可执行 ⇒ 如实 ENOTSUP。
+        crate::errno::set_errno(0);
+        assert_eq!(crate::exec::system(cs(b"echo hi\0")), -1);
+        assert_eq!(crate::errno::errno(), crate::errno::ENOTSUP);
+    }
+}
+
+/// getlogin：没有登录会话名查询 ⇒ 无环境变量时如实 NULL（不编名字）。
+#[test]
+fn getlogin_never_fabricates() {
+    unsafe {
+        let p = crate::posix_batch5::getlogin();
+        if !p.is_null() {
+            let v = cbytes(p);
+            assert!(!v.is_empty(), "a returned login name must not be empty");
+        }
+    }
+}
+
+/// 环境变量族：setenv/getenv/unsetenv/putenv/clearenv 的**往返**与非法参数。
+#[test]
+fn env_round_trip() {
+    let _g = ERRNO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        // 非法参数如实 EINVAL。
+        crate::errno::set_errno(0);
+        assert_eq!(crate::stdlib::setenv(core::ptr::null(), cs(b"1\0"), 1), -1);
+        assert_eq!(crate::errno::errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(crate::stdlib::setenv(cs(b"A=B\0"), cs(b"1\0"), 1), -1);
+        assert_eq!(crate::errno::errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(crate::stdlib::unsetenv(core::ptr::null()), -1);
+        assert_eq!(crate::errno::errno(), crate::errno::EINVAL);
+
+        // **往返部分宿主测不了**：setenv 经 libc 的 malloc → 内核 brk（宿主上没有内核）⇒
+        // 恒 ENOMEM。故这里只钉住**纯参数校验**那一半；往返由真机 libccheck 覆盖。
+        // （不写一个恒失败的假测试。）
     }
 }

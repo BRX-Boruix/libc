@@ -358,21 +358,25 @@ pub unsafe extern "C" fn sigemptyset(set: *mut sigset_t) -> c_int {
     0
 }
 
-/// `sigfillset(set)`：置入全部信号（bit63 保留，与内核 NSIG=64 的约定一致）。
+/// `sigfillset(set)`：置入**全部**信号。
+///
+/// **与内核同一事实源**：内核 `SignalSet::all()` 就是 `u64::MAX`（"0..NSIG 全部为 1"，
+/// NSIG=64）。此前这里写成 `u64::MAX & !(1u64 << 63)` 并注"bit63 保留，与内核约定一致"——
+/// **那句是错的**：内核的满集含 bit63，于是本函数少置了一个信号（63）。现改为与内核一致。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigfillset(set: *mut sigset_t) -> c_int {
     if set.is_null() {
         set_errno(EINVAL);
         return -1;
     }
-    unsafe { *set = u64::MAX & !(1u64 << 63) };
+    unsafe { *set = u64::MAX };
     0
 }
 
-/// `sigaddset(set, sig)`：把信号加入集合。
+/// `sigaddset(set, sig)`：把信号加入集合。信号号须在 `1..NSIG`（POSIX：0 不是信号）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaddset(set: *mut sigset_t, sig: c_int) -> c_int {
-    if set.is_null() || !(0..SIGSET_NSIG).contains(&sig) {
+    if set.is_null() || !(1..SIGSET_NSIG).contains(&sig) {
         set_errno(EINVAL);
         return -1;
     }
@@ -380,10 +384,10 @@ pub unsafe extern "C" fn sigaddset(set: *mut sigset_t, sig: c_int) -> c_int {
     0
 }
 
-/// `sigdelset(set, sig)`：把信号移出集合。
+/// `sigdelset(set, sig)`：把信号移出集合。信号号须在 `1..NSIG`。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigdelset(set: *mut sigset_t, sig: c_int) -> c_int {
-    if set.is_null() || !(0..SIGSET_NSIG).contains(&sig) {
+    if set.is_null() || !(1..SIGSET_NSIG).contains(&sig) {
         set_errno(EINVAL);
         return -1;
     }
@@ -391,10 +395,10 @@ pub unsafe extern "C" fn sigdelset(set: *mut sigset_t, sig: c_int) -> c_int {
     0
 }
 
-/// `sigismember(set, sig)`：信号是否在集合中（1=是，0=否，-1=错误）。
+/// `sigismember(set, sig)`：信号是否在集合中（1=是，0=否，-1=错误）。信号号须在 `1..NSIG`。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigismember(set: *const sigset_t, sig: c_int) -> c_int {
-    if set.is_null() || !(0..SIGSET_NSIG).contains(&sig) {
+    if set.is_null() || !(1..SIGSET_NSIG).contains(&sig) {
         set_errno(EINVAL);
         return -1;
     }

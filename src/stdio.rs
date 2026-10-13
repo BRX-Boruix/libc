@@ -115,10 +115,12 @@ pub static mut stderr: *mut FILE = core::ptr::null_mut();
 // 得到 **0 字节 + EOF**：数据在 unlink 之后写不进去（诊断输出见 tools/3psrc/libcc1）。
 // 故改为**延迟删除**：`fclose` 时删除；程序未关流就退出时，由一次性登记的 `atexit` 处理器兜底。
 // 两条路合起来与 POSIX 的「关闭**或**进程终止时自动消失」一致。
-const TMP_MAX: usize = 16;
+/// 同时存在的临时文件槽数（**内部容量**，不是 C 的 `TMP_MAX`——后者是标准规定的
+/// 最少唯一文件名数，本系统在 `<stdio.h>` 里给的是 238328）。改名以免与那个宏同名异义。
+const TMP_FILE_SLOTS: usize = 16;
 /// `(占用, fd, 路径指针 as usize)`。指针存成 usize 是为了满足 `Mutex<T>: Send`（同 stdlib 的
 /// `ExitEntry::WithArg`）。用显式 `占用` 位而不是拿 fd==0 当空标记——fd 0 是合法的标准输入。
-static TMP_FILES: spin::Mutex<[(bool, i32, usize); TMP_MAX]> = spin::Mutex::new([(false, 0, 0); TMP_MAX]);
+static TMP_FILES: spin::Mutex<[(bool, i32, usize); TMP_FILE_SLOTS]> = spin::Mutex::new([(false, 0, 0); TMP_FILE_SLOTS]);
 static TMP_CLEANUP_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 /// 登记一个待删除的临时文件路径（所有权转移给登记表）。表满返回 false。
@@ -157,7 +159,7 @@ unsafe fn tmp_release(fd: i32) {
 
 /// 进程退出兜底（`atexit` 登记一次）：删除所有仍未随 `fclose` 释放的临时文件。
 extern "C" fn tmp_cleanup_at_exit() {
-    for i in 0..TMP_MAX {
+    for i in 0..TMP_FILE_SLOTS {
         let (used, ptr) = {
             let mut t = TMP_FILES.lock();
             let s = (t[i].0, t[i].2);
@@ -477,8 +479,8 @@ pub extern "C" fn boruix_stdio_write_bytes() -> usize {
 /// 默认缓冲容量（与头文件 `BUFSIZ` 同一量级；`setvbuf` 未指定 size 时用它）。
 const WBUF_CAP: usize = 4096;
 /// `BUFSIZ`：与 `libc/include/stdio.h` 的取值**必须一致**（`setbuf` 用它）。
-/// 两侧不一致会让 `setbuf` 的行为随「看哪一份」而变。
-const BUFSIZ: usize = 8192;
+/// 两侧不一致会让 `setbuf` 的行为随「看哪一份」而变。`pub` 的理由同 `FP_*`。
+pub const BUFSIZ: usize = 8192;
 /// 同时打开的流上限（供 `fflush(NULL)` 与 `exit` 冲刷全部流）。
 const MAX_OPEN_STREAMS: usize = 64;
 static OPEN_STREAMS: [AtomicUsize; MAX_OPEN_STREAMS] =
