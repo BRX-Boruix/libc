@@ -72,16 +72,17 @@ unsigned int alarm(unsigned int seconds);
 
 /* ttyname：返回该 fd 对应终端的路径（POSIX）。
  *
- * 诚实边界（实测结论）：本实现只能忠实回答「不是终端」这一半——非终端 -> NULL 置 ENOTTY；
- * 是终端时**也**如实返回 NULL 置 ENOTTY，因为本系统目前拿不到节点的名字，而编一个路径
- * （如恒返回 /devices/console）会在 fd 属于别的终端时撒谎。
+ * **本系统按设计没有 TTY** ⇒ 本项属「设计性不支持」，不是「缺个组件」。
+ * ADR-042（ACCEPTED）明定「canonical 模式与 termios 一概不做」，其事实表记着「全内核无
+ * termios/tty/行规程实现」；内核只有输出侧的 console sink（term crate）。
  *
- * 为什么身份比对不成立：INode::stable_id 的默认实现是 self 地址，而其文档明写「无状态视图
- * 节点（procfs/devfs/stdio）的 lookup 同样可能每次新建实例」⇒ fstat 与 stat 拿到的是两个
- * 不同实例，st_ino 必然不等（实测 ttyname(1) 返回 NULL）。反向查找也无效（新实例不在树里）。
+ * 内核里唯一与终端有关的是 INode::is_terminal()——一个节点级布尔真值（ADR-044 / J-TOKEN-A），
+ * 唯一用途是让 isatty 说真话。它为真的只有 vfs/src/stdio.rs 的两个节点（fd 0/1/2 背后的
+ * **匿名**节点），而那些节点不在任何目录里 ⇒ **没有路径可命名**；
+ * 而 /devices/console 没覆写 is_terminal ⇒ 按内核真值是 false，**它不是终端**。
  *
- * 要忠实实现，缺的组件是「让视图节点自述名字」：给 INode 加 node_path_hint() 之类，
- * 由 devfs/stdio 节点在构造时填入。 */
+ * 故本实现如实失败（NULL + ENOTTY），不返回伪造路径。将来若真要 ttyname，前提是先有
+ * ADR 层面的新裁定（决定引入终端设备节点），而不是在 libc 里补一层转译。 */
 char *ttyname(int fd);
 
 /* dup2：把 oldfd 复制到 newfd（POSIX）。副本与原 fd 共享文件偏移。

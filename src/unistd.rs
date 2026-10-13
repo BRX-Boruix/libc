@@ -667,22 +667,31 @@ pub extern "C" fn ftruncate(fd: c_int, length: crate::ctypes::off_t) -> c_int {
 /// 是终端时**如实返回 NULL 置 `ENOTTY`**——因为本系统目前**拿不到节点的名字**（见下），
 /// 而**编一个路径**（例如恒返回 `/devices/console`）会在 fd 属于别的终端时撒谎。
 ///
-/// # 为什么拿不到名字（实测结论，不是推断）
+/// # 为什么本系统**没有**可以返回的路径（实测 + ADR 裁定，不是推断）
 ///
-/// 看似可行的办法是「用身份比对」：`fstat(fd).st_ino` 与 `stat("/devices/console").st_ino`
-/// 相等就返回那个路径。**这条路在本系统不成立**：`INode::stable_id` 的默认实现是
-/// `self` 地址，而它的文档明写「无状态视图节点（procfs/devfs/stdio）的 `lookup` 同样可能
-/// **每次新建实例**」——于是 `fstat` 拿到的节点与 `stat` 解析出的节点是**两个不同实例**，
-/// 身份必然不等。实测：`ttyname(1)`（stdout 就是 console）返回 NULL。
+/// **本系统按设计没有 TTY。** [ADR-042](../../docs/adr/042-input-side-no-legacy-canonical-mode.md)
+/// （ACCEPTED）明定「输入侧同样不背历史债，**canonical 模式与 termios 一概不做**」，
+/// 其事实表记着「全内核无 `termios`/`tty`/行规程实现」；内核只有**输出**侧的 console sink
+/// （`term` crate）。⇒ `ttyname` 想返回的那个「终端**设备**的路径」在本系统**不存在**。
 ///
-/// 反向查找（遍历挂载树找「哪个路径指向这个节点」）同样解决不了——那个新实例根本不在树里。
+/// 内核里唯一与「终端」有关的是 `INode::is_terminal()`——一个**节点级布尔真值**
+/// （ADR-044 / J-TOKEN-A），**唯一用途是让 `isatty` 说真话**，不是 TTY。实测：
 ///
-/// # 要忠实实现，缺的组件是
+/// - 它为真的**只有** `vfs/src/stdio.rs` 的两个节点（`StdinNode` @190、stdout 节点 @280），
+///   即 **fd 0/1/2 背后的匿名节点**；
+/// - 那些节点**不在任何目录里**（不是 devfs 下的设备文件）⇒ **没有路径可命名**；
+/// - 而 `/devices/console`（devfs `ConsoleNode`）**没有覆写 `is_terminal`** ⇒ 按内核自己的
+///   真值是 **`false`**，**它不是终端**。
 ///
-/// **让视图节点自述名字**：给 `INode` 加一个「本节点的规范路径（若有）」的查询
-/// （`node_path_hint()` 之类），由 devfs/stdio 节点在构造时填入（它们本来就知道自己挂在
-/// 哪个名字下）。有了它，`ttyname` 只需 `fstat` 取节点 → 问名字 → 返回。
-/// 在此之前，本函数如实失败，**不返回伪造路径**。
+/// 所以「终端 ⇒ `/devices/console`」是一条**凭空的映射**（本文件早先的版本正是这么写的，
+/// 已订正）。即便退一步用 `st_ino` 做身份比对也不成立：`INode::stable_id` 默认是 `self`
+/// 地址，其文档明写「无状态视图节点（procfs/devfs/stdio）的 `lookup` 同样可能**每次新建
+/// 实例**」⇒ `fstat` 与 `stat` 拿到两个不同实例，身份必然不等（实测 `ttyname(1)` 返回 NULL）。
+/// 反向查找（遍历挂载树）也无效——那些匿名节点根本不在树里。
+///
+/// **⇒ 本项属「设计性不支持」**（与 ADR-042 同族），不是「缺个组件」。
+/// 若将来真要 `ttyname`，前提是先有 ADR 层面的新裁定（即决定引入终端设备节点），
+/// 而不是在 libc 里补一层转译。在此之前本函数如实失败，**不返回伪造路径**。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ttyname(fd: c_int) -> *mut c_char {
     // 非终端：忠实（POSIX 语义 + errno 都对）。
