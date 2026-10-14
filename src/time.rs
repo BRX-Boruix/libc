@@ -15,7 +15,7 @@ pub type time_t = i64;
 pub type clock_t = i64;
 
 /// 每秒时钟滴答数（与 `clock()` 返回值换算；本实现用纳秒）。
-pub const CLOCKS_PER_SEC: clock_t = 1_000_000_000;
+pub use crate::abi_generated::CLOCKS_PER_SEC;
 
 /// difftime(t1, t0)：两个时刻之差（秒，double）。
 ///
@@ -27,8 +27,8 @@ pub extern "C" fn difftime(t1: time_t, t0: time_t) -> f64 {
 }
 
 /// CLOCK_REALTIME / CLOCK_MONOTONIC（取值与 Linux 一致）。
-pub const CLOCK_REALTIME: c_int = 0;
-pub const CLOCK_MONOTONIC: c_int = 1;
+pub use crate::abi_generated::CLOCK_REALTIME;
+pub use crate::abi_generated::CLOCK_MONOTONIC;
 
 /// clock_gettime(clk, tp)：取时钟。
 ///

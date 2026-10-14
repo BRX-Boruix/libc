@@ -49,17 +49,17 @@ pub extern "C" fn valloc(size: size_t) -> *mut c_void {
 // ===========================================================================
 
 /// `fnmatch` 标志（取值与 glibc/Linux 一致）。
-pub const FNM_NOMATCH: c_int = 1;
-pub const FNM_PATHNAME: c_int = 1 << 0;
-pub const FNM_NOESCAPE: c_int = 1 << 1;
-pub const FNM_PERIOD: c_int = 1 << 2;
+pub use crate::abi_generated::FNM_NOMATCH;
+pub use crate::abi_generated::FNM_PATHNAME;
+pub use crate::abi_generated::FNM_NOESCAPE;
+pub use crate::abi_generated::FNM_PERIOD;
 /// `FNM_LEADING_DIR`（GNU 扩展）：模式匹配到字符串中某个 `/` 边界即算命中。
-pub const FNM_LEADING_DIR: c_int = 1 << 3;
+pub use crate::abi_generated::FNM_LEADING_DIR;
 /// `FNM_CASEFOLD`（GNU 扩展）：大小写不敏感匹配（**ASCII 折叠**——本系统无 locale 数据，
 /// 非 ASCII 不做折叠，如实声明）。
-pub const FNM_CASEFOLD: c_int = 1 << 4;
+pub use crate::abi_generated::FNM_CASEFOLD;
 /// `FNM_FILE_NAME`（GNU 扩展）：`FNM_PATHNAME` 的**别名**（glibc 同值同义，故这里是别名而非新位）。
-pub const FNM_FILE_NAME: c_int = FNM_PATHNAME;
+pub use crate::abi_generated::FNM_FILE_NAME;
 
 /// 本实现认得的全部旗标位（`FNM_FILE_NAME` 与 `FNM_PATHNAME` 同位，故不另计）。
 const FNM_KNOWN: c_int = FNM_PATHNAME | FNM_NOESCAPE | FNM_PERIOD | FNM_LEADING_DIR | FNM_CASEFOLD;
@@ -307,11 +307,11 @@ pub struct option {
 
 // 名字刻意保持 C 头文件里的小写拼写（`getopt.h` 的 POSIX/GNU 约定），故显式关掉命名风格检查。
 #[allow(non_upper_case_globals)]
-pub const no_argument: c_int = 0;
+pub use crate::abi_generated::no_argument;
 #[allow(non_upper_case_globals)]
-pub const required_argument: c_int = 1;
+pub use crate::abi_generated::required_argument;
 #[allow(non_upper_case_globals)]
-pub const optional_argument: c_int = 2;
+pub use crate::abi_generated::optional_argument;
 
 /// 在 `optstring` 里查字符 `c`，返回 `(是否已知, 参数类型)`。
 fn opt_lookup(optstring: &[u8], c: u8) -> (bool, c_int) {

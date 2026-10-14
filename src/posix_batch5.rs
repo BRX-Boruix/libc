@@ -134,18 +134,18 @@ pub unsafe extern "C" fn getlogin() -> *mut c_char {
 // wordexp / wordfree —— shell 风格的词展开（**无命令替换**）
 // ===========================================================================
 
-pub const WRDE_APPEND: c_int = 1;
-pub const WRDE_DOOFFS: c_int = 2;
-pub const WRDE_NOCMD: c_int = 4;
-pub const WRDE_REUSE: c_int = 8;
-pub const WRDE_SHOWERR: c_int = 16;
-pub const WRDE_UNDEF: c_int = 32;
+pub use crate::abi_generated::WRDE_APPEND;
+pub use crate::abi_generated::WRDE_DOOFFS;
+pub use crate::abi_generated::WRDE_NOCMD;
+pub use crate::abi_generated::WRDE_REUSE;
+pub use crate::abi_generated::WRDE_SHOWERR;
+pub use crate::abi_generated::WRDE_UNDEF;
 
-pub const WRDE_BADCHAR: c_int = 1;
-pub const WRDE_BADVAL: c_int = 2;
-pub const WRDE_CMDSUB: c_int = 3;
-pub const WRDE_NOSPACE: c_int = 4;
-pub const WRDE_SYNTAX: c_int = 6;
+pub use crate::abi_generated::WRDE_BADCHAR;
+pub use crate::abi_generated::WRDE_BADVAL;
+pub use crate::abi_generated::WRDE_CMDSUB;
+pub use crate::abi_generated::WRDE_NOSPACE;
+pub use crate::abi_generated::WRDE_SYNTAX;
 
 /// `wordexp_t`（POSIX；字段与 `libc/include/wordexp.h` 一致）。
 #[repr(C)]

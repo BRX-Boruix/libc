@@ -76,7 +76,7 @@ pub const LONG_MAX: c_long = i64::MAX;
 /// `SIZE_MAX`。
 pub const SIZE_MAX: size_t = usize::MAX;
 /// `EOF`：流结束 / 错误哨兵（-1）。
-pub const EOF: c_int = -1;
+pub use crate::abi_generated::EOF;
 
 // 宏 RAND_MAX：`rand()` 返回的最大值（本实现为 i32::MAX）。
-pub const RAND_MAX: c_int = i32::MAX;
+pub use crate::abi_generated::RAND_MAX;

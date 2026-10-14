@@ -480,7 +480,7 @@ pub extern "C" fn boruix_stdio_write_bytes() -> usize {
 const WBUF_CAP: usize = 4096;
 /// `BUFSIZ`：与 `libc/include/stdio.h` 的取值**必须一致**（`setbuf` 用它）。
 /// 两侧不一致会让 `setbuf` 的行为随「看哪一份」而变。`pub` 的理由同 `FP_*`。
-pub const BUFSIZ: usize = 8192;
+pub use crate::abi_generated::BUFSIZ;
 /// 同时打开的流上限（供 `fflush(NULL)` 与 `exit` 冲刷全部流）。
 const MAX_OPEN_STREAMS: usize = 64;
 static OPEN_STREAMS: [AtomicUsize; MAX_OPEN_STREAMS] =
@@ -691,9 +691,9 @@ pub unsafe extern "C" fn fflush(fp: *mut FILE) -> c_int {
 }
 
 /// `_IOFBF` / `_IOLBF` / `_IONBF`（与 `libc/include/stdio.h` 同一组取值）。
-pub const _IOFBF: c_int = 0;
-pub const _IOLBF: c_int = 1;
-pub const _IONBF: c_int = 2;
+pub use crate::abi_generated::_IOFBF;
+pub use crate::abi_generated::_IOLBF;
+pub use crate::abi_generated::_IONBF;
 
 /// `setvbuf(stream, buf, mode, size)`：配置流的缓冲（POSIX）。
 ///

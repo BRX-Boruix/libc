@@ -17,9 +17,9 @@ use crate::ctypes::{c_char, c_int, c_long, c_ushort, c_uchar, c_void, ino_t, off
 use crate::errno::{from_libsys, set_errno, EINVAL};
 
 /// d_type 常量（POSIX / glibc 对齐）。
-pub const DT_UNKNOWN: c_uchar = 0;
-pub const DT_DIR: c_uchar = 4;
-pub const DT_REG: c_uchar = 8;
+pub use crate::abi_generated::DT_UNKNOWN;
+pub use crate::abi_generated::DT_DIR;
+pub use crate::abi_generated::DT_REG;
 
 /// `struct dirent`（BORUIX 精简 ABI，x86_64）。
 #[repr(C)]

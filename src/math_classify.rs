@@ -42,11 +42,11 @@ pub static __boruix_inf: f64 = f64::from_bits(0x7FF0_0000_0000_0000);
 /// tools/checks/dist/abi_mirrors_agree.py 的「C 头常量」一类只比 `pub const` ——
 /// 此前它们是私有的，于是这条"必须一致"**没有任何东西在核对**（本轮把门禁扩到非 pub
 /// 常量，同时把它们改成 pub，双保险）。
-pub const FP_NAN: c_int = 0;
-pub const FP_INFINITE: c_int = 1;
-pub const FP_ZERO: c_int = 2;
-pub const FP_SUBNORMAL: c_int = 3;
-pub const FP_NORMAL: c_int = 4;
+pub use crate::abi_generated::FP_NAN;
+pub use crate::abi_generated::FP_INFINITE;
+pub use crate::abi_generated::FP_ZERO;
+pub use crate::abi_generated::FP_SUBNORMAL;
+pub use crate::abi_generated::FP_NORMAL;
 
 /// `fpclassify(x)`：返回 `FP_*` 分类码。
 #[unsafe(no_mangle)]

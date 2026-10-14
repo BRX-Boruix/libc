@@ -34,12 +34,12 @@ use crate::errno::{from_libsys, set_errno, EINVAL, ENOMEM, ENOSYS, ENOTSUP};
 
 // ---------- 标志（取值与 glibc/Linux 一致） ----------
 
-pub const POSIX_SPAWN_RESETIDS: c_int = 0x01;
-pub const POSIX_SPAWN_SETPGROUP: c_int = 0x02;
-pub const POSIX_SPAWN_SETSIGDEF: c_int = 0x04;
-pub const POSIX_SPAWN_SETSIGMASK: c_int = 0x08;
-pub const POSIX_SPAWN_SETSCHEDPARAM: c_int = 0x10;
-pub const POSIX_SPAWN_SETSCHEDULER: c_int = 0x20;
+pub use crate::abi_generated::POSIX_SPAWN_RESETIDS;
+pub use crate::abi_generated::POSIX_SPAWN_SETPGROUP;
+pub use crate::abi_generated::POSIX_SPAWN_SETSIGDEF;
+pub use crate::abi_generated::POSIX_SPAWN_SETSIGMASK;
+pub use crate::abi_generated::POSIX_SPAWN_SETSCHEDPARAM;
+pub use crate::abi_generated::POSIX_SPAWN_SETSCHEDULER;
 
 /// file_actions 的单个动作（BORUIX 自有布局，见 `libc/include/spawn.h`）。
 #[repr(C)]

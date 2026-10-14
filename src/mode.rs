@@ -16,9 +16,9 @@
 use crate::ctypes::mode_t;
 
 /// POSIX 权限位（与 `sys/stat.h` 的 `S_I*` 同一事实）。
-pub const S_IRUSR: mode_t = 0o400;
-pub const S_IWUSR: mode_t = 0o200;
-pub const S_IXUSR: mode_t = 0o100;
+pub use crate::abi_generated::S_IRUSR;
+pub use crate::abi_generated::S_IWUSR;
+pub use crate::abi_generated::S_IXUSR;
 
 /// 把 POSIX `mode` 与 `umask` 折成内核的 `(readable, writable, executable)`。
 ///

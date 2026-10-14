@@ -9,18 +9,18 @@ use crate::ctypes::{c_int, size_t, ssize_t, c_void, c_uint};
 use crate::errno::{set_errno, from_libsys, EINVAL};
 
 /// open 标志（O_*）。
-pub const O_RDONLY: c_int = 0;
-pub const O_WRONLY: c_int = 1;
-pub const O_RDWR: c_int = 2;
-pub const O_CREAT: c_int = 0x40;
+pub use crate::abi_generated::O_RDONLY;
+pub use crate::abi_generated::O_WRONLY;
+pub use crate::abi_generated::O_RDWR;
+pub use crate::abi_generated::O_CREAT;
 /// O_EXCL（3P6-2 第二波）：与 O_CREAT 同用时**独占创建**——文件已存在则
 /// open 失败（EEXIST）。取值与 Linux 一致（0o200 = 0x80）。
-pub const O_EXCL: c_int = 0x80;
+pub use crate::abi_generated::O_EXCL;
 /// O_CLOEXEC（3P4-3）：exec 时不继承该 fd。取值与 Linux 一致（0o2000000），
 /// 与同处其余 O_* 的取值风格相同。
-pub const O_CLOEXEC: c_int = 0x80000;
-pub const O_TRUNC: c_int = 0x200;
-pub const O_APPEND: c_int = 0x400;
+pub use crate::abi_generated::O_CLOEXEC;
+pub use crate::abi_generated::O_TRUNC;
+pub use crate::abi_generated::O_APPEND;
 
 /// `open(path, flags, mode)`：打开文件，返回 fd 或 -1。
 /// 进程级 umask（POSIX）。**默认 0**：本实现此前根本不看 mode，默认 0 可避免静默改变
@@ -213,9 +213,9 @@ pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> 
 }
 
 /// lseek whence 常量。
-pub const SEEK_SET: c_int = 0;
-pub const SEEK_CUR: c_int = 1;
-pub const SEEK_END: c_int = 2;
+pub use crate::abi_generated::SEEK_SET;
+pub use crate::abi_generated::SEEK_CUR;
+pub use crate::abi_generated::SEEK_END;
 
 // ---------- 文件位置（POSIX `lseek` 的用户态实现）----------
 //
@@ -613,7 +613,7 @@ pub unsafe extern "C" fn readlink(
 }
 
 /// `_SC_NPROCESSORS_ONLN`：在线 CPU 数（取值与 Linux 一致）。
-pub const _SC_NPROCESSORS_ONLN: c_int = 84;
+pub use crate::abi_generated::_SC_NPROCESSORS_ONLN;
 
 /// `sysconf(name)`：系统配置查询（3P4-8c）。
 ///
@@ -654,10 +654,10 @@ pub extern "C" fn ftruncate(fd: c_int, length: crate::ctypes::off_t) -> c_int {
 }
 
 /// `flock` 的操作位（取值与 glibc/Linux 一致；声明见 `<sys/file.h>`）。
-pub const LOCK_SH: c_int = 1;
-pub const LOCK_EX: c_int = 2;
-pub const LOCK_NB: c_int = 4;
-pub const LOCK_UN: c_int = 8;
+pub use crate::abi_generated::LOCK_SH;
+pub use crate::abi_generated::LOCK_EX;
+pub use crate::abi_generated::LOCK_NB;
+pub use crate::abi_generated::LOCK_UN;
 
 /// `flock(fd, operation)`：BSD 风格 advisory 文件锁（声明见 `<sys/file.h>`）。
 /// 成功返回 0，失败 -1 置 errno。
@@ -1042,17 +1042,17 @@ pub unsafe extern "C" fn truncate(path: *const c_char, length: crate::ctypes::of
 
 /// fcntl 命令常量（x86_64 Linux ABI）。
 /// waitpid 的 options（POSIX 归属 <sys/wait.h>；此处供 Rust 侧引用，单点定义）。
-pub const WNOHANG: c_int = 1;
+pub use crate::abi_generated::WNOHANG;
 
 // ---------- 3P6-2 第二波（GCC 宿主侧构建驱动的一批） ----------
 
 /// `_PC_*`：pathconf 的名字常量（取值与 Linux 一致）。
-pub const _PC_LINK_MAX: c_int = 0;
-pub const _PC_MAX_CANON: c_int = 1;
-pub const _PC_MAX_INPUT: c_int = 2;
-pub const _PC_NAME_MAX: c_int = 3;
-pub const _PC_PATH_MAX: c_int = 4;
-pub const _PC_PIPE_BUF: c_int = 5;
+pub use crate::abi_generated::_PC_LINK_MAX;
+pub use crate::abi_generated::_PC_MAX_CANON;
+pub use crate::abi_generated::_PC_MAX_INPUT;
+pub use crate::abi_generated::_PC_NAME_MAX;
+pub use crate::abi_generated::_PC_PATH_MAX;
+pub use crate::abi_generated::_PC_PIPE_BUF;
 
 /// getpagesize()：本系统的页大小（4 KiB）。
 ///
@@ -1142,13 +1142,13 @@ pub unsafe extern "C" fn mktemp(template: *mut c_char) -> *mut c_char {
     }
 }
 
-pub const F_DUPFD: c_int = 0;
-pub const F_GETFD: c_int = 1;
-pub const F_SETFD: c_int = 2;
-pub const F_GETFL: c_int = 3;
-pub const F_SETFL: c_int = 4;
+pub use crate::abi_generated::F_DUPFD;
+pub use crate::abi_generated::F_GETFD;
+pub use crate::abi_generated::F_SETFD;
+pub use crate::abi_generated::F_GETFL;
+pub use crate::abi_generated::F_SETFL;
 /// FD_CLOEXEC：fd 标志（本内核无 exec 关闭语义 → F_SETFD 恒拒绝）。
-pub const FD_CLOEXEC: c_int = 1;
+pub use crate::abi_generated::FD_CLOEXEC;
 
 /// `fcntl(fd, cmd, ...)`：fd 控制。
 ///
@@ -1273,14 +1273,14 @@ pub struct stat {
     pub __unused: [i64; 3],
 }
 
-pub const S_IFMT: u32 = 0o170000;
-pub const S_IFSOCK: u32 = 0o140000;
-pub const S_IFLNK: u32 = 0o120000;
-pub const S_IFREG: u32 = 0o100000;
-pub const S_IFBLK: u32 = 0o060000;
-pub const S_IFDIR: u32 = 0o040000;
-pub const S_IFCHR: u32 = 0o020000;
-pub const S_IFIFO: u32 = 0o010000;
+pub use crate::abi_generated::S_IFMT;
+pub use crate::abi_generated::S_IFSOCK;
+pub use crate::abi_generated::S_IFLNK;
+pub use crate::abi_generated::S_IFREG;
+pub use crate::abi_generated::S_IFBLK;
+pub use crate::abi_generated::S_IFDIR;
+pub use crate::abi_generated::S_IFCHR;
+pub use crate::abi_generated::S_IFIFO;
 
 pub fn stat_type_bits(node_type: u32) -> u32 {
     match node_type {

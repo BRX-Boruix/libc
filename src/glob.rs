@@ -24,18 +24,18 @@ use alloc::vec::Vec;
 use crate::ctypes::{c_char, c_int, size_t};
 use crate::errno::set_errno;
 
-pub const GLOB_ERR: c_int = 1 << 0;
-pub const GLOB_MARK: c_int = 1 << 1;
-pub const GLOB_NOSORT: c_int = 1 << 2;
-pub const GLOB_DOOFFS: c_int = 1 << 3;
-pub const GLOB_NOCHECK: c_int = 1 << 4;
-pub const GLOB_APPEND: c_int = 1 << 5;
-pub const GLOB_NOESCAPE: c_int = 1 << 6;
-pub const GLOB_PERIOD: c_int = 1 << 7;
+pub use crate::abi_generated::GLOB_ERR;
+pub use crate::abi_generated::GLOB_MARK;
+pub use crate::abi_generated::GLOB_NOSORT;
+pub use crate::abi_generated::GLOB_DOOFFS;
+pub use crate::abi_generated::GLOB_NOCHECK;
+pub use crate::abi_generated::GLOB_APPEND;
+pub use crate::abi_generated::GLOB_NOESCAPE;
+pub use crate::abi_generated::GLOB_PERIOD;
 
-pub const GLOB_NOSPACE: c_int = 1;
-pub const GLOB_ABORTED: c_int = 2;
-pub const GLOB_NOMATCH: c_int = 3;
+pub use crate::abi_generated::GLOB_NOSPACE;
+pub use crate::abi_generated::GLOB_ABORTED;
+pub use crate::abi_generated::GLOB_NOMATCH;
 
 /// `glob_t`（C 可见布局见 `libc/include/glob.h`；字段与 glibc 的公开字段同形）。
 #[repr(C)]

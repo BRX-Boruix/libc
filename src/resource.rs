@@ -7,11 +7,11 @@
 use crate::ctypes::c_int;
 
 /// `PRIO_PROCESS`：作用于单个进程（POSIX 取值 0）。
-pub const PRIO_PROCESS: c_int = 0;
+pub use crate::abi_generated::PRIO_PROCESS;
 /// `PRIO_PGRP`：作用于进程组（本系统无进程组，如实不支持）。
-pub const PRIO_PGRP: c_int = 1;
+pub use crate::abi_generated::PRIO_PGRP;
 /// `PRIO_USER`：作用于某用户的所有进程（本系统无多用户，如实不支持）。
-pub const PRIO_USER: c_int = 2;
+pub use crate::abi_generated::PRIO_USER;
 
 /// POSIX 的 `priority = 20 - nice` 里的基数（`getpriority`/`setpriority` 共用）。
 pub const PRIORITY_BASE: c_int = 20;

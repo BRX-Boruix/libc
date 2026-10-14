@@ -26,24 +26,24 @@ use alloc::vec::Vec;
 
 use crate::ctypes::{c_char, c_int, c_void, size_t};
 
-pub const REG_EXTENDED: c_int = 1;
-pub const REG_ICASE: c_int = 2;
-pub const REG_NEWLINE: c_int = 4;
-pub const REG_NOSUB: c_int = 8;
+pub use crate::abi_generated::REG_EXTENDED;
+pub use crate::abi_generated::REG_ICASE;
+pub use crate::abi_generated::REG_NEWLINE;
+pub use crate::abi_generated::REG_NOSUB;
 
-pub const REG_NOMATCH: c_int = 1;
-pub const REG_BADPAT: c_int = 2;
-pub const REG_ECOLLATE: c_int = 3;
-pub const REG_ECTYPE: c_int = 4;
-pub const REG_EESCAPE: c_int = 5;
-pub const REG_ESUBREG: c_int = 6;
-pub const REG_EBRACK: c_int = 7;
-pub const REG_EPAREN: c_int = 8;
-pub const REG_EBRACE: c_int = 9;
-pub const REG_BADBR: c_int = 10;
-pub const REG_ERANGE: c_int = 11;
-pub const REG_ESPACE: c_int = 12;
-pub const REG_BADRPT: c_int = 13;
+pub use crate::abi_generated::REG_NOMATCH;
+pub use crate::abi_generated::REG_BADPAT;
+pub use crate::abi_generated::REG_ECOLLATE;
+pub use crate::abi_generated::REG_ECTYPE;
+pub use crate::abi_generated::REG_EESCAPE;
+pub use crate::abi_generated::REG_ESUBREG;
+pub use crate::abi_generated::REG_EBRACK;
+pub use crate::abi_generated::REG_EPAREN;
+pub use crate::abi_generated::REG_EBRACE;
+pub use crate::abi_generated::REG_BADBR;
+pub use crate::abi_generated::REG_ERANGE;
+pub use crate::abi_generated::REG_ESPACE;
+pub use crate::abi_generated::REG_BADRPT;
 
 /// `{m,n}` 里 `n` 的上界（见模块文档的诚实边界）。
 pub const MAX_REPEAT: u32 = 255;
@@ -68,8 +68,8 @@ pub struct regmatch_t {
 }
 
 /// `regexec` 的 `eflags`。
-pub const REG_NOTBOL: c_int = 1;
-pub const REG_NOTEOL: c_int = 2;
+pub use crate::abi_generated::REG_NOTBOL;
+pub use crate::abi_generated::REG_NOTEOL;
 
 // ---------------------------------------------------------------------------
 // 指令集

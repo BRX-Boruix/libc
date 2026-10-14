@@ -18,26 +18,26 @@ use crate::ctypes::{c_int, c_void};
 use crate::errno::{from_libsys, set_errno, EINVAL};
 
 /// 信号号（与内核 `task::signals` / libsys `signal` 对齐，S13）。
-pub const SIGINT: c_int = 2;
-pub const SIGILL: c_int = 4;
-pub const SIGBUS: c_int = 7;
-pub const SIGFPE: c_int = 8;
-pub const SIGKILL: c_int = 9;
-pub const SIGUSR1: c_int = 10;
-pub const SIGSEGV: c_int = 11;
-pub const SIGUSR2: c_int = 12;
-pub const SIGPIPE: c_int = 13;
-pub const SIGALRM: c_int = 14;
-pub const SIGTERM: c_int = 15;
-pub const SIGCHLD: c_int = 17;
-pub const SIGCONT: c_int = 18;
-pub const SIGSTOP: c_int = 19;
+pub use crate::abi_generated::SIGINT;
+pub use crate::abi_generated::SIGILL;
+pub use crate::abi_generated::SIGBUS;
+pub use crate::abi_generated::SIGFPE;
+pub use crate::abi_generated::SIGKILL;
+pub use crate::abi_generated::SIGUSR1;
+pub use crate::abi_generated::SIGSEGV;
+pub use crate::abi_generated::SIGUSR2;
+pub use crate::abi_generated::SIGPIPE;
+pub use crate::abi_generated::SIGALRM;
+pub use crate::abi_generated::SIGTERM;
+pub use crate::abi_generated::SIGCHLD;
+pub use crate::abi_generated::SIGCONT;
+pub use crate::abi_generated::SIGSTOP;
 
 /// 处置哨兵（ADR-034 §3.3）：SIG_DFL / SIG_IGN 由内核 `action` 以 0/1 编码。
-pub const SIG_DFL: usize = 0;
-pub const SIG_IGN: usize = 1;
+pub use crate::abi_generated::SIG_DFL;
+pub use crate::abi_generated::SIG_IGN;
 /// `SIG_ERR`：signal() 出错返回（-1 的位型，作为哨兵）。
-pub const SIG_ERR: usize = usize::MAX;
+pub use crate::abi_generated::SIG_ERR;
 
 /// `sighandler_t`：信号处理函数指针（或 SIG_DFL/SIG_IGN 哨兵）。
 pub type sighandler_t = usize;
@@ -208,13 +208,13 @@ pub unsafe extern "C" fn sigprocmask(
 ///
 /// `SA_ONSTACK`：在备用信号栈上执行 handler（POSIX `sigaction` 的 `sa_flags` 位）。
 /// 取值与内核 `task::signal::SA_ONSTACK` 同一事实（0x08000000，与 Linux 一致）。
-pub const SA_ONSTACK: c_int = 0x0800_0000;
+pub use crate::abi_generated::SA_ONSTACK;
 
 /// `SS_ONSTACK`：查询时表示「当前正跑在备用栈上」。**本实现不产生该标志**（未实现查询），
 /// 常量如实定义以符合 POSIX 头文件。
-pub const SS_ONSTACK: c_int = 1;
+pub use crate::abi_generated::SS_ONSTACK;
 /// `SS_DISABLE`：设置时表示禁用备用栈。
-pub const SS_DISABLE: c_int = 2;
+pub use crate::abi_generated::SS_DISABLE;
 
 /// `stack_t`（POSIX `<signal.h>`）。
 #[repr(C)]
