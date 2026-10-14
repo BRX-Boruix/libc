@@ -59,6 +59,8 @@ extern crate alloc;
 // 的源文件里，宿主侧用 `mod x { include!("...") }` 引入**同一份源码**做逐点验证。
 // 故 `mode.rs` 这类纯模块应走 `tools/checks/` 下的宿主验证器，而不是拆 crate。
 
+// 跨边界常量的**生成物**（源：tools/abi/constants.json）。数值勿手改——门禁会比对。
+mod abi_generated;
 pub mod ctype;
 pub mod ctypes;
 pub mod dirent;

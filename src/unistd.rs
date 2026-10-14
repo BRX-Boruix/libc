@@ -1061,7 +1061,7 @@ pub const _PC_PIPE_BUF: c_int = 5;
 /// 不查内核——若将来支持可变页大小，此处需改为查询。
 #[unsafe(no_mangle)]
 pub extern "C" fn getpagesize() -> c_int {
-    4096
+    crate::abi_generated::PAGE_SIZE
 }
 
 /// `pathconf(path, name)`：按名字返回路径相关限制。
@@ -1093,9 +1093,9 @@ pub unsafe extern "C" fn pathconf(path: *const c_char, name: c_int) -> crate::ct
         return -1;
     }
     match name {
-        _PC_PATH_MAX => 4096,
-        _PC_NAME_MAX => 255,
-        _PC_PIPE_BUF => 4096,
+        _PC_PATH_MAX => crate::abi_generated::PATH_MAX,
+        _PC_NAME_MAX => crate::abi_generated::NAME_MAX,
+        _PC_PIPE_BUF => crate::abi_generated::PIPE_BUF,
         // 无限制：POSIX 规定此时返回 -1 且**不得**改动 errno。
         _PC_LINK_MAX => -1,
         _ => {
