@@ -14,3 +14,7 @@ pub const PAGE_SIZE: c_int = 4096;
 pub const PATH_MAX: c_long = 4096;
 pub const NAME_MAX: c_long = 255;
 pub const PIPE_BUF: c_long = 4096;
+
+// ---------- 默认 PATH（与 shell 的 DEFAULT_PATH 同源） ----------
+
+pub const DEFAULT_PATH_C: &[u8] = b"/programs:/volumes/BORUIX_DATA/3p\0";

@@ -59,8 +59,9 @@ pub unsafe extern "C" fn gets(s: *mut c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn confstr(name: c_int, buf: *mut c_char, len: usize) -> usize {
     let v: &[u8] = match name {
-        // 与 shell/src/env.rs 的 DEFAULT_PATH 逐字节一致（有门禁核对）。
-        1 => b"/programs:/volumes/BORUIX_DATA/3p\0",
+        // 与 shell/src/env.rs 的 DEFAULT_PATH 同源：都由 tools/abi/constants.json 生成
+        // （tools/checks/dist/confstr_path_agrees.py 核对两侧生成物逐字节一致）。
+        1 => crate::abi_generated::DEFAULT_PATH_C,
         2 => b"boruix 0.1.0\0",
         _ => {
             crate::errno::set_errno(crate::errno::EINVAL);
