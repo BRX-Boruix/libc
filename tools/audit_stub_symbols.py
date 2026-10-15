@@ -57,8 +57,9 @@ TRIAGED = {
     "fflush": "刻意的空操作：本 libc 无用户态缓冲，无数据可冲——函数文档已写明，且与 setvbuf 判不支持同一决定",
     "glob": "未实现的旗标（GLOB_BRACE/GLOB_TILDE 等）如实拒绝，绝不静默忽略",
     "lseek": "SEEK_CUR 对从未被定位过的 fd 无法得知当前位置（内核不暴露），如实 ENOTSUP",
-    "mmap": "只支持匿名映射；非匿名 / MAP_SHARED / 指定地址如实 ENOTSUP（文件映射未实现）",
+    "mmap": "只支持匿名私有映射；非匿名 / MAP_SHARED / 未知标志位（含 MAP_FIXED）如实 ENOTSUP（文件映射未实现；addr 是提示、已按 POSIX 忽略——第九轮订正）",
     "waitpid": "仅 options==0 与 WNOHANG 支持；WUNTRACED 等如实 ENOTSUP（本系统无作业控制）",
+    "kill": "pid<=0 的两档语义（第七轮）：pid==0 等价于发给自身（本系统无进程组，组内唯一成员就是自己，不是近似）；pid<0 是「进程组 / 全体」语义，本系统做不到 ⇒ 如实 ENOTSUP，不静默降级成「只发给自己」",
 }
 
 FN_RE = re.compile(r"^\s*(?:pub\s+)?(?:unsafe\s+)?(?:extern\s+\"C\"\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")

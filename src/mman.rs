@@ -72,10 +72,13 @@ pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -
 
 /// `mmap(addr, length, prot, flags, fd, offset)`：匿名映射（3P4-4）。
 ///
-/// **当前只支持匿名映射**：`addr` 必须为 NULL（由内核选地址）、`flags` 必须含
-/// `MAP_ANONYMOUS` 且不含 `MAP_SHARED`（共享映射走 libsys 的 shm_* 通道），
-/// `fd`/`offset` 忽略。其余组合如实 `ENOTSUP`——绝不假装成功（文件映射需要另一条
-/// 通道，尚未实现）。
+/// **当前只支持匿名私有映射**：`flags` 必须含 `MAP_ANONYMOUS`、不含 `MAP_SHARED`
+/// （共享映射走 libsys 的 shm_* 通道），`fd`/`offset` 忽略。其余组合如实 `ENOTSUP`
+/// ——绝不假装成功（文件映射需要另一条通道，尚未实现）。
+///
+/// `addr` 按 POSIX 是**提示**：非 NULL 且未设 `MAP_FIXED` 时实现可以另择地址，调用方
+/// **必须**用返回值。故本实现**忽略**该提示（由内核选地址），**不**因此拒绝调用；
+/// `MAP_FIXED` 本身则**如实拒绝**（做不到「必须放在这里」），见下方注释。
 ///
 /// W^X 由内核**单点**拒绝（写+执行同页 → `EINVAL`），本层不预检（S13：策略不两处漂移）。
 #[unsafe(no_mangle)]
@@ -87,10 +90,17 @@ pub unsafe extern "C" fn mmap(
     _fd: c_int,
     _offset: off_t,
 ) -> *mut c_void {
-    if !addr.is_null() || flags & MAP_ANONYMOUS == 0 || flags & MAP_SHARED != 0 {
+    // **已知标志位** = POSIX 的 MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS。其余位如实拒绝：
+    // 尤其 MAP_FIXED（Linux 值 0x10）——本实现做不到「必须放在指定地址」，而此前它落在
+    // 未被检查的位里被**静默忽略**：调用方以为映射落在 `addr` 上，实际落在内核挑的地址上。
+    // POSIX 里 MAP_FIXED **不是**提示，静默忽略等于伪造。
+    let known = MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS;
+    if flags & !known != 0 || flags & MAP_ANONYMOUS == 0 || flags & MAP_SHARED != 0 {
         set_errno(ENOTSUP);
         return MAP_FAILED;
     }
+    // `addr` 只是提示（见函数文档）：忽略它，由内核选地址。
+    let _ = addr;
     // **不在这里掩码**：未知 prot 位的拒绝是内核的**单点**——`mm::user_space::map_flags_from_prot`
     // 对 `prot & !(READ|WRITE|EXEC) != 0` 返回 InvalidParam（其文档明确写「未知位同样不静默忽略」）。
     // 此前写成 `& 0x7`，把未知位**静默丢掉**：`mmap(..., prot = 0x100, ...)` 会被当成
