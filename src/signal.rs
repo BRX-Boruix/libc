@@ -45,9 +45,6 @@ pub type sighandler_t = usize;
 /// `sigset_t`：屏蔽集（BORUIX 用 u64 位图，NSIG=64，与 libsys mask 对齐）。
 pub type sigset_t = u64;
 
-/// SA_ONSTACK 与 SS_* 的**内核侧同一事实**（见 libc/include/signal.h 的说明）。
-/// 取值与内核 	ask::signal::SA_ONSTACK 一致（0x08000000，与 Linux 对齐）。
-
 
 /// `struct sigaction`（BORUIX 精简 ABI，x86_64）：
 /// - `sa_handler`：SIG_DFL/SIG_IGN/函数指针；
@@ -107,15 +104,16 @@ pub unsafe extern "C" fn sigaction(
         set_errno(EINVAL);
         return -1;
     }
-    // 纯查询（act==NULL）：内核无纯查询原语，用"设 SIG_DFL 取旧、再设回旧"实现。
-    // 单进程 toy 内核下无竞争；如实注释为查询-恢复。
+    // 纯查询（act==NULL）：走内核的**查询模式**（`a4=1`）——**一次 syscall、不改状态**。
+    //
+    // 此前是「设 SIG_DFL 读旧值、再设回去」：**两次 syscall**，中间那一段该信号的处置
+    // **真的是 SIG_DFL**——若此时投递到本进程，走的不是原 handler 而是**默认动作**
+    // （SIGTERM/SIGINT 即终止）。而信号正是在 syscall 返回边界上投递的，窗口不是理论上的。
+    // 旧注释称"单进程 toy 内核下无竞争"——那句话在本系统（SMP 4 + 线程）里**是假的**。
+    // 内核为此补了与 `altstack` 同款的 `a4` 模式位。
     if act.is_null() {
-        let old = libsys::signal::action(sig as u32, libsys::signal::SIG_DFL, 0);
-        return match old {
+        return match libsys::signal::action_query(sig as u32) {
             Ok(old_disp) => {
-                if old_disp != libsys::signal::SIG_DFL {
-                    let _ = libsys::signal::action(sig as u32, old_disp, 0);
-                }
                 fill_oact(oact, old_disp);
                 0
             }
