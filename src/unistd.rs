@@ -112,8 +112,21 @@ pub extern "C" fn close(fd: c_int) -> c_int {
 /// 缺的只是 libc 的 C 包装与 <unistd.h> 声明。
 ///
 /// 位置表：本 libc 在用户态维护「每 fd 的文件位置」（内核的流式读写只认显式 offset，见
-/// fd_pos_*）。POSIX 要求 dup2 的副本与原 fd **共享**同一文件偏移，故这里把 oldfd 的位置
-/// 复制到 newfd——与 close 清位置**对偶**（少了这一步，副本会从 0 开始读）。
+/// fd_pos_*）。这里把 oldfd 的位置**复制**到 newfd——与 close 清位置**对偶**（少了这一步，
+/// 副本会从 0 开始读）。
+///
+/// **订正一处说错的注释（语义忠实性审查）**：原文写「POSIX 要求 dup2 的副本与原 fd **共享**
+/// 同一文件偏移，故这里把位置复制过去」——**「共享」与「复制」不是一回事**，而代码做的是复制。
+/// 真实情况分两种，如实写清：
+///
+/// - **未跟踪的 fd**（从未 lseek 过）：位置由**内核**维护在 `FileHandle.offset` 上，而
+///   内核 dup 是 `Arc::clone`（**真共享**）⇒ 这一档**与 POSIX 一致** ✓；
+/// - **已跟踪的 fd**（lseek 过）：位置在**本表的每-fd 槽位**里，dup2 只做一次性快照 ⇒
+///   此后读其一**不会**推进另一个的位置，与 POSIX 的「共享同一打开文件描述」**不一致** ✗。
+///
+/// 这一档是**已知偏离**：彻底修好需要内核给一个「设置位置」或「按打开文件描述共享位置」的
+/// 原语（内核只有 `STREAM_OFFSET_CURRENT` 的顺序推进与「显式偏移不推进」两种），
+/// 属独立的内核变更。此处**如实登记**，不假装共享。
 #[unsafe(no_mangle)]
 pub extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
     if oldfd < 0 || newfd < 0 {
@@ -339,6 +352,27 @@ pub extern "C" fn lseek(
     if newpos < 0 {
         // POSIX：定位到负偏移是 EINVAL。
         set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    // POSIX：**不可定位**的 fd（管道/FIFO/字符设备/套接字）必须 **ESPIPE**，而且
+    // **不得**把它转入「用户态维护位置」模式——否则此后 read/write 会走定位 I/O，
+    // 被内核按节点真值拒绝（`Error::IllegalSeek`）：一个探测性的 lseek 就把管道用坏了。
+    //
+    // 判据**不靠 fd 号、也不靠类型位猜**，而是**问内核**：用**一字节定位读**探一次；
+    // 返回 `IllegalSeek` 就是节点真值（该节点非顺序可定位）。
+    //
+    // **为什么是「一字节」而不是「零长」（实测逼出来的，不是推断）**：第一版用零长探针，
+    // 理由是「内核先判 `is_seekable()`、再查长度」——**该推断被证伪**：内核 `sys_read`
+    // 对 `len == 0` 有**前置短路**（`if len == 0 { return done(pack_ok(0)) }`，位置在
+    // 管道判定与 `is_seekable` 判定**之前**），故零长探针什么都探不出来；机内用例当场
+    // 报 `lseek(pipe, SEEK_SET) -> -1: FAIL`（passed=396 failed=3）。
+    //
+    // 一字节定位读是安全的：**显式偏移不推进任何位置**（内核的 `offset` 与 libc 的位置表
+    // 都不动，这正是 `pread` 的语义），而对不可定位的 fd，内核在**任何数据被取走之前**
+    // 就按节点真值返回 ESPIPE。
+    let mut probe = [0u8; 1];
+    if let Err(libsys::Error::IllegalSeek) = libsys::pread(fd as u64, &mut probe, newpos as u64) {
+        set_errno(crate::errno::ESPIPE);
         return -1;
     }
     fd_pos_lock();
@@ -914,13 +948,36 @@ pub extern "C" fn getcwd(buf: *mut c_char, size: size_t) -> *mut c_char {
 /// 终端"——stdout 被重定向到普通文件或管道后**仍是 fd 1**，却依旧返回 1。
 /// 那是硬编码猜测而非真值查询（违反 ADR-027 诚实契约与 S09/S10/S11）。
 ///
-/// **失败语义**：fd 不存在即非终端 → 返回 0 并置 `EBADF`（POSIX 语义），
+/// **失败语义（订正后，逐条如实）**：
+///
+/// - **fd 有效但不是终端** -> 返回 0 并置 **ENOTTY**（POSIX 要求）。此前**不置 errno**，
+///   于是"stdout 被重定向到普通文件"这个最常见的情形下，调用方读 errno 会拿到**上一次的残留值**；
+/// - **fd 缺失或管道端** -> 返回 0，errno 用**内核给的那个**（内核 `sys_fstat` 对二者都返回
+///   `NotFound` ⇒ 这里是 **ENOENT**）。**诚实边界**：POSIX 要求这两种分别置 `EBADF`
+///   / `ENOTTY`，而内核的 `fstat` **无法区分**"fd 不存在"与"fd 是管道"，故**兑现不了**；
+///   要兑现需内核补一个能查管道的 fstat。此处不假装——原注释写"置 EBADF"，
+///   **那句与代码实际行为不符**，一并订正。
 /// **不伪造终端**。安全侧：宁可如实说"不是终端"。
 #[unsafe(no_mangle)]
 pub extern "C" fn isatty(fd: c_int) -> c_int {
     match libsys::fstat(fd as u64) {
-        Ok(info) => isatty_from_info(&info),
+        Ok(info) => {
+            if isatty_from_info(&info) != 0 {
+                1
+            } else {
+                // POSIX：fd **有效**但不是终端 -> 0 并置 **ENOTTY**。
+                // 此前不置 errno，于是"stdout 被重定向到普通文件"这个最常见的情形下，
+                // 调用方读 errno 会拿到**上一次的残留值**。
+                set_errno(crate::errno::ENOTTY);
+                0
+            }
+        }
         Err(e) => {
+            // fd 缺失或**管道端**（内核 sys_fstat 只处理文件，二者同为 NotFound）
+            // => errno 用内核给的那个（ENOENT）。
+            // **诚实边界**：POSIX 要求这两种分别置 EBADF / ENOTTY，而内核 fstat
+            // **无法区分**"fd 不存在"与"fd 是管道"，故兑现不了——要兑现需内核补一个
+            // 能查管道的 fstat。此处不假装。
             set_errno(from_libsys(e));
             0
         }
