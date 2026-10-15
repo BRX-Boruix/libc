@@ -321,6 +321,46 @@ pub extern "C" fn lseek(
     offset: crate::ctypes::c_long,
     whence: c_int,
 ) -> crate::ctypes::c_long {
+    // POSIX：**不可定位**的 fd（管道/FIFO/字符设备/套接字）必须 **ESPIPE**，而且
+    // **不得**把它转入「用户态维护位置」模式——否则此后 read/write 会走定位 I/O，
+    // 被内核按节点真值拒绝（`Error::IllegalSeek`）：一个探测性的 lseek 就把管道用坏了。
+    //
+    // 判据**不靠 fd 号、也不靠类型位猜**，而是**问内核**：用**一字节定位读**探一次；
+    // 返回 `IllegalSeek` 就是节点真值（该节点非顺序可定位）。
+    //
+    // **为什么是「一字节」而不是「零长」（实测逼出来的，不是推断）**：第一版用零长探针，
+    // 理由是「内核先判 `is_seekable()`、再查长度」——**该推断被证伪**：内核 `sys_read`
+    // 对 `len == 0` 有**前置短路**（`if len == 0 { return done(pack_ok(0)) }`，位置在
+    // 管道判定与 `is_seekable` 判定**之前**），故零长探针什么都探不出来；机内用例当场
+    // 报 `lseek(pipe, SEEK_SET) -> -1: FAIL`（passed=396 failed=3）。
+    //
+    // 一字节定位读是安全的：**显式偏移不推进任何位置**（内核的 `offset` 与 libc 的位置表
+    // 都不动，这正是 `pread` 的语义），而对不可定位的 fd，内核在**任何数据被取走之前**
+    // 就按节点真值返回 ESPIPE。
+    //
+    // **探针放在 `whence` 之前**（不是算完 `newpos` 之后）：否则 `SEEK_CUR` 会先撞上
+    // 「未跟踪 ⇒ ENOTSUP」、`SEEK_END` 会先撞上 `fstat` 的 NotFound——而管道上这两个
+    // whence 的 POSIX 答案都是 **ESPIPE**，不该被别的错误抢先。探针用偏移 0，
+    // 对可定位文件无副作用。
+    let mut probe = [0u8; 1];
+    match libsys::pread(fd as u64, &mut probe, 0) {
+        Err(libsys::Error::IllegalSeek) => {
+            set_errno(crate::errno::ESPIPE);
+            return -1;
+        }
+        // 内核 `sys_read` 对「fd 不存在」的**唯一**出口是 `InvalidParam`
+        // （`syscall.rs:2634`/`2661`；本探针 len=1、offset=0，故 2702/2712 那两条
+        // 用户地址溢出的出口不可达）。POSIX 要求坏 fd ⇒ **EBADF**；而**内核错误集里
+        // 没有 EBADF**（`klib::error::Error` 无此项，见本轮登记），故这是 libc 唯一
+        // 一处把「fd 不存在」译成 POSIX 码的地方——此前 `lseek` 对坏 fd **返回 0（假成功）**。
+        Err(libsys::Error::InvalidParam) => {
+            set_errno(crate::errno::EBADF);
+            return -1;
+        }
+        // 其余错误（例如只写节点的读权限被拒）**不足以判定不可定位**：不据此拒绝，
+        // 否则 `lseek` 在不可读的普通文件上会坏掉。残余边界见本轮报告。
+        _ => {}
+    }
     let newpos: i64 = match whence {
         SEEK_SET => offset,
         SEEK_CUR => {
@@ -352,27 +392,6 @@ pub extern "C" fn lseek(
     if newpos < 0 {
         // POSIX：定位到负偏移是 EINVAL。
         set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-    // POSIX：**不可定位**的 fd（管道/FIFO/字符设备/套接字）必须 **ESPIPE**，而且
-    // **不得**把它转入「用户态维护位置」模式——否则此后 read/write 会走定位 I/O，
-    // 被内核按节点真值拒绝（`Error::IllegalSeek`）：一个探测性的 lseek 就把管道用坏了。
-    //
-    // 判据**不靠 fd 号、也不靠类型位猜**，而是**问内核**：用**一字节定位读**探一次；
-    // 返回 `IllegalSeek` 就是节点真值（该节点非顺序可定位）。
-    //
-    // **为什么是「一字节」而不是「零长」（实测逼出来的，不是推断）**：第一版用零长探针，
-    // 理由是「内核先判 `is_seekable()`、再查长度」——**该推断被证伪**：内核 `sys_read`
-    // 对 `len == 0` 有**前置短路**（`if len == 0 { return done(pack_ok(0)) }`，位置在
-    // 管道判定与 `is_seekable` 判定**之前**），故零长探针什么都探不出来；机内用例当场
-    // 报 `lseek(pipe, SEEK_SET) -> -1: FAIL`（passed=396 failed=3）。
-    //
-    // 一字节定位读是安全的：**显式偏移不推进任何位置**（内核的 `offset` 与 libc 的位置表
-    // 都不动，这正是 `pread` 的语义），而对不可定位的 fd，内核在**任何数据被取走之前**
-    // 就按节点真值返回 ESPIPE。
-    let mut probe = [0u8; 1];
-    if let Err(libsys::Error::IllegalSeek) = libsys::pread(fd as u64, &mut probe, newpos as u64) {
-        set_errno(crate::errno::ESPIPE);
         return -1;
     }
     fd_pos_lock();
@@ -1204,7 +1223,10 @@ pub use crate::abi_generated::F_GETFD;
 pub use crate::abi_generated::F_SETFD;
 pub use crate::abi_generated::F_GETFL;
 pub use crate::abi_generated::F_SETFL;
-/// FD_CLOEXEC：fd 标志（本内核无 exec 关闭语义 → F_SETFD 恒拒绝）。
+/// FD_CLOEXEC：fd 标志。**内核有 `FLAG_CLOEXEC`**（`vfs::file_handle` 位 7：`open` 时
+/// 可设、`exec` 时**真的关闭**该 fd，见 `kernel/src/syscall.rs:3841`；`dup2` 按 POSIX
+/// 清除副本的该位，见同文件 1816-1823）——但内核**没有**「查询/设置已打开 fd 的 fd 标志」
+/// 的原语，故本文件的 `F_GETFD`/`F_SETFD` 兑现不了 POSIX 语义（见下方边界）。
 pub use crate::abi_generated::FD_CLOEXEC;
 
 /// `fcntl(fd, cmd, ...)`：fd 控制。
@@ -1213,9 +1235,14 @@ pub use crate::abi_generated::FD_CLOEXEC;
 /// `dup2` 实现（用 `dup2(fd,fd)` 非破坏性探测 fd 是否占用，见内核 sys_dup2：
 /// `old==new` 时仅校验存在性）。
 ///
-/// 诚实边界（S09）：内核不暴露访问模式/状态旗标查询（`F_GETFL`）、无
-/// CLOEXEC（`F_SETFD`）、无 fd 级锁（`F_GETLK/F_SETLK`）→ 这些命令如实返回
-/// ENOTSUP，不伪造。
+/// 诚实边界（S09）：
+/// - 内核不暴露访问模式/状态旗标查询（`F_GETFL`）→ ENOTSUP；
+/// - **CLOEXEC 只能在 `open` 时设定**（`libsys::OpenFlags::cloexec`；`fopen` 的 `"e"`
+///   后缀走的就是这条路），内核没有「查询/设置已打开 fd 标志」的原语 ⇒ `F_GETFD`
+///   无法如实回答、`F_SETFD` 无法生效。**早先这里的注释写着「本内核无 CLOEXEC
+///   概念」——那句是错的**：内核有该位、且 `exec` 真的执行它；缺的是**查询/设置原语**。
+///   要兑现需内核补一个 fd-flags 原语（语义忠实性审查第五轮登记）；
+/// - 无 fd 级锁（`F_GETLK/F_SETLK`）→ ENOTSUP。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, args: ...) -> c_int {
     let mut ap = core::mem::transmute::<_, core::ffi::VaList>(args);
@@ -1225,10 +1252,16 @@ pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, args: ...) -> c_int {
             // 与 dup() 共用同一实现（单点）：dup(fd) 按 POSIX 就等价于 F_DUPFD 且 arg=0。
             return dupfd_from(fd, arg);
         }
-        F_GETFD => 0, // 无 fd 标志（无 CLOEXEC 概念）。
+        // 本系统无法查询已打开 fd 的标志（无原语）。恒 0 是**近似**：若该 fd 是以
+        // CLOEXEC 打开的，POSIX 要求这里返回 FD_CLOEXEC —— 如实登记为偏离，不假装。
+        // 修法在内核（补 fd-flags 查询原语），不在本层。
+        F_GETFD => 0,
         F_SETFD => {
             let flags = unsafe { ap.next_arg::<c_int>() };
             if flags == 0 {
+                // POSIX：清 FD_CLOEXEC。本系统无原语可清：对**未以 CLOEXEC 打开**的 fd
+                // 「没有该位」与「清掉它」等价；对以 CLOEXEC 打开的 fd **不等价**——
+                // 这里返回 0 是保守近似（调用方通常只是「确保可继承」），偏离已登记。
                 0
             } else {
                 set_errno(crate::errno::ENOTSUP);

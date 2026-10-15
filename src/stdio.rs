@@ -271,6 +271,12 @@ pub unsafe extern "C" fn freopen(
         Ok(newfd) => {
             let f = unsafe { &mut *fp };
             if !f.closed {
+                // **先把旧流的写缓冲落盘，再关旧 fd**（POSIX/C：freopen「先尝试关闭与该流
+                // 关联的文件」，而关闭含冲刷）。此前这里**不冲刷**：全缓冲写流上
+                // `fwrite(...)` 之后直接 `freopen(...)`，缓冲里的字节被静默丢弃——
+                // 第一个文件看起来是空的。关闭错误本身按 POSIX「忽略」（`let _`），
+                // 但**不能连尝试都不做**。
+                let _ = wflush(f);
                 // 同 fclose：必须经 libc 的 close 清掉该 fd 的位置表条目，否则新绑定的流会
                 // 带着旧文件的位置（fd 号复用是常态）。
                 let _ = crate::unistd::close(f.fd as c_int);
@@ -309,15 +315,34 @@ pub unsafe extern "C" fn freopen(
 /// 但**打开旗标不同**（`w+` 要创建+截断，`r+` 绝不能截断）。分成两个函数解析必然漂移——
 /// 本项首版正是分开写的，于是 `"w+"` 会拿到 `r+` 的旗标（不创建、不截断）——
 /// 一个只在「文件不存在」时才显形的缺陷。
+///
+/// **POSIX.1-2008 的两个后缀此前被静默忽略，本轮已补**：
+/// - `x`（`"wx"`/`"w+x"`/`"ax"`）⇒ `O_CREAT|O_EXCL`：**文件已存在则失败**（`EEXIST`）。
+///   忽略它不只是「少个特性」——`fopen(p, "wx")` 会退化成 `"w"`，**把已存在的文件截断**：
+///   一个以「不覆盖」为目的的调用反而销毁数据；
+/// - `e`（`"we"`）⇒ `O_CLOEXEC`（`exec` 后不留给子进程）。
+///
+/// 两者内核与 `libsys::OpenFlags` **都早已支持**（`exclusive`/`cloexec`，见
+/// `kernel/src/syscall.rs` 的 FLAG_EXCL 判定与 `vfs::file_handle` 的位分配）——
+/// 缺的只是这里的解析，属**映射点遗漏**，不是能力缺口。
+///
+/// `x` 只在**创建**模式下有 POSIX 语义（POSIX 只定义 `w`/`a` 与 `x` 同用）；
+/// 与 `r` 同用时**明确拒绝**（返回 None ⇒ 调用方置 EINVAL），不静默降级——
+/// `r` 不创建，带上 `O_EXCL` 只会变成一个恒失败的开法，那不是 POSIX 定义的语义。
 fn parse_mode(mode: *const c_char) -> Option<(FmMode, libsys::OpenFlags)> {
     unsafe {
         let m = mode as *const u8;
         let c0 = *m;
         let mut plus = false;
+        let mut excl = false;
+        let mut cloexec = false;
         let mut i = 0usize;
         while *m.add(i) != 0 {
-            if *m.add(i) == b'+' {
-                plus = true;
+            match *m.add(i) {
+                b'+' => plus = true,
+                b'x' => excl = true,
+                b'e' => cloexec = true,
+                _ => {}
             }
             i += 1;
         }
@@ -332,15 +357,24 @@ fn parse_mode(mode: *const c_char) -> Option<(FmMode, libsys::OpenFlags)> {
             cloexec: false,
             exclusive: false,
         };
-        match (c0, plus) {
-            (b'r', false) => Some((FmMode::Read, libsys::OpenFlags::READ_ONLY)),
-            (b'r', true) => Some((FmMode::ReadWrite, libsys::OpenFlags::READ_WRITE)),
-            (b'w', false) => Some((FmMode::Write, libsys::OpenFlags::CREATE_OR_TRUNCATE)),
-            (b'w', true) => Some((FmMode::ReadWrite, libsys::OpenFlags::CREATE_OR_TRUNCATE)),
-            (b'a', false) => Some((FmMode::Append, append)),
-            (b'a', true) => Some((FmMode::AppendRead, append)),
-            _ => None,
+        let (fm, mut flags) = match (c0, plus) {
+            (b'r', false) => (FmMode::Read, libsys::OpenFlags::READ_ONLY),
+            (b'r', true) => (FmMode::ReadWrite, libsys::OpenFlags::READ_WRITE),
+            (b'w', false) => (FmMode::Write, libsys::OpenFlags::CREATE_OR_TRUNCATE),
+            (b'w', true) => (FmMode::ReadWrite, libsys::OpenFlags::CREATE_OR_TRUNCATE),
+            (b'a', false) => (FmMode::Append, append),
+            (b'a', true) => (FmMode::AppendRead, append),
+            _ => return None,
+        };
+        if excl {
+            // `r` 不创建 ⇒ `x` 无 POSIX 语义：如实拒绝，不静默忽略。
+            if !flags.create {
+                return None;
+            }
+            flags.exclusive = true;
         }
+        flags.cloexec = cloexec;
+        Some((fm, flags))
     }
 }
 
@@ -390,7 +424,10 @@ pub unsafe extern "C" fn fclose(fp: *mut FILE) -> c_int {
             return EOF;
         }
         // **先冲刷再关**（有缓冲后这是数据不丢的唯一保证）。
-        let _ = wflush(f);
+        // 冲刷结果**必须**参与返回码：POSIX/C 规定 `fclose` 在关闭（含最终冲刷）失败时
+        // 返回 EOF。此前写成 `let _ = wflush(f)` 且恒返回 0——盘满/写失败时调用者收到
+        // 「成功」，而缓冲里的数据已经丢了（S09：不得伪成功）。
+        let flush_ok = wflush(f);
         // 只释放**本库分配**的缓冲：setvbuf 允许调用方自带缓冲，释放调用方的内存
         // 是实打实的堆破坏。
         if f.buf_owned && !f.buf_ptr.is_null() {
@@ -412,8 +449,9 @@ pub unsafe extern "C" fn fclose(fp: *mut FILE) -> c_int {
         // `fopen("w+")` 复用，写入落在偏移 13 ⇒ 文件大小 25（13+12）而开头 13 字节是 0。
         let _ = crate::unistd::close(fd as c_int);
         crate::malloc::free(fp as *mut u8);
+        // 冲刷失败 ⇒ EOF（errno 已由失败的底层 `write` 置好，见 `fio_write` 的契约）。
+        if flush_ok { 0 } else { EOF }
     }
-    0
 }
 
 /// FILE 层读写**单点**：所有流式 I/O 都经 libc 的 `read`/`write`，而不是直接调 `libsys`。
