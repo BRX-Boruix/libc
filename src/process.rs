@@ -252,9 +252,37 @@ pub extern "C" fn getppid() -> c_int {
 }
 
 /// `kill(pid, sig)`：向进程发信号。返回 0 或 -1（置 errno）。
+///
+/// **POSIX 的 `pid` 三档语义在本系统没有完全对应物**（`getpgrp`/`setpgid`/`setsid` 属
+/// 登记缺失项，内核**没有进程组概念**，见 `waitpid` 的说明）。故逐档**如实**处理，
+/// 不把"做不到"混成"没这个进程"：
+///
+/// - `pid > 0`：直接转发（目标不存在时内核给 `InvalidParam` ⇒ EINVAL）；
+/// - `pid == 0`：POSIX 是「发给**调用者所在进程组**」。本系统每个进程自成一个组
+///   （无组可加入），组内唯一成员就是自己 ⇒ **等价于 `kill(getpid(), sig)`**。
+///   这不是近似：在"无组"模型下这就是真值。此前把它当 pid=0 直接下发，内核查不到
+///   该 pid ⇒ 返回 EINVAL——连「`kill(0, 0)` 探活自己」这个最常见用法都失败；
+/// - `pid < 0`：POSIX 是「发给进程组 `|pid|`」（`-1` = 所有有权限的进程）。本系统做不到
+///   ⇒ 如实 **ENOTSUP**，**不**静默降级成"只发给自己"（那会让调用方以为整组都收到了）。
+///
+/// （语义忠实性审查第七轮。）
 #[unsafe(no_mangle)]
 pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
-    match libsys::kill(pid as u64, sig as u64) {
+    if pid < 0 {
+        set_errno(crate::errno::ENOTSUP);
+        return -1;
+    }
+    let target = if pid == 0 {
+        // getpid 失败时已置 errno，直接上抛。
+        let me = getpid();
+        if me < 0 {
+            return -1;
+        }
+        me
+    } else {
+        pid
+    };
+    match libsys::kill(target as u64, sig as u64) {
         Ok(_) => 0,
         Err(e) => {
             set_errno(from_libsys(e));

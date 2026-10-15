@@ -402,17 +402,26 @@ pub unsafe extern "C" fn sigismember(set: *const sigset_t, sig: c_int) -> c_int 
     }
     ((unsafe { *set } >> sig) & 1) as c_int
 }
-/// `raise(sig)`：向自身发送信号（复用内核 kill(getpid)）。
+/// `raise(sig)`：向**调用线程**投递信号（POSIX：等价于 `pthread_kill(pthread_self(), sig)`）。
 ///
-/// 返回 0 成功，-1 失败置 errno。
+/// **为什么用 `gettid()` 而不是 `getpid()`**：本内核的信号状态（处置/屏蔽/未决/重入守卫）
+/// 是**每个调度单元一份**——`task::process::Process::signal`，而线程派生走
+/// `Process::with_group`，那里对组员**新建** `SignalState::new()`（内核注释自陈
+/// 「PRE-5：信号保持每进程独立，逐线程信号全套留 libpthread」）。故 `getpid()`（线程组
+/// **组长**）会把信号投到**组长**的状态上，而不是调用者的：工作线程里 `raise` 可能被
+/// 组长的处置/待决集接管。单线程下 tid == pid，行为不变。
+///
+/// **诚实边界（第七轮登记）**：POSIX 要求信号**处置**是**进程级**的，而本内核是每线程一份
+/// ——多线程程序里一个线程装的 handler 对别的线程不生效。这一条 libc **补不了**（改不了
+/// 内核的存储归属），修法在内核（把处置/屏蔽/待决移入 `ThreadGroup`，即内核自陈的 T1-3）。
 #[unsafe(no_mangle)]
 pub extern "C" fn raise(sig: c_int) -> c_int {
-    let pid = crate::process::getpid();
-    if pid < 0 {
-        set_errno(crate::errno::ENOENT);
+    let tid = crate::process::gettid();
+    if tid < 0 {
+        // gettid 失败时已置 errno，不覆盖成别的码。
         return -1;
     }
-    match libsys::signal::raise(pid as u64, sig as u32) {
+    match libsys::signal::raise(tid as u64, sig as u32) {
         Ok(_) => 0,
         Err(e) => {
             set_errno(from_libsys(e));
