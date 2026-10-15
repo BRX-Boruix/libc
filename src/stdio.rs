@@ -1548,10 +1548,10 @@ impl FmtSink for CounterSink {
 
 /// 输出到 fd 的 sink。
 ///
-/// `file@BT@：非空时输出**必须经该流的写缓冲**（@BT@wbuf_put@BT@），而不是直接落 fd。
-/// 为什么：@BT@fputs@BT@/@BT@fwrite@BT@/@BT@fputc@BT@ 是走缓冲的，printf 家族若直写 fd，两者在同一流上
-/// 就会**乱序**——实测 @BT@fputs("hello\n")@BT@ 之后 @BT@fprintf(" n=%d", 42)@BT@ 得到
-/// @BT@" n=42hello\n"@BT@（13 字节，但顺序完全错）。这正是本结构加这个字段的原因。
+/// `file`：非空时输出**必须经该流的写缓冲**（`wbuf_put`），而不是直接落 fd。
+/// 为什么：`fputs`/`fwrite`/`fputc` 是走缓冲的，printf 家族若直写 fd，两者在同一流上
+/// 就会**乱序**——实测 `fputs("hello\n")` 之后 `fprintf(" n=%d", 42)` 得到
+/// `" n=42hello\n"`（13 字节，但顺序完全错）。这正是本结构加这个字段的原因。
 struct FdSink {
     fd: u64,
     wrote: ssize_t,

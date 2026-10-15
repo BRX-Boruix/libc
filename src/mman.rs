@@ -60,8 +60,8 @@ pub unsafe extern "C" fn munmap(addr: *mut c_void, len: size_t) -> c_int {
 /// （PROT_NONE）当前如实 `ENOTSUP`——抽象层没有「存在但不可访问」的权限表示。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -> c_int {
-    let prot_bits = (prot as u64) & 0x7;
-    match libsys::mprotect(addr as u64, len as u64, prot_bits) {
+    // 同 mmap：不掩码，未知位由内核单点拒绝（`map_flags_from_prot` ⇒ InvalidParam ⇒ EINVAL）。
+    match libsys::mprotect(addr as u64, len as u64, prot as u64) {
         Ok(()) => 0,
         Err(e) => {
             set_errno(from_libsys(e));
@@ -91,9 +91,12 @@ pub unsafe extern "C" fn mmap(
         set_errno(ENOTSUP);
         return MAP_FAILED;
     }
-    // 只透传三个权限位；其余位由内核如实拒绝（未知位不静默忽略）。
-    let prot_bits = (prot as u64) & 0x7;
-    match libsys::mmap_prot(length as u64, prot_bits) {
+    // **不在这里掩码**：未知 prot 位的拒绝是内核的**单点**——`mm::user_space::map_flags_from_prot`
+    // 对 `prot & !(READ|WRITE|EXEC) != 0` 返回 InvalidParam（其文档明确写「未知位同样不静默忽略」）。
+    // 此前写成 `& 0x7`，把未知位**静默丢掉**：`mmap(..., prot = 0x100, ...)` 会被当成
+    // `prot = 0`（内核的 PROT_DEFAULT = RW）**成功**返回一段可写内存，而调用方以为自己的
+    // 权限要求被满足了。语义忠实性审查第六轮改。
+    match libsys::mmap_prot(length as u64, prot as u64) {
         Ok(va) => va as *mut c_void,
         Err(e) => {
             set_errno(from_libsys(e));

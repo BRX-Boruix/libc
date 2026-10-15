@@ -625,10 +625,20 @@ pub unsafe extern "C" fn realpath(
     dst
 }
 
-/// `readlink(path, buf, bufsiz)`：读软链接目标（POSIX）。返回写入字节数（**不含**终止 NUL）。
+/// `readlink(path, buf, bufsiz)`：读软链接目标（POSIX）。返回**写入缓冲的字节数**
+/// （**不含**终止 NUL；POSIX 也不要求 NUL 终止）。
 ///
-/// **不截断**：缓冲不足时内核返回 NoSpace，此处如实转成 ERANGE——绝不把不完整目标
-/// 伪装成完整（S09）。
+/// **截断是 POSIX 规定的行为，不是「伪装完整」**。POSIX 原文：
+/// > If the `buf` argument is not large enough to contain the link content, the first
+/// > `bufsize` bytes shall be placed in `buf`.
+/// > Upon successful completion, these functions shall return the count of bytes placed
+/// > in the buffer.
+///
+/// `ERANGE` **不在** readlink 的错误表里。此前本实现写成「缓冲不足 ⇒ -1/ERANGE」并注释为
+/// 「绝不把不完整目标伪装成完整」——**那个理由与 POSIX 相反**：POSIX 正是拿
+/// 「返回值 == bufsiz」当**截断的可检测信号**（调用方据此知道缓冲不够），所以截断返回才是
+/// 忠实实现；返回 ERANGE 会让**合法**的调用方拿到失败，而不是它有权拿到的那段前缀。
+/// （语义忠实性审查第六轮改。）
 ///
 /// **来路（3P6-2 第二波，反向对账列出）**：函数体**早就写在这里**，只是漏了
 /// `#[unsafe(no_mangle)]` —— 于是 `libc.a` 里**没有**这个符号（`audit_posix_surface.py`
@@ -655,14 +665,12 @@ pub unsafe extern "C" fn readlink(
             return -1;
         }
     };
-    if target.len() > bufsiz {
-        set_errno(crate::errno::ERANGE);
-        return -1;
-    }
+    // POSIX：缓冲不足 ⇒ **截断**到 bufsiz 字节并返回 bufsiz（见函数文档）。
+    let n = core::cmp::min(target.len(), bufsiz);
     unsafe {
-        core::ptr::copy_nonoverlapping(target.as_ptr(), buf as *mut u8, target.len());
+        core::ptr::copy_nonoverlapping(target.as_ptr(), buf as *mut u8, n);
     }
-    target.len() as ssize_t
+    n as ssize_t
 }
 
 /// `_SC_NPROCESSORS_ONLN`：在线 CPU 数（取值与 Linux 一致）。
@@ -672,7 +680,11 @@ pub use crate::abi_generated::_SC_NPROCESSORS_ONLN;
 ///
 /// 当前支持 `_SC_NPROCESSORS_ONLN`——数据来源**单一**：libsys 的
 /// `info(INFO_CPU_COUNT)`（内核 `mm::cpu_count()` 经 sysfs `/system/info/cpu` 投影）。
-/// 不支持的名字返回 -1 并置 `EINVAL`（POSIX 允许；**不编造**返回值）。
+///
+/// **诚实边界（S09，语义忠实性审查第六轮订正）**：其余名字一律 -1/`EINVAL`。
+/// POSIX 只允许对**未定义**的 name 返回 EINVAL；对**已定义**的 name（`_SC_OPEN_MAX`、
+/// `_SC_ARG_MAX`、`_SC_PAGESIZE`…）本应返回真值。本系统多数没有对应数据源，故这里是
+/// **已登记的偏离**（宁缺毋假：不编造返回值），不是「POSIX 允许」。要兑现需内核/环境补齐数据源。
 #[unsafe(no_mangle)]
 pub extern "C" fn sysconf(name: c_int) -> crate::ctypes::c_long {
     match name {
