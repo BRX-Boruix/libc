@@ -160,7 +160,7 @@ pub const EXFULL: i32 = 54;
 // ---------- C 头 <-> Rust 常量（errno 之外） ----------
 
 pub const BUFSIZ: usize = 8192;
-pub const CLOCKS_PER_SEC: clock_t = 1000000000;
+pub const CLOCKS_PER_SEC: clock_t = 1000000;
 pub const CLOCK_MONOTONIC: c_int = 1;
 pub const CLOCK_REALTIME: c_int = 0;
 pub const DT_DIR: c_uchar = 4;

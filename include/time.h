@@ -10,7 +10,7 @@ extern "C" {
 
 typedef long time_t;
 typedef long clock_t;
-#define CLOCKS_PER_SEC 1000000000L
+#define CLOCKS_PER_SEC 1000000
 
 /* struct timespec 必须在任何使用它的原型**之前**定义：否则 `const struct timespec *`
  * 会被当作函数内新声明的不可见类型（实测警告 -Wvisibility），调用方拿到的就是另一个类型。 */

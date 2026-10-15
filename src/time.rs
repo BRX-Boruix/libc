@@ -3,7 +3,9 @@
 //! 真实数据链路（S06）：
 //! - `time()` 返回 Unix epoch 秒（wall clock），来自 SysFS `/system/info/time`
 //!   （内核 RTC 直读 CMOS）。SysFS 不可用时返回 (time_t)-1 置 errno（S09）。
-//! - `clock()` 返回单调纳秒（内核 uptime_ms），换算为 CLOCKS_PER_SEC 单位。
+//! - `clock()` 返回**系统单调时钟**（内核 uptime_ms，自开机起），换算为 CLOCKS_PER_SEC 单位。
+//!   **偏离 POSIX**（如实登记，见函数注释）：POSIX 要求的是**本进程用掉的处理器时间**，
+//!   而内核没有每进程 CPU 记账 ⇒ 目前给不出那个值。
 //! - `sleep` 经 libsys `sleep(ns)` 阻塞。
 
 use crate::ctypes::{c_char, c_int, c_ulong, size_t};
@@ -14,7 +16,8 @@ pub type time_t = i64;
 /// `clock_t`：时钟计数类型。
 pub type clock_t = i64;
 
-/// 每秒时钟滴答数（与 `clock()` 返回值换算；本实现用纳秒）。
+/// 每秒时钟滴答数。**POSIX 规定此宏必须是 1000000**（<time.h>）——本实现遵守，
+/// 故 `clock()` 的返回值单位是**微秒**。内核单调钟是毫秒粒度，毫秒→微秒是**精确**换算。
 pub use crate::abi_generated::CLOCKS_PER_SEC;
 
 /// difftime(t1, t0)：两个时刻之差（秒，double）。
@@ -185,12 +188,27 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// `clock()`：返回进程运行时间（本实现 = 系统单调纳秒）。
+/// `clock()`：时钟计数，单位由 `CLOCKS_PER_SEC` 定义（本实现 = 1000000，故为**微秒**）。
+///
+/// # 偏离 POSIX（如实登记，不假装）
+///
+/// POSIX 规定 `clock()` 返回「**本进程**自**本次调用以来**用掉的**处理器时间**」。
+/// 本实现返回**系统单调时钟**（内核 `uptime_ms`，自**开机**起）——两者**不是一回事**：
+///
+/// - 把「进程在睡眠/阻塞」的时间也算进去（处理器时间不该算）；
+/// - 纪元是**开机**而不是**进程启动**（同一时刻所有进程拿到同一个值）。
+///
+/// **为什么仍然返回它而不是报错**：报错会让所有用 `clock()` 做耗时统计的程序直接失败；
+/// 而单调时钟至少**单调、可用于测间隔**。故保留并在此点名偏离。
+///
+/// **真正的修法在内核**：需要每进程 CPU 时间记账（调度器现在只有**加权**的 `vruntime`，
+/// 不是原始 CPU 时间）并开一个出口。在那之前本函数**给不出** POSIX 要的那个量——
+/// 这是**能力缺口**，不是实现选择。
 #[unsafe(no_mangle)]
 pub extern "C" fn clock() -> clock_t {
-    // 单调时钟：内核 uptime_ms。返回纳秒（CLOCKS_PER_SEC=1e9）。
+    // 内核 uptime_ms（毫秒）→ 微秒：×1000 精确无损（CLOCKS_PER_SEC = 1_000_000）。
     match libsys::info(libsys::nr::INFO_BOOT_MS) {
-        Ok(ms) => (ms * 1_000_000) as clock_t,
+        Ok(ms) => (ms * 1_000) as clock_t,
         Err(_) => -1,
     }
 }
@@ -222,6 +240,11 @@ pub extern "C" fn usleep(usec: c_ulong) -> c_int {
 }
 
 /// `nanosleep(req, rem)`：睡眠指定纳秒。
+///
+/// **`rem` 被忽略（如实登记）**：POSIX 要求被信号打断时（`EINTR`）把**剩余时长**写回
+/// `rem`。本实现给不出——`libsys::sleep()` 走 `SYS_TASK_WAIT(0, ns)`，内核睡醒只回报
+/// 成功/错误，**不回报剩余时长**（`sys_task_wait` 的 `sleep_blocking` 返回 `pack_ok(0)`）。
+/// 要兑现它需要改内核的返回约定。调用方若依赖 `rem` 会拿到未初始化内存，**不要**依赖。
 #[unsafe(no_mangle)]
 pub extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> c_int {
     if req.is_null() {
