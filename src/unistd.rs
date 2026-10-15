@@ -400,11 +400,33 @@ pub extern "C" fn lseek(
     newpos
 }
 
-/// `unlink(path)`：删除文件。
+/// `unlink(path)`：删除**非目录**的目录项（POSIX）。
+///
+/// **必须自己做类型判定**：内核的删除原语**同时支持删文件与空目录**
+/// （`vfs::ramfs::unlink` 只看"目录是否为空"，**不看类型**，见 `ramfs.rs:352-376`）。
+/// 所以不做这一层判定时，`unlink(<空目录>)` 会**真的把那个目录删掉**——而 POSIX 规定
+/// 它是 `EPERM`（"The file named by path is a directory, and either the process does not
+/// have appropriate privileges, or the implementation prohibits using unlink() on
+/// directories"）。
+///
+/// 类型真值用 `lstat`（**不跟随**符号链接）：删一个指向目录的**符号链接**是合法的，
+/// 该删的就是链接本身，所以这里要的是链接自己的类型。
+///
+/// **残余边界（S09）**：判定与删除是两次调用，之间存在 TOCTOU 窗口（把文件换成目录）。
+/// 要彻底消除需要内核把"类型判定"并进删除原语（本轮登记，未做）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     if path.is_null() {
         set_errno(EINVAL);
+        return -1;
+    }
+    let mut st = core::mem::MaybeUninit::<stat>::uninit();
+    if unsafe { crate::posix_batch2::lstat(path, st.as_mut_ptr()) } != 0 {
+        // lstat 已置 errno（路径不存在 ⇒ ENOENT；前缀无 x 位 ⇒ EACCES）。
+        return -1;
+    }
+    if unsafe { st.assume_init() }.st_mode & S_IFMT == S_IFDIR {
+        set_errno(crate::errno::EPERM);
         return -1;
     }
     let p = match unsafe { crate::stdio::cstr_to_str(path) } {
@@ -1056,7 +1078,12 @@ pub unsafe extern "C" fn mkdir(path: *const c_char, mode: crate::ctypes::mode_t)
 /// `remove(path)`：删除文件或空目录（POSIX remove）。
 ///
 /// 内核 `unlink` 同时支持删文件与空目录（sys_unlink → MountTable::unlink），
-/// 故 remove 复用同一内核原语。返回 0 成功，-1 失败置 errno。
+/// 故 remove 复用同一内核原语——**恰好**就是 POSIX `remove` 要的语义（它等价于
+/// 「是目录就 rmdir、否则 unlink」），故这里**不加**类型判定。
+///
+/// 与 `unlink`/`rmdir` 的关系（语义忠实性审查第八轮）：那两者是**各自那一半**，
+/// 内核原语不区分 ⇒ 类型判定必须由它们自己补（见各自的文档）。
+/// 返回 0 成功，-1 失败置 errno。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
     if path.is_null() {
@@ -1078,13 +1105,28 @@ pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
 
 /// rmdir(path)：删除**空目录**（POSIX）。
 ///
-/// 来路（3P6-2 第二波「整项缺失」类，反向对账列出）。**实现说明**：内核的 unlink 同时支持
-/// 删文件与空目录（见 remove 的说明），POSIX 的 rmdir 只是「只接受目录」的那一半语义——
-/// 内核在非目录/非空目录上如实报错，故这里复用同一调用，不另造路径。
+/// 来路（3P6-2 第二波「整项缺失」类，反向对账列出）。
+///
+/// **原注释有一处自相矛盾且会导致真缺陷**：它说「内核在非目录/非空目录上如实报错」，
+/// 但内核的删除原语**不看类型**（`ramfs.rs:352-376` 只拒**非空**目录）——于是
+/// `rmdir(<普通文件>)` 会**真的把那个文件删掉**，而 POSIX 规定它是 `ENOTDIR`
+/// （"The path argument names a file that is not a directory"）。
+/// 「非空目录」那一半内核确实管（`NotEmpty` ⇒ ENOTEMPTY）。
+///
+/// 故这里补上类型判定（用 `lstat`，不跟随符号链接：`rmdir(<指向目录的链接>)` 按 POSIX
+/// 是 ENOTDIR，链接不是目录）。TOCTOU 残余边界同 `unlink`。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
     if path.is_null() {
         set_errno(EINVAL);
+        return -1;
+    }
+    let mut st = core::mem::MaybeUninit::<stat>::uninit();
+    if unsafe { crate::posix_batch2::lstat(path, st.as_mut_ptr()) } != 0 {
+        return -1; // lstat 已置 errno
+    }
+    if unsafe { st.assume_init() }.st_mode & S_IFMT != S_IFDIR {
+        set_errno(crate::errno::ENOTDIR);
         return -1;
     }
     let p = match unsafe { crate::stdio::cstr_to_str(path) } {

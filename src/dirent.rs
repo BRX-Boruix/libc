@@ -5,11 +5,26 @@
 //! `DIR`；`readdir` 逐项返回（每次覆盖同一 `struct dirent` 存储，符合 POSIX
 //! "后续调用可覆盖上次返回值"的契约）；`closedir` 释放快照。
 //!
-//! 诚实边界（S09）：
-//! - `d_ino`：内核目录项不含 inode 号 → 恒 0（不伪造）；
+//! 诚实边界（S09，语义忠实性审查第八轮逐条订正）：
+//!
+//! - **`d_ino` 恒 0**。注意**不是**「内核没有 inode 号」——内核**有**
+//!   （`vfs::inode` 的 `stable_id`；`stat` 的 `st_ino` 就是它）。缺的是**目录列举这条
+//!   wire 不带它**：内核 `list_dir` 只填 name/node_type/size（`ramfs.rs:426-430`），
+//!   `libsys::DirEntry` 也只解 name/type/size（`io.rs:1043-1050`）。
+//!   修法要跨三层：`vfs::inode::DirEntry` 加 `ino`（取 `node.stable_id()`）→ 内核 JSON
+//!   序列化 → `libsys::DirEntry` 解析 → `fill_dirent` 填 `d_ino`。**已登记，未做。**
+//!   （旧注释写「内核目录项不含 inode 号」——那句是**过时的**，本轮订正。）
+//! - **DIR 背后没有 fd**：POSIX 的 `DIR*` 关联一个目录 fd（`dirfd()` 可取出、`closedir`
+//!   会关它）。本实现的 `opendir` 是一次 `read_dir` **快照**（`libsys::read_dir` → JSON），
+//!   不持有 fd ⇒ `dirfd` 语义不存在、`closedir` 不关任何 fd、`opendir` 也不占 fd 配额。
+//!   `seekdir`/`telldir` 的"位置"因此只是**快照内序号**。
 //! - `d_type`：内核 `type` 标签为 "dir"/"file" → 映射 `DT_DIR`/`DT_REG`，
-//!   其余（特殊节点）→ `DT_UNKNOWN`；
-//! - `opendir` 一次性快照，不反映打开后目录的变化（如实：无 dirfd 实时语义）。
+//!   其余（特殊节点）→ `DT_UNKNOWN`（POSIX 允许 `DT_UNKNOWN`，但本仓尚未导出
+//!   `DT_LNK`/`DT_CHR` 等常量，故**无法**给出更精确的值——登记）；
+//! - `d_reclen`：本实现填的是"名字 + NUL"的长度（`n+1`），不是 glibc 那种整个
+//!   `struct dirent` 的大小。POSIX 只要求它是"本记录的长度"，而本实现的 `readdir`
+//!   返回的是内部存储的指针（不是可遍历的字节缓冲），故该字段仅作信息（登记）；
+//! - `opendir` 一次性快照，不反映打开后目录的变化。
 
 use alloc::vec::Vec;
 
