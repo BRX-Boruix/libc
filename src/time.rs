@@ -241,12 +241,18 @@ pub extern "C" fn usleep(usec: c_ulong) -> c_int {
 
 /// `nanosleep(req, rem)`：睡眠指定纳秒。
 ///
-/// **`rem` 被忽略（如实登记）**：POSIX 要求被信号打断时（`EINTR`）把**剩余时长**写回
-/// `rem`。本实现给不出——`libsys::sleep()` 走 `SYS_TASK_WAIT(0, ns)`，内核睡醒只回报
-/// 成功/错误，**不回报剩余时长**（`sys_task_wait` 的 `sleep_blocking` 返回 `pack_ok(0)`）。
-/// 要兑现它需要改内核的返回约定。调用方若依赖 `rem` 会拿到未初始化内存，**不要**依赖。
+/// **`rem`（剩余时长）本轮兑现**（语义忠实性审查登记项⑦）：POSIX 要求被信号打断
+/// （`EINTR`）时把**剩余时长**写回 `rem`。
+///
+/// **真值来源**：本库自己的单调时钟（`libsys::now()`，与 `clock_gettime(CLOCK_MONOTONIC)`
+/// 同一个源）——剩余 = 请求时长 − 已过时长。这不是"内核回报的值"，但也**不是编造**：
+/// 它就是 POSIX 要的那个量，只是由用户态测量（内核的 `sleep_blocking` 不回报剩余，
+/// 登记项⑦ 的原始缺口在那里；本层用**可测量的量**兑现它，而不是留一个未初始化缓冲）。
+///
+/// **诚实边界**：单调时钟的分辨率是**毫秒**（`INFO_BOOT_MS`），故 `rem` 也是毫秒粒度；
+/// 只被 `EINTR` 路径写回，其余路径**不碰** `rem`（POSIX 亦如此）。
 #[unsafe(no_mangle)]
-pub extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> c_int {
+pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> c_int {
     if req.is_null() {
         set_errno(crate::errno::EINVAL);
         return -1;
@@ -257,10 +263,20 @@ pub extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> c_int 
         return -1;
     }
     let ns = (ts.tv_sec as u64).saturating_mul(1_000_000_000).saturating_add(ts.tv_nsec as u64);
+    let start = libsys::now();
     match libsys::sleep(ns) {
         Ok(_) => 0,
         Err(e) => {
-            set_errno(from_libsys(e));
+            let errno = from_libsys(e);
+            if errno == crate::errno::EINTR && !rem.is_null() {
+                let elapsed = libsys::now().saturating_sub(start);
+                let left = ns.saturating_sub(elapsed);
+                unsafe {
+                    (*rem).tv_sec = (left / 1_000_000_000) as i64;
+                    (*rem).tv_nsec = (left % 1_000_000_000) as i64;
+                }
+            }
+            set_errno(errno);
             -1
         }
     }
