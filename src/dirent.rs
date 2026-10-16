@@ -7,13 +7,12 @@
 //!
 //! 诚实边界（S09，语义忠实性审查第八轮逐条订正）：
 //!
-//! - **`d_ino` 恒 0**。注意**不是**「内核没有 inode 号」——内核**有**
-//!   （`vfs::inode` 的 `stable_id`；`stat` 的 `st_ino` 就是它）。缺的是**目录列举这条
-//!   wire 不带它**：内核 `list_dir` 只填 name/node_type/size（`ramfs.rs:426-430`），
-//!   `libsys::DirEntry` 也只解 name/type/size（`io.rs:1043-1050`）。
-//!   修法要跨三层：`vfs::inode::DirEntry` 加 `ino`（取 `node.stable_id()`）→ 内核 JSON
-//!   序列化 → `libsys::DirEntry` 解析 → `fill_dirent` 填 `d_ino`。**已登记，未做。**
-//!   （旧注释写「内核目录项不含 inode 号」——那句是**过时的**，本轮订正。）
+//! - **`d_ino` 已兑现**（语义忠实性审查登记项④）：内核 `vfs::inode::DirEntry` 带 `ino
+//!   （取 `node.stable_id()`，与 `stat` 的 `st_ino` **同源**）→ 内核 readdir JSON 的
+//!   `"ino"` 字段 → `libsys::DirEntry` 解析 → 此处填 `d_ino`。
+//!   一处**如实登记**的不一致：procfs 的每 pid 条目，`d_ino` 是 **pid**（那类视图节点唯一稳定
+//!   的身份），而 `stat` 的 `st_ino` 走 `INode::stable_id` 的**默认实现**（self 地址，每次
+//!   lookup 都变）——根因在默认实现，已登记待办。
 //! - **DIR 背后没有 fd**：POSIX 的 `DIR*` 关联一个目录 fd（`dirfd()` 可取出、`closedir`
 //!   会关它）。本实现的 `opendir` 是一次 `read_dir` **快照**（`libsys::read_dir` → JSON），
 //!   不持有 fd ⇒ `dirfd` 语义不存在、`closedir` 不关任何 fd、`opendir` 也不占 fd 配额。
@@ -113,7 +112,8 @@ fn fill_dirent(dir: &mut DIR) {
         "file" => DT_REG,
         _ => DT_UNKNOWN,
     };
-    dir.cur.d_ino = 0;
+    // 登记项④：**真的**填文件序号——与 `stat` 的 `st_ino` 同源（内核 `INode::stable_id`）。
+    dir.cur.d_ino = e.ino as ino_t;
     dir.cur.d_off = dir.cursor as off_t;
     dir.cur.d_type = d_type;
     // d_reclen：dirent 从 d_name 起的字节数（不含首部字段）。
