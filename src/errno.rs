@@ -120,8 +120,10 @@ pub use crate::abi_generated::ESPIPE;
 pub use crate::abi_generated::EROFS;
 /// 操作不允许 EPERM。
 ///
-/// **诚实边界**：内核只有**一个** `PermissionDenied`，本 libc 把它映射到 `EACCES`（文件访问
-/// 语义，见 `from_libsys`）。故**内核错误永远不会产生 `EPERM`**——本常量存在是为了让 C 程序
+/// **边界已闭合（登记项⑤）**：内核新增了 `NotPermitted`（EPERM）——它与
+/// `PermissionDenied`（EACCES）的分界是「有这个权限也不许这么做」vs「你没有这个权限」，
+/// 典型是 POSIX 对 `unlink(<目录>)` 的规定码。此前内核只有 `PermissionDenied`（→EACCES），
+/// 故内核错误**永远不会产生 `EPERM`**——本常量当时存在只是为了让 C 程序
 /// 能比较（头文件一直有 `#define EPERM`，而 Rust 侧此前没有，两侧不对称，由
 /// `libc/tools/audit_errno_sync.py` 列出）。
 pub use crate::abi_generated::EPERM;
@@ -385,6 +387,8 @@ pub fn from_libsys(e: libsys::Error) -> i32 {
         libsys::Error::BadFd => EBADF,
         // 没有可等待的子进程——POSIX 的规定码（登记项⑧）。
         libsys::Error::NoChild => ECHILD,
+        // 操作不允许——与 EACCES（PermissionDenied）**不同**的规定码（登记项⑤）。
+        libsys::Error::NotPermitted => EPERM,
         libsys::Error::Unknown(n) => n,
     }
 }

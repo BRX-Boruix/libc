@@ -411,21 +411,14 @@ pub extern "C" fn lseek(
 /// 类型真值用 `lstat`（**不跟随**符号链接）：删一个指向目录的**符号链接**是合法的，
 /// 该删的就是链接本身，所以这里要的是链接自己的类型。
 ///
-/// **残余边界（S09）**：判定与删除是两次调用，之间存在 TOCTOU 窗口（把文件换成目录）。
-/// 要彻底消除需要内核把"类型判定"并进删除原语（本轮登记，未做）。
+/// **类型判定已内建在内核删除原语里**（语义忠实性审查登记项⑤）：本层用 `libsys::unlink`，
+/// 模式 = FileOnly ⇒ 内核在**目录锁内**判定（与删除同一临界区）——原先「先 lstat 再删」的
+/// TOCTOU 窗口由此关闭。目录 ⇒ `PermissionDenied`（EPERM，与 POSIX 一致）；
+/// 路径不存在 ⇒ `NotFound`（ENOENT）；前缀无 x 位 ⇒ 内核遍历检查报 EACCES。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     if path.is_null() {
         set_errno(EINVAL);
-        return -1;
-    }
-    let mut st = core::mem::MaybeUninit::<stat>::uninit();
-    if unsafe { crate::posix_batch2::lstat(path, st.as_mut_ptr()) } != 0 {
-        // lstat 已置 errno（路径不存在 ⇒ ENOENT；前缀无 x 位 ⇒ EACCES）。
-        return -1;
-    }
-    if unsafe { st.assume_init() }.st_mode & S_IFMT == S_IFDIR {
-        set_errno(crate::errno::EPERM);
         return -1;
     }
     let p = match unsafe { crate::stdio::cstr_to_str(path) } {
@@ -1112,12 +1105,11 @@ pub unsafe extern "C" fn mkdir(path: *const c_char, mode: crate::ctypes::mode_t)
 
 /// `remove(path)`：删除文件或空目录（POSIX remove）。
 ///
-/// 内核 `unlink` 同时支持删文件与空目录（sys_unlink → MountTable::unlink），
-/// 故 remove 复用同一内核原语——**恰好**就是 POSIX `remove` 要的语义（它等价于
-/// 「是目录就 rmdir、否则 unlink」），故这里**不加**类型判定。
+/// 内核删除原语的模式 = `Any`（语义忠实性审查登记项⑤）：是目录就按目录删（仍判空），
+/// 否则按文件删——这正是 POSIX `remove` 的语义。
 ///
-/// 与 `unlink`/`rmdir` 的关系（语义忠实性审查第八轮）：那两者是**各自那一半**，
-/// 内核原语不区分 ⇒ 类型判定必须由它们自己补（见各自的文档）。
+/// 与 `unlink`/`rmdir` 的关系：那两者是**各自那一半**，模式分别是 `FileOnly`/`DirOnly`，
+/// 判定由**内核**在删除临界区内做（本层不再预检）。
 /// 返回 0 成功，-1 失败置 errno。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
@@ -1129,7 +1121,7 @@ pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
         Some(s) => s,
         None => { set_errno(EINVAL); return -1; }
     };
-    match libsys::unlink(p) {
+    match libsys::remove(p) {
         Ok(_) => 0,
         Err(e) => {
             set_errno(from_libsys(e));
@@ -1148,20 +1140,13 @@ pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
 /// （"The path argument names a file that is not a directory"）。
 /// 「非空目录」那一半内核确实管（`NotEmpty` ⇒ ENOTEMPTY）。
 ///
-/// 故这里补上类型判定（用 `lstat`，不跟随符号链接：`rmdir(<指向目录的链接>)` 按 POSIX
-/// 是 ENOTDIR，链接不是目录）。TOCTOU 残余边界同 `unlink`。
+/// **类型判定已内建在内核删除原语里**（语义忠实性审查登记项⑤）：本层用 `libsys::rmdir`，
+/// 模式 = DirOnly ⇒ 内核在**目录锁内**判定（与删除同一临界区）——原先「先 lstat 再删」的
+/// TOCTOU 窗口由此关闭。不跟随符号链接的语义也由内核的`lstat`口径保证（链接不是目录）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
     if path.is_null() {
         set_errno(EINVAL);
-        return -1;
-    }
-    let mut st = core::mem::MaybeUninit::<stat>::uninit();
-    if unsafe { crate::posix_batch2::lstat(path, st.as_mut_ptr()) } != 0 {
-        return -1; // lstat 已置 errno
-    }
-    if unsafe { st.assume_init() }.st_mode & S_IFMT != S_IFDIR {
-        set_errno(crate::errno::ENOTDIR);
         return -1;
     }
     let p = match unsafe { crate::stdio::cstr_to_str(path) } {
@@ -1171,7 +1156,7 @@ pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
             return -1;
         }
     };
-    match libsys::unlink(p) {
+    match libsys::rmdir(p) {
         Ok(_) => 0,
         Err(e) => {
             set_errno(from_libsys(e));
