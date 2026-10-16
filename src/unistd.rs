@@ -348,12 +348,11 @@ pub extern "C" fn lseek(
             set_errno(crate::errno::ESPIPE);
             return -1;
         }
-        // 内核 `sys_read` 对「fd 不存在」的**唯一**出口是 `InvalidParam`
-        // （`syscall.rs:2634`/`2661`；本探针 len=1、offset=0，故 2702/2712 那两条
-        // 用户地址溢出的出口不可达）。POSIX 要求坏 fd ⇒ **EBADF**；而**内核错误集里
-        // 没有 EBADF**（`klib::error::Error` 无此项，见本轮登记），故这是 libc 唯一
-        // 一处把「fd 不存在」译成 POSIX 码的地方——此前 `lseek` 对坏 fd **返回 0（假成功）**。
-        Err(libsys::Error::InvalidParam) => {
+        // 坏 fd ⇒ **EBADF**（POSIX）。内核自「内核缺口收口第 1 项」起有专门的
+        // `Error::BadFd`；此前只能借 `InvalidParam`（`sys_read` 对 fd 缺失的出口，
+        // 而本探针 len=1、offset=0 时那两条用户地址溢出的出口不可达）。
+        // 两个都收：`BadFd` 是新语义、`InvalidParam` 作为旧内核的兼容路径。
+        Err(libsys::Error::BadFd) | Err(libsys::Error::InvalidParam) => {
             set_errno(crate::errno::EBADF);
             return -1;
         }
@@ -1346,7 +1345,9 @@ fn dupfd_from(fd: c_int, min: c_int) -> c_int {
         }
         match libsys::dup2(candidate as u64, candidate as u64) {
             Ok(_) => candidate += 1,
-            Err(libsys::Error::NotFound) => {
+            // 槽位空闲：旧内核回 `NotFound`，自「内核缺口收口第 1 项」起回 `BadFd`
+            // （「这个 fd 不存在」的 POSIX 码正是 EBADF）。两个都收，探针语义不变。
+            Err(libsys::Error::NotFound) | Err(libsys::Error::BadFd) => {
                 let newfd = match libsys::dup2(fd as u64, candidate as u64) {
                     Ok(_) => candidate as c_int,
                     Err(e) => {

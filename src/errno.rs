@@ -381,6 +381,8 @@ pub fn from_libsys(e: libsys::Error) -> i32 {
         libsys::Error::ReadOnly => EROFS,
         libsys::Error::Corrupt => EUCLEAN,
         libsys::Error::Busy => EBUSY,
+        // 坏 fd（不存在 / 打开方向不支持本次操作）——POSIX 的规定码。
+        libsys::Error::BadFd => EBADF,
         libsys::Error::Unknown(n) => n,
     }
 }
