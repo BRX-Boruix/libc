@@ -296,46 +296,47 @@ pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
 /// 返回被收尸子进程的 **pid**（POSIX 语义；失败返回 -1 并置 errno）。退出码
 /// 写入 `*status` 高 8 位（WEXITSTATUS 语义）。
 ///
-/// - `pid`：内核 libsys 仅支持等任意子进程（`waitpid_any`）。`pid>0`
-///   精确匹配内核无此原语，`pid==0`（同进程组）本系统无进程组概念——两者
-///   均如实映射为"等任意子"（与内核能力一致，S09 不伪装精确匹配）。
-/// - `options` 非 0（WNOHANG/WUNTRACED 等）暂不支持，如实返回 -1 置 ENOTSUP。
+/// - `pid`（语义忠实性审查登记项⑧）：内核**本来就**支持按 pid 等
+///   （`task::scheduler::waitpid_inner` 的单目标分支），此前本层把 pid 丢掉、一律退化成
+///   「等任意子」——那会让 `waitpid(specific_pid)` 收走**别的**子进程。现在：
+///   `pid > 0` 等该子进程；`pid == -1` 等任意子进程；
+///   `pid == 0`（同进程组）与 `pid < -1`（进程组 |pid|）本系统**无进程组** ⇒ 如实 ENOTSUP。
+/// - `options`：`WNOHANG` 支持；其余非 0 如实 -1/ENOTSUP。
 #[unsafe(no_mangle)]
 pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
-    let _ = pid;
-    // WNOHANG：非阻塞轮询（POSIX）。本系统内核支持「有界等待」——`target>0 && timeout>0` 到期时
-    // 子进程仍在运行则如实返回 `WouldBlock`（见 kernel syscall.rs 的 sys_task_wait 文档），
-    // 故这里用 1ns 的超时实现「立即返回」。
-    //
-    // **诚实边界（S09）**：受内核定时器粒度限制，1ns 超时实际可能短暂等待（远小于一次调度片），
-    // 不是严格的「零等待」；但语义正确（没有子进程已退出就返回 0）。
-    //
-    // 来路：目标第 7/8 轮——它是 libc 宽度的合法缺口（此前 options != 0 一律 ENOTSUP），
-    // 同时充当「子进程卡在 _exit」与「父 wait 丢唤醒」的判别器。
-    if options & crate::unistd::WNOHANG != 0 {
-        return match libsys::waitpid_any_timeout(1) {
-            Ok(wr) => {
-                if wr.pid == 0 {
-                    0
-                } else {
-                    if !status.is_null() {
-                        unsafe { *status = ((wr.code & 0xFF) as c_int) << 8; }
-                    }
-                    wr.pid as c_int
-                }
-            }
-            Err(libsys::Error::WouldBlock) => 0,
-            Err(e) => {
-                set_errno(from_libsys(e));
-                -1
-            }
-        };
-    }
-    if options != 0 {
+    // POSIX 的 pid 语义（语义忠实性审查登记项⑧）：内核**本来就**支持按 pid 等
+    // （`task::scheduler::waitpid_inner` 的单目标分支），此前本层把 pid 丢掉、
+    // 一律退化成「等任意子」——那会让 `waitpid(specific_pid)` 收走**别的**子进程。
+    let target: Option<u64> = if pid == -1 {
+        None // 等任意子进程（内核的 WAIT_ANY 哨兵）
+    } else if pid > 0 {
+        Some(pid as u64)
+    } else {
+        // pid == 0（同进程组）与 pid < -1（进程组 |pid|）：本系统**无进程组** ⇒ 如实 ENOTSUP。
+        set_errno(crate::errno::ENOTSUP);
+        return -1;
+    };
+    let nonblock = options & crate::unistd::WNOHANG != 0;
+    if options != 0 && !nonblock {
         set_errno(crate::errno::ENOTSUP);
         return -1;
     }
-    match libsys::waitpid_any() {
+    // WNOHANG：非阻塞轮询。本系统内核支持「有界等待」——到期子进程仍在运行则如实返回
+    // `WouldBlock`（见 kernel syscall.rs 的 sys_task_wait 文档），故这里用 1ns 超时实现
+    // 「立即返回」。**诚实边界**：受内核定时器粒度限制，1ns 可能短暂等待（远小于一次调度片），
+    // 但语义正确（没有子进程已退出就返回 0）。
+    let res = if nonblock {
+        match target {
+            Some(t) => libsys::waitpid(t, 1),
+            None => libsys::waitpid_any_timeout(1),
+        }
+    } else {
+        match target {
+            Some(t) => libsys::waitpid(t, 0),
+            None => libsys::waitpid_any(),
+        }
+    };
+    match res {
         Ok(wr) => {
             if !status.is_null() {
                 unsafe {
@@ -344,6 +345,9 @@ pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_i
             }
             wr.pid as c_int
         }
+        // WNOHANG 没等到 ⇒ 0（POSIX）；阻塞路径拿到 WouldBlock 是内核「无可切对象」的
+        // 如实回报，按错误上抛（EAGAIN）。
+        Err(libsys::Error::WouldBlock) if nonblock => 0,
         Err(e) => {
             set_errno(from_libsys(e));
             -1

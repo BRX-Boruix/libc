@@ -383,6 +383,8 @@ pub fn from_libsys(e: libsys::Error) -> i32 {
         libsys::Error::Busy => EBUSY,
         // 坏 fd（不存在 / 打开方向不支持本次操作）——POSIX 的规定码。
         libsys::Error::BadFd => EBADF,
+        // 没有可等待的子进程——POSIX 的规定码（登记项⑧）。
+        libsys::Error::NoChild => ECHILD,
         libsys::Error::Unknown(n) => n,
     }
 }
