@@ -90,10 +90,7 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_uint) -
 /// `close(fd)`：关闭 fd。
 #[unsafe(no_mangle)]
 pub extern "C" fn close(fd: c_int) -> c_int {
-    // 位置表也要清：否则 fd 号被复用时会带着上一个文件的位置。
-    fd_pos_lock();
-    fd_pos_clear(fd);
-    fd_pos_unlock();
+    // 位置由内核随 fd 一起释放（登记项⑨），本层没有需要清理的用户态状态。
     match libsys::close(fd as u64) {
         Ok(_) => 0,
         Err(e) => {
@@ -111,22 +108,14 @@ pub extern "C" fn close(fd: c_int) -> c_int {
 /// 而**内核与 libsys 早就有这个能力**（SYS_STREAM_DUP -> sys_dup2、libsys::io::dup2）——
 /// 缺的只是 libc 的 C 包装与 <unistd.h> 声明。
 ///
-/// 位置表：本 libc 在用户态维护「每 fd 的文件位置」（内核的流式读写只认显式 offset，见
-/// fd_pos_*）。这里把 oldfd 的位置**复制**到 newfd——与 close 清位置**对偶**（少了这一步，
-/// 副本会从 0 开始读）。
+/// **位置共享：与 POSIX 一致**（语义忠实性审查登记项⑨ 已收口）。
 ///
-/// **订正一处说错的注释（语义忠实性审查）**：原文写「POSIX 要求 dup2 的副本与原 fd **共享**
-/// 同一文件偏移，故这里把位置复制过去」——**「共享」与「复制」不是一回事**，而代码做的是复制。
-/// 真实情况分两种，如实写清：
+/// 位置由**内核**维护在 `FileHandle.offset`（`Arc<AtomicU64>`）上，而内核的 dup2 是
+/// `Arc::clone` ⇒ 副本与原 fd **真共享**同一个打开文件描述的位置（POSIX 语义）✓。
 ///
-/// - **未跟踪的 fd**（从未 lseek 过）：位置由**内核**维护在 `FileHandle.offset` 上，而
-///   内核 dup 是 `Arc::clone`（**真共享**）⇒ 这一档**与 POSIX 一致** ✓；
-/// - **已跟踪的 fd**（lseek 过）：位置在**本表的每-fd 槽位**里，dup2 只做一次性快照 ⇒
-///   此后读其一**不会**推进另一个的位置，与 POSIX 的「共享同一打开文件描述」**不一致** ✗。
-///
-/// 这一档是**已知偏离**：彻底修好需要内核给一个「设置位置」或「按打开文件描述共享位置」的
-/// 原语（内核只有 `STREAM_OFFSET_CURRENT` 的顺序推进与「显式偏移不推进」两种），
-/// 属独立的内核变更。此处**如实登记**，不假装共享。
+/// 历史（留档）：登记项⑨ 之前，本 libc 在用户态按 **fd 号**维护一张位置表，且只在 `lseek` 之后
+/// 才启用；那种形态下 dup2 只能**拷贝**位置（此后读其一不推进另一个）——与 POSIX 不一致。
+/// 现在 `lseek` 是内核原语（`SYS_STREAM_SEEK`），那张表整体退场，这一档偏离随之消失。
 #[unsafe(no_mangle)]
 pub extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
     if oldfd < 0 || newfd < 0 {
@@ -134,15 +123,8 @@ pub extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
         return -1;
     }
     match libsys::dup2(oldfd as u64, newfd as u64) {
-        Ok(_) => {
-            fd_pos_lock();
-            match fd_pos_get(oldfd) {
-                Some(v) => fd_pos_set(newfd, v),
-                None => fd_pos_clear(newfd),
-            }
-            fd_pos_unlock();
-            newfd
-        }
+        // 位置**共享**由内核保证（登记项⑨：`dup2` 共享同一 `Arc<AtomicU64>` 游标），本层不再拷贝。
+        Ok(_) => newfd,
         Err(e) => {
             set_errno(from_libsys(e));
             -1
@@ -167,23 +149,9 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssi
         return 0;
     }
     let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
-    // 已被 lseek 转入「用户态维护位置」的 fd 用**定位读**并推进位置；否则顺序读（内核维护）。
-    fd_pos_lock();
-    let tracked = fd_pos_get(fd);
-    let r = match tracked {
-        Some(p) if p >= 0 => libsys::pread(fd as u64, slice, p as u64),
-        Some(_) => {
-            // 位置为负：lseek 已拒绝，正常到不了这里；如实报 EINVAL，不拿它当偏移。
-            fd_pos_unlock();
-            set_errno(EINVAL);
-            return -1;
-        }
-        None => libsys::read(fd as u64, slice),
-    };
-    if let (Some(p), Ok(n)) = (tracked, &r) {
-        fd_pos_set(fd, p + *n as i64);
-    }
-    fd_pos_unlock();
+    // 位置由**内核**持有（登记项⑨）：顺序读，内核推进那个共享游标。
+    // 这里不再有「用户态维护位置」的分支 ⇒ dup2/fork 的共享语义自动成立。
+    let r = libsys::read(fd as u64, slice);
     match r {
         Ok(n) => n as ssize_t,
         Err(e) => {
@@ -201,21 +169,8 @@ pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> 
         return -1;
     }
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count) };
-    fd_pos_lock();
-    let tracked = fd_pos_get(fd);
-    let r = match tracked {
-        Some(p) if p >= 0 => libsys::pwrite(fd as u64, slice, p as u64),
-        Some(_) => {
-            fd_pos_unlock();
-            set_errno(EINVAL);
-            return -1;
-        }
-        None => libsys::write(fd as u64, slice),
-    };
-    if let (Some(p), Ok(n)) = (tracked, &r) {
-        fd_pos_set(fd, p + *n as i64);
-    }
-    fd_pos_unlock();
+    // 同 read：位置由内核持有（登记项⑨）。
+    let r = libsys::write(fd as u64, slice);
     match r {
         Ok(n) => n as ssize_t,
         Err(e) => {
@@ -230,173 +185,38 @@ pub use crate::abi_generated::SEEK_SET;
 pub use crate::abi_generated::SEEK_CUR;
 pub use crate::abi_generated::SEEK_END;
 
-// ---------- 文件位置（POSIX `lseek` 的用户态实现）----------
+// ---------- 文件位置：**内核持有**（登记项⑨）----------
 //
-// **内核没有 seek 系统调用**：`SYS_STREAM_READ/WRITE` 每次自带偏移，
-// `STREAM_OFFSET_CURRENT` 表示顺序（位置由内核维护），其他值表示定位 I/O 且**不推进**位置。
-// 所以 POSIX 的「文件位置」必须由用户态维护——就是这里。
+// 此前内核没有 seek 系统调用，位置只能由**本库**在用户态按 fd 号维护一张表 ⇒
+// (a) `dup2` 只能**拷贝**位置而不能共享（POSIX 要求 dup 出来的 fd 与原来那个共享**同一个打开文件描述**的位置）；
+// (b) `fork` 后父子同样不共享。
 //
-// **关键设计取舍**：只有程序**调用过 `lseek`** 之后，该 fd 才转入「定位 I/O」模式；
-// 没调用过的 fd 一切照旧（顺序读，内核维护位置）。这样既有程序的行为**逐字不变**，
-// 而 POSIX 程序也能正确工作——典型例子是 tcc：先读 64 字节判对象类型、再 `lseek` 复位、
-// 再从头读节表；复位若是空操作，后面每一次读都会错位（实测报 `invalid object file`）。
-//
-// 为什么必须按 fd 惰性切换：`read`/`write` 是所有程序的地基，全局改成定位 I/O 会波及每一个
-// 程序；而且管道/终端**不可定位**（内核按节点属性拒绝定位 I/O）。
-
-/// 可跟踪的 fd 上限（fd 是小的非负整数）。
-const MAX_TRACKED_FD: usize = 64;
-
-#[derive(Clone, Copy)]
-struct FdPos {
-    /// 该 fd 是否已转入「用户态维护位置」模式（即被 `lseek` 动过）。
-    tracked: bool,
-    pos: i64,
-}
-
-static mut FD_POS: [FdPos; MAX_TRACKED_FD] =
-    [const { FdPos { tracked: false, pos: 0 } }; MAX_TRACKED_FD];
-
-/// 位置表的锁：`read`/`write` 会被多线程程序调用（本系统有线程）。
-static FD_POS_LOCK: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-fn fd_pos_lock() {
-    use core::sync::atomic::Ordering;
-    while FD_POS_LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-}
-
-fn fd_pos_unlock() {
-    FD_POS_LOCK.store(false, core::sync::atomic::Ordering::Release);
-}
-
-/// 取该 fd 已跟踪的位置；未跟踪或越界返回 `None`。
-fn fd_pos_get(fd: c_int) -> Option<i64> {
-    if fd < 0 || fd as usize >= MAX_TRACKED_FD {
-        return None;
-    }
-    let t = unsafe { &*core::ptr::addr_of!(FD_POS) };
-    let e = t[fd as usize];
-    if e.tracked { Some(e.pos) } else { None }
-}
-
-/// 记录位置——**同时把它标记为已跟踪**，这是「转入定位 I/O」的开关。
-fn fd_pos_set(fd: c_int, p: i64) {
-    if fd < 0 || fd as usize >= MAX_TRACKED_FD {
-        return;
-    }
-    let t = unsafe { &mut *core::ptr::addr_of_mut!(FD_POS) };
-    t[fd as usize] = FdPos { tracked: true, pos: p };
-}
-
-/// 清除位置（`close` 时调用；否则 fd 号被复用时会带着上一个文件的位置）。
-fn fd_pos_clear(fd: c_int) {
-    if fd < 0 || fd as usize >= MAX_TRACKED_FD {
-        return;
-    }
-    let t = unsafe { &mut *core::ptr::addr_of_mut!(FD_POS) };
-    t[fd as usize] = FdPos { tracked: false, pos: 0 };
-}
+// 登记项⑨ 之后，`lseek` 是内核原语（`SYS_STREAM_SEEK`），位置由 `OpenHandle` 持有——
+// 它本就是 `Arc<AtomicU64>`，`dup2` 共享同一游标，故共享语义**自动成立**。
+// 那张用户态表整体退场：`read`/`write` 一律走内核的顺序 I/O（内核推进共享游标）。
 
 /// `lseek(fd, offset, whence)`：定位（POSIX 三态齐备）。
 ///
-/// **本系统没有 seek 系统调用**，故「文件位置」由本函数在用户态维护（见上面的位置表说明）：
-/// - `SEEK_SET`：新位置 = `offset`；
-/// - `SEEK_CUR`：新位置 = 当前位置 + `offset`（该 fd 必须已被跟踪过，否则 ENOTSUP）；
-/// - `SEEK_END`：新位置 = 文件大小 + `offset`（大小经 `fstat` 取——本系统没有「位置」，
-///   但**大小是可得的**）。
+/// **内核原语**（登记项⑨：`SYS_STREAM_SEEK`）：位置由 `OpenHandle` 持有，故
+/// `dup2` 出来的 fd 与原来那个**共享同一位置**、且 `fork` 后父子也共享（POSIX 的
+/// 「同一个打开文件描述」语义）。此前本层在用户态按 fd 号维护位置表 ⇒ 只能拷贝、不能共享。
 ///
-/// **一旦调用过本函数，该 fd 就转入「用户态维护位置」模式**：此后 `read`/`write` 走定位 I/O
-/// 并推进位置。这是 POSIX 程序的必需语义——tcc 正是这样读对象文件的（先读 64 字节判类型、
-/// 再复位、再从头读节表）；复位若是空操作，后续每次读都会错位（实测报 `invalid object file`，
-/// 而盘上那份文件其实是完好的 ELF，见 tcc-on-boruix/boruix/probe_file.c）。
+/// 不可定位的 fd（管道）⇒ 内核 `IllegalSeek` ⇒ `ESPIPE`，且**不改变任何状态**；
+/// 坏 fd ⇒ `EBADF`；非法 whence ⇒ `EINVAL`。
 #[unsafe(no_mangle)]
 pub extern "C" fn lseek(
     fd: c_int,
     offset: crate::ctypes::c_long,
     whence: c_int,
 ) -> crate::ctypes::c_long {
-    // POSIX：**不可定位**的 fd（管道/FIFO/字符设备/套接字）必须 **ESPIPE**，而且
-    // **不得**把它转入「用户态维护位置」模式——否则此后 read/write 会走定位 I/O，
-    // 被内核按节点真值拒绝（`Error::IllegalSeek`）：一个探测性的 lseek 就把管道用坏了。
-    //
-    // 判据**不靠 fd 号、也不靠类型位猜**，而是**问内核**：用**一字节定位读**探一次；
-    // 返回 `IllegalSeek` 就是节点真值（该节点非顺序可定位）。
-    //
-    // **为什么是「一字节」而不是「零长」（实测逼出来的，不是推断）**：第一版用零长探针，
-    // 理由是「内核先判 `is_seekable()`、再查长度」——**该推断被证伪**：内核 `sys_read`
-    // 对 `len == 0` 有**前置短路**（`if len == 0 { return done(pack_ok(0)) }`，位置在
-    // 管道判定与 `is_seekable` 判定**之前**），故零长探针什么都探不出来；机内用例当场
-    // 报 `lseek(pipe, SEEK_SET) -> -1: FAIL`（passed=396 failed=3）。
-    //
-    // 一字节定位读是安全的：**显式偏移不推进任何位置**（内核的 `offset` 与 libc 的位置表
-    // 都不动，这正是 `pread` 的语义），而对不可定位的 fd，内核在**任何数据被取走之前**
-    // 就按节点真值返回 ESPIPE。
-    //
-    // **探针放在 `whence` 之前**（不是算完 `newpos` 之后）：否则 `SEEK_CUR` 会先撞上
-    // 「未跟踪 ⇒ ENOTSUP」、`SEEK_END` 会先撞上 `fstat` 的 NotFound——而管道上这两个
-    // whence 的 POSIX 答案都是 **ESPIPE**，不该被别的错误抢先。探针用偏移 0，
-    // 对可定位文件无副作用。
-    let mut probe = [0u8; 1];
-    match libsys::pread(fd as u64, &mut probe, 0) {
-        Err(libsys::Error::IllegalSeek) => {
-            set_errno(crate::errno::ESPIPE);
-            return -1;
+    // POSIX 的 whence 值（0/1/2）与内核 wire 一致，直接透传；非法值由内核如实 EINVAL。
+    match libsys::lseek(fd as u64, offset as i64, whence as u64) {
+        Ok(pos) => pos as crate::ctypes::c_long,
+        Err(e) => {
+            set_errno(from_libsys(e));
+            -1
         }
-        // 坏 fd ⇒ **EBADF**（POSIX）。内核自「内核缺口收口第 1 项」起有专门的
-        // `Error::BadFd`；此前只能借 `InvalidParam`（`sys_read` 对 fd 缺失的出口，
-        // 而本探针 len=1、offset=0 时那两条用户地址溢出的出口不可达）。
-        // 两个都收：`BadFd` 是新语义、`InvalidParam` 作为旧内核的兼容路径。
-        Err(libsys::Error::BadFd) | Err(libsys::Error::InvalidParam) => {
-            set_errno(crate::errno::EBADF);
-            return -1;
-        }
-        // 其余错误（例如只写节点的读权限被拒）**不足以判定不可定位**：不据此拒绝，
-        // 否则 `lseek` 在不可读的普通文件上会坏掉。残余边界见本轮报告。
-        _ => {}
     }
-    let newpos: i64 = match whence {
-        SEEK_SET => offset,
-        SEEK_CUR => {
-            // 注意：取位置只碰用户态表，不阻塞；syscall 一律在锁外做。
-            fd_pos_lock();
-            let cur = fd_pos_get(fd);
-            fd_pos_unlock();
-            match cur {
-                Some(p) => p + offset,
-                None => {
-                    // 该 fd 从未被定位过，用户态不知道「当前位置」（内核那侧也不暴露）：如实不支持。
-                    set_errno(crate::errno::ENOTSUP);
-                    return -1;
-                }
-            }
-        }
-        SEEK_END => {
-            let mut st = core::mem::MaybeUninit::<stat>::uninit();
-            if unsafe { fstat(fd, st.as_mut_ptr()) } != 0 {
-                return -1;
-            }
-            unsafe { st.assume_init() }.st_size + offset
-        }
-        _ => {
-            set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-    };
-    if newpos < 0 {
-        // POSIX：定位到负偏移是 EINVAL。
-        set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-    fd_pos_lock();
-    fd_pos_set(fd, newpos);
-    fd_pos_unlock();
-    newpos
 }
 
 /// `unlink(path)`：删除**非目录**的目录项（POSIX）。
@@ -1376,12 +1196,7 @@ fn dupfd_from(fd: c_int, min: c_int) -> c_int {
                         return -1;
                     }
                 };
-                fd_pos_lock();
-                match fd_pos_get(fd) {
-                    Some(v) => fd_pos_set(newfd, v),
-                    None => fd_pos_clear(newfd),
-                }
-                fd_pos_unlock();
+                // 位置共享由内核保证（登记项⑨），无需拷贝。
                 return newfd;
             }
             Err(e) => {
