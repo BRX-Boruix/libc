@@ -1131,11 +1131,11 @@ pub use crate::abi_generated::FD_CLOEXEC;
 ///
 /// 诚实边界（S09）：
 /// - 内核不暴露访问模式/状态旗标查询（`F_GETFL`）→ ENOTSUP；
-/// - **CLOEXEC 只能在 `open` 时设定**（`libsys::OpenFlags::cloexec`；`fopen` 的 `"e"`
-///   后缀走的就是这条路），内核没有「查询/设置已打开 fd 标志」的原语 ⇒ `F_GETFD`
-///   无法如实回答、`F_SETFD` 无法生效。**早先这里的注释写着「本内核无 CLOEXEC
-///   概念」——那句是错的**：内核有该位、且 `exec` 真的执行它；缺的是**查询/设置原语**。
-///   要兑现需内核补一个 fd-flags 原语（语义忠实性审查第五轮登记）；
+/// - **`F_GETFD`/`F_SETFD` 已兑现**（语义忠实性审查登记项③）：内核补了
+///   「每-fd 标志」的查询/设置原语（`SYS_STREAM_FLAGS`），故以 CLOEXEC 打开的 fd 能如实报出
+///   `FD_CLOEXEC`、`F_SETFD` 也能真的清/设该位。此前 `F_GETFD` 恒 0、`F_SETFD(0)`
+///   只是「没做」（旧注释还一度写着「本内核无 CLOEXEC 概念」——那句是错的：内核有该位、
+///   且 `exec` 真的执行它，缺的只是原语）；
 /// - 无 fd 级锁（`F_GETLK/F_SETLK`）→ ENOTSUP。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, args: ...) -> c_int {
@@ -1146,20 +1146,25 @@ pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, args: ...) -> c_int {
             // 与 dup() 共用同一实现（单点）：dup(fd) 按 POSIX 就等价于 F_DUPFD 且 arg=0。
             return dupfd_from(fd, arg);
         }
-        // 本系统无法查询已打开 fd 的标志（无原语）。恒 0 是**近似**：若该 fd 是以
-        // CLOEXEC 打开的，POSIX 要求这里返回 FD_CLOEXEC —— 如实登记为偏离，不假装。
-        // 修法在内核（补 fd-flags 查询原语），不在本层。
-        F_GETFD => 0,
+        // 登记项③ 之后内核有「每-fd 标志」的查询/设置原语了 ⇒ **如实回答 / 真正生效**。
+        // 此前这里恒返回 0（登记为偏离）：以 CLOEXEC 打开的 fd 拿不到 FD_CLOEXEC，
+        // F_SETFD(0) 也只是「没做」。
+        F_GETFD => match libsys::fd_flags(fd as u64) {
+            Ok(f) => f as c_int,
+            Err(e) => {
+                set_errno(from_libsys(e));
+                -1
+            }
+        },
         F_SETFD => {
             let flags = unsafe { ap.next_arg::<c_int>() };
-            if flags == 0 {
-                // POSIX：清 FD_CLOEXEC。本系统无原语可清：对**未以 CLOEXEC 打开**的 fd
-                // 「没有该位」与「清掉它」等价；对以 CLOEXEC 打开的 fd **不等价**——
-                // 这里返回 0 是保守近似（调用方通常只是「确保可继承」），偏离已登记。
-                0
-            } else {
-                set_errno(crate::errno::ENOTSUP);
-                -1
+            // 未知位由内核如实拒绝（InvalidParam ⇒ EINVAL），本层不掩码（S13：策略一处）。
+            match libsys::fd_set_flags(fd as u64, flags as u64) {
+                Ok(()) => 0,
+                Err(e) => {
+                    set_errno(from_libsys(e));
+                    -1
+                }
             }
         }
         _ => {
