@@ -694,28 +694,48 @@ pub unsafe extern "C" fn readlink(
     n as ssize_t
 }
 
-/// `_SC_NPROCESSORS_ONLN`：在线 CPU 数（取值与 Linux 一致）。
 pub use crate::abi_generated::_SC_NPROCESSORS_ONLN;
+pub use crate::abi_generated::_SC_NPROCESSORS_CONF;
+pub use crate::abi_generated::_SC_ARG_MAX;
+pub use crate::abi_generated::_SC_PAGESIZE;
+pub use crate::abi_generated::_SC_PAGE_SIZE;
+pub use crate::abi_generated::_SC_VERSION;
+pub use crate::abi_generated::_SC_2_VERSION;
 
 /// `sysconf(name)`：系统配置查询（3P4-8c）。
 ///
-/// 当前支持 `_SC_NPROCESSORS_ONLN`——数据来源**单一**：libsys 的
-/// `info(INFO_CPU_COUNT)`（内核 `mm::cpu_count()` 经 sysfs `/system/info/cpu` 投影）。
+/// **逐名字的真值来源**（语义忠实性审查登记项⑪，本轮补齐一批）：
 ///
-/// **诚实边界（S09，语义忠实性审查第六轮订正）**：其余名字一律 -1/`EINVAL`。
-/// POSIX 只允许对**未定义**的 name 返回 EINVAL；对**已定义**的 name（`_SC_OPEN_MAX`、
-/// `_SC_ARG_MAX`、`_SC_PAGESIZE`…）本应返回真值。本系统多数没有对应数据源，故这里是
-/// **已登记的偏离**（宁缺毋假：不编造返回值），不是「POSIX 允许」。要兑现需内核/环境补齐数据源。
+/// | name | 值 | 真值来源（单一事实源） |
+/// |---|---|---|
+/// | `_SC_PAGESIZE` / `_SC_PAGE_SIZE` | 4096 | `tools/abi/constants.json` 的 `values.PAGE_SIZE`——**内核页大小同一个源** |
+/// | `_SC_NPROCESSORS_ONLN` / `_SC_NPROCESSORS_CONF` | 运行时 | 内核 `mm::cpu_count()`（`INFO_CPU_COUNT`） |
+/// | `_SC_ARG_MAX` | 4096 | `constants.json` 的 `wire.MAX_CMDLINE_BYTES`——**内核装载器用同一个常量** |
+/// | `_SC_VERSION` / `_SC_2_VERSION` | 200809 | POSIX.1-2008（`200809L`）——本实现**声称遵循**的版本 |
+///
+/// **仍 -1/`EINVAL` 的名字**（已登记的偏离，不是「POSIX 允许」）：POSIX 只允许对
+/// **未定义**的 name 返回 EINVAL。剩下这些**没有真值来源**，故宁可如实拒绝也不编造：
+/// - `_SC_CLK_TCK`：需要内核把 tick 频率经 `INFO_*` 暴露（内核有 `TICK_HZ`，但没有出口）；
+/// - `_SC_OPEN_MAX`：内核的 fd 上限是**动态**的（全局闸门），单值本身就是近似；
+/// - `_SC_CHILD_MAX`/`_SC_NGROUPS_MAX`/`_SC_LINE_MAX` 等：无对应数据源。
 #[unsafe(no_mangle)]
 pub extern "C" fn sysconf(name: c_int) -> crate::ctypes::c_long {
     match name {
-        _SC_NPROCESSORS_ONLN => match libsys::info(libsys::nr::INFO_CPU_COUNT) {
-            Ok(n) => n as crate::ctypes::c_long,
-            Err(e) => {
-                set_errno(from_libsys(e));
-                -1
+        _SC_NPROCESSORS_ONLN | _SC_NPROCESSORS_CONF => {
+            match libsys::info(libsys::nr::INFO_CPU_COUNT) {
+                Ok(n) => n as crate::ctypes::c_long,
+                Err(e) => {
+                    set_errno(from_libsys(e));
+                    -1
+                }
             }
-        },
+        }
+        // 内核页大小：与内核同一事实源（constants.json 的 values.PAGE_SIZE）。
+        _SC_PAGESIZE | _SC_PAGE_SIZE => crate::abi_generated::PAGE_SIZE as crate::ctypes::c_long,
+        // 命令行上限：内核装载器用的就是 wire.MAX_CMDLINE_BYTES（同一事实源）。
+        _SC_ARG_MAX => libsys::abi_generated::MAX_CMDLINE_BYTES as crate::ctypes::c_long,
+        // 本实现声称遵循 POSIX.1-2008。
+        _SC_VERSION | _SC_2_VERSION => 200809,
         _ => {
             set_errno(EINVAL);
             -1

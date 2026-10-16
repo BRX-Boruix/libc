@@ -102,8 +102,20 @@ long sysconf(int name);
 /* fork：COW 语义；多线程父进程被内核如实拒绝（ENOTSUP）。三条差异见 libc/src/process.rs 的文档。 */
 pid_t fork(void);
 
-/* sysconf 的 name 取值：本实现只支持 _SC_NPROCESSORS_ONLN（取值与 Linux 一致），
- * 不支持的名字如实返回 -1 置 EINVAL（**不编造**返回值）。 */
+/* sysconf 的 name 取值（数值与 Linux 一致）。
+ *
+ * 已实现（真值来源逐条见 libc/src/unistd.rs 的 sysconf 文档）：
+ *   _SC_ARG_MAX                 内核装载器的命令行上限（wire.MAX_CMDLINE_BYTES）
+ *   _SC_PAGESIZE                内核页大小（values.PAGE_SIZE）
+ *   _SC_VERSION / _SC_2_VERSION POSIX.1-2008 = 200809
+ *   _SC_NPROCESSORS_CONF / _SC_NPROCESSORS_ONLN  内核 mm::cpu_count()
+ * 其余名字如实返回 -1 置 EINVAL（**不编造**返回值；见函数文档的登记）。 */
+#define _SC_ARG_MAX 0
+#define _SC_VERSION 29
+#define _SC_2_VERSION 46
+#define _SC_PAGESIZE 30
+#define _SC_PAGE_SIZE 30
+#define _SC_NPROCESSORS_CONF 83
 #define _SC_NPROCESSORS_ONLN 84
 
 /* 进程/线程标识。POSIX 归属 unistd.h（实现在 libc/src/process.rs）：
