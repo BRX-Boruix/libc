@@ -56,8 +56,9 @@ pub unsafe extern "C" fn munmap(addr: *mut c_void, len: size_t) -> c_int {
 
 /// `mprotect(addr, len, prot)`：修改已映射内存权限（3P4-5）。
 ///
-/// W^X 由内核**单点**拒绝（写+执行同页 → EINVAL），本层不预检。`prot == 0`
-/// （PROT_NONE）当前如实 `ENOTSUP`——抽象层没有「存在但不可访问」的权限表示。
+/// W^X 由内核**单点**拒绝（写+执行同页 → EINVAL），本层不预检。
+/// `prot == 0`（POSIX **PROT_NONE**）**已支持**（语义忠实性审查登记项⑥）：映射保留为
+/// present 但**不带 user 位** ⇒ 任何访问触发保护性 #PF（SIGSEGV），映射仍在册（可再改回、可 munmap）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -> c_int {
     // 同 mmap：不掩码，未知位由内核单点拒绝（`map_flags_from_prot` ⇒ InvalidParam ⇒ EINVAL）。
@@ -81,6 +82,9 @@ pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -
 /// `MAP_FIXED` 本身则**如实拒绝**（做不到「必须放在这里」），见下方注释。
 ///
 /// W^X 由内核**单点**拒绝（写+执行同页 → `EINVAL`），本层不预检（S13：策略不两处漂移）。
+///
+/// `prot == 0` 是 POSIX 的 **PROT_NONE**（登记项⑥）：返回的映射**存在但不可访问**
+/// （任何访问 → SIGSEGV）。要「默认 RW」请显式传 `PROT_READ | PROT_WRITE`。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmap(
     addr: *mut c_void,
