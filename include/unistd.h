@@ -117,6 +117,8 @@ pid_t fork(void);
 #define _SC_PAGE_SIZE 30
 #define _SC_NPROCESSORS_CONF 83
 #define _SC_NPROCESSORS_ONLN 84
+#define _SC_CLK_TCK 2
+#define _SC_OPEN_MAX 4
 
 /* 进程/线程标识。POSIX 归属 unistd.h（实现在 libc/src/process.rs）：
  * getpid 返回**线程组组长** pid（POSIX 进程 id）；gettid 返回本线程自身 pid。

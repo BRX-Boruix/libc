@@ -701,6 +701,8 @@ pub use crate::abi_generated::_SC_PAGESIZE;
 pub use crate::abi_generated::_SC_PAGE_SIZE;
 pub use crate::abi_generated::_SC_VERSION;
 pub use crate::abi_generated::_SC_2_VERSION;
+pub use crate::abi_generated::_SC_CLK_TCK;
+pub use crate::abi_generated::_SC_OPEN_MAX;
 
 /// `sysconf(name)`：系统配置查询（3P4-8c）。
 ///
@@ -736,6 +738,20 @@ pub extern "C" fn sysconf(name: c_int) -> crate::ctypes::c_long {
         _SC_ARG_MAX => libsys::abi_generated::MAX_CMDLINE_BYTES as crate::ctypes::c_long,
         // 本实现声称遵循 POSIX.1-2008。
         _SC_VERSION | _SC_2_VERSION => 200809,
+        // 调度 tick 频率（POSIX 的「每秒时钟滴答数」，`times()` 的时基）：真值来自
+        // 内核 `arch_x86_64::lapic::SCHED_TICK_HZ`（登记项⑪）。**不是**时钟源计数器
+        // 的频率——那个在有 HPET 时是 1e9，是另一个量（本审查第一版答错过）。
+        _SC_CLK_TCK => match libsys::info(libsys::nr::INFO_TICK_HZ) {
+            Ok(hz) => hz as crate::ctypes::c_long,
+            Err(e) => {
+                set_errno(from_libsys(e));
+                -1
+            }
+        },
+        // 每进程 fd **默认水位**：与内核 `Process::MAX_FDS` 同一事实源
+        // （wire.MAX_FDS）。注意内核的 fd 上限实际是动态的（全局闸门），
+        // 1024 是文档化的默认水位——POSIX 要一个单值，这是最诚实的那个。
+        _SC_OPEN_MAX => libsys::abi_generated::MAX_FDS as crate::ctypes::c_long,
         _ => {
             set_errno(EINVAL);
             -1
