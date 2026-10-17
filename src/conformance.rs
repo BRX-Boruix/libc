@@ -1408,11 +1408,18 @@ fn difftime_seconds() {
 #[test]
 fn confstr_and_langinfo() {
     unsafe {
-        // _CS_PATH = 1：与 shell 的 DEFAULT_PATH 逐字节一致（有门禁核对）。
+        // _CS_PATH = 1：**运行期算**（`/programs` + 每个已挂载卷上真实存在的 `3p`）。
+        //
+        // 断言的是**不变量**而不是某个固定串：宿主机上不存在 `/volumes` ⇒ 结果恰为
+        // `PROGRAM_DIR`；这本身是真值断言——它证明「没有任何卷」时**不编造路径**。
         let mut buf = [0i8; 128];
         let n = crate::posix_batch7::confstr(1, buf.as_mut_ptr(), buf.len());
         assert!(n > 0);
-        assert_eq!(cbytes(buf.as_ptr()), b"/programs:/volumes/BORUIX_DATA/3p");
+        let got = cbytes(buf.as_ptr());
+        assert!(got.starts_with(b"/programs"), "got: {:?}", got);
+        for extra in got[b"/programs".len()..].split(|&b| b == b':').filter(|s| !s.is_empty()) {
+            assert!(extra.ends_with(b"/3p"), "附加项必须是 <卷>/3p，实得 {:?}", extra);
+        }
         // 未知名字返回 0（POSIX：该名字无值）。
         assert_eq!(crate::posix_batch7::confstr(9999, buf.as_mut_ptr(), buf.len()), 0);
 

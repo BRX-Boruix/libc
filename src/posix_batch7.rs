@@ -43,14 +43,16 @@ pub unsafe extern "C" fn gets(s: *mut c_char) -> *mut c_char {
 /// `confstr(name, buf, len)`：取配置定义字符串（POSIX `<unistd.h>`）。
 ///
 /// 本系统只有 C locale、且是单一系统的 sysroot，故可定义的项有限。已定义：
-/// - `_CS_PATH`(1)：命令搜索路径。**取值必须与 shell 的 `DEFAULT_PATH` 一致**——
-///   真值在 `shell/src/env.rs`（`/programs:/volumes/BORUIX_DATA/3p`）。
+/// - `_CS_PATH`(1)：命令搜索路径。**运行期算**，与 shell 的默认 `PATH` 同源：
+///   都调用 `libsys::search_path()`（唯一构造点）。
 ///
-///   **诚实边界（S13）**：这是**两处真值源**（libc 的 `confstr` 与 shell 的 `env.rs`），
-///   违反了单点定义。此处只硬编码一份**已核对**的副本，并由
-///   `tools/checks/dist/confstr_path_agrees.py` 门禁保证两者不漂移。
-///   （教训：本项初版写的是 `/programs:/bin` 并声称「与 shell/init 的约定一致」——
-///   那句话**是假的**，值是编的。项目所有者质疑 `ttyname` 的同类问题后全面复查时抓出。）
+///   **为什么不再是编译期常量**：卷标、有几块盘、`3p` 在哪块盘上，都是**部署事实**。
+///   把 `/volumes/<某个卷标>/3p` 烧进二进制，等于假定用户用的就是作者那块盘——
+///   真实运行下卷标可能不同、可能没有第二块盘、`3p` 也可能在系统盘上。那样烧出来的值
+///   会让本函数**返回一个不存在的目录**，而没有任何地方报错（静默伪数据，S09）。
+///
+///   **失败行为**：扫不动 `/volumes` 或没有任何卷带 `3p` ⇒ 只返回 `PROGRAM_DIR`，
+///   那是**真值**，不是降级编造。
 /// - `_CS_GNU_LIBC_VERSION`(2)：`boruix 0.1.0`——**如实标注是 boruix 而非 glibc**，
 ///   不给一个会被误认为真 glibc 的字符串。
 ///
@@ -58,16 +60,21 @@ pub unsafe extern "C" fn gets(s: *mut c_char) -> *mut c_char {
 /// 返回值为所需长度（含 NUL）；`buf` 为 NULL 或 `len == 0` 时只返回长度。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn confstr(name: c_int, buf: *mut c_char, len: usize) -> usize {
-    let v: &[u8] = match name {
-        // 与 shell/src/env.rs 的 DEFAULT_PATH 同源：都由 tools/abi/constants.json 生成
-        // （tools/checks/dist/confstr_path_agrees.py 核对两侧生成物逐字节一致）。
-        1 => crate::abi_generated::DEFAULT_PATH_C,
-        2 => b"boruix 0.1.0\0",
+    // `_CS_PATH` 是运行期算出来的（见上方文档）；其余项是静态串。
+    // 两条路径都**含结尾 NUL**——confstr 的返回值含 NUL，长度也按含 NUL 计。
+    let mut owned: alloc::vec::Vec<u8> = match name {
+        1 => {
+            let mut v = libsys::search_path().into_bytes();
+            v.push(0);
+            v
+        }
+        2 => b"boruix 0.1.0\0".to_vec(),
         _ => {
             crate::errno::set_errno(crate::errno::EINVAL);
             return 0;
         }
     };
+    let v: &[u8] = &owned;
     if !buf.is_null() && len > 0 {
         let n = core::cmp::min(v.len(), len);
         unsafe { core::ptr::copy_nonoverlapping(v.as_ptr() as *const c_char, buf, n) };
