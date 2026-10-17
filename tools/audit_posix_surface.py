@@ -120,6 +120,33 @@ def header_text():
     return "\n".join(chunks)
 
 
+# 「已判定为不支持」的基线 —— 与 `docs/TODO/libc-posix-surface.md` 的 B 类**逐项对应**。
+#
+# 本脚本作为**门禁**时的语义（由 `tools/checks/run_all.py` 登记运行）：
+#   - `PHANTOM > 0` 或**出现基线之外的新 MISSING** ⇒ 非 0（回归）；
+#   - 基线内的 MISSING 不算失败：它们的「为什么做不到」是**人工判定**的，写在台账里；
+#     脚本无法判断那条理由是否仍然成立（本轮就发现台账里有 12 条理由已失效）。
+#
+# **为什么需要这条基线**：此前脚本「有 MISSING 就 return 1」，而 13 项全是已判定不支持的
+# ⇒ 登记进套件就是**恒红**。恒红与恒绿一样没有信号，故它此前根本没被登记，
+# 于是 libc 的 POSIX 面基线从 25 漂到 13 而没有任何门禁报警。
+KNOWN_UNSUPPORTED = (
+    "getpgrp", "setpgid", "setsid", "killpg",   # 无进程组/会话（ADR-043）
+    "ioctl",                                     # 刻意无通用 ioctl（避免绕过能力门禁）
+    "alloca",                                    # 编译器内建，不是 libc 函数
+    "iconv",                                     # 无字符集转换表
+    "popen", "pclose",                           # 建立在 exec 替换之上（本系统无 exec）
+    "dlopen", "dlsym", "dlclose", "dlerror",      # 由 rtld 提供（归属，不是缺口）
+)
+
+
+# 「已知 PHANTOM」——头文件声明了、但**不由 libc.a 提供**的符号。
+#
+# `dl*` 四个由 **rtld** 提供（`rtld/include/dlfcn.h`，不在 libc sysroot 里），
+# 头文件在 libc 侧是为了让 `#include <dlfcn.h>` 的源码能编过；符号归属 rtld。这是**归属**不是缺口。
+KNOWN_PHANTOM = ("dlopen", "dlsym", "dlclose", "dlerror")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--missing-only", action="store_true")
@@ -179,9 +206,23 @@ def main():
         print("\nPHANTOM 明细（头文件声明了但 libc.a 里没有，调用会链接失败）：")
         for n in phantom:
             print("  %s" % n)
-    if missing or phantom:
-        print("\n注意：MISSING 不等于「必须实现」——无忠实语义的项应**显式登记为不支持**，不要伪造返回值。")
+    # 门禁判定：**只对回归负责**（新缺口 / PHANTOM），不对基线内的已知项负责。
+    known = set(KNOWN_UNSUPPORTED)
+    new_missing = sorted(n for _, n in missing if n not in known)
+    stale_baseline = sorted(known - {n for _, n in missing})
+    new_phantom = sorted(set(phantom) - set(KNOWN_PHANTOM))
+
+    if stale_baseline:
+        print("\n基线里这些项**已经不在 MISSING 了**（台账该订正）: %s" % ", ".join(stale_baseline))
+    if new_missing:
+        print("\n**新缺口**（不在基线里，需实现或登记为不支持）: %s" % ", ".join(new_missing))
+    if new_phantom:
+        print("\n**新 PHANTOM**（头文件声明了、库里没有，调用即链接失败）: %s" % ", ".join(new_phantom))
+
+    if new_missing or new_phantom:
         return 1
+    print("\n[OK] 无新缺口（基线内 %d 项已知不支持、%d 项归属 rtld；理由见台账）"
+          % (len(known) - len(stale_baseline), len(set(phantom) & set(KNOWN_PHANTOM))))
     return 0
 
 
