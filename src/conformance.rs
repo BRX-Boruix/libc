@@ -1415,11 +1415,9 @@ fn confstr_and_langinfo() {
         let mut buf = [0i8; 128];
         let n = crate::posix_batch7::confstr(1, buf.as_mut_ptr(), buf.len());
         assert!(n > 0);
-        let got = cbytes(buf.as_ptr());
-        assert!(got.starts_with(b"/programs"), "got: {:?}", got);
-        for extra in got[b"/programs".len()..].split(|&b| b == b':').filter(|s| !s.is_empty()) {
-            assert!(extra.ends_with(b"/3p"), "附加项必须是 <卷>/3p，实得 {:?}", extra);
-        }
+        // `_CS_PATH` 是**系统契约**（约定路径），静态值就是 PROGRAM_DIR。
+        // 盘叫什么、有几块盘、第三方程序在哪，系统不知道——那是数据。
+        assert_eq!(cbytes(buf.as_ptr()), b"/programs");
         // 未知名字返回 0（POSIX：该名字无值）。
         assert_eq!(crate::posix_batch7::confstr(9999, buf.as_mut_ptr(), buf.len()), 0);
 

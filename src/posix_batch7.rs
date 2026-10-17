@@ -64,7 +64,9 @@ pub unsafe extern "C" fn confstr(name: c_int, buf: *mut c_char, len: usize) -> u
     // 两条路径都**含结尾 NUL**——confstr 的返回值含 NUL，长度也按含 NUL 计。
     let mut owned: alloc::vec::Vec<u8> = match name {
         1 => {
-            let mut v = libsys::search_path().into_bytes();
+            // `_CS_PATH` 是**系统契约**（约定路径），不是部署事实：
+            // 盘叫什么、有几块盘、第三方程序在哪，系统一概不知道，也不该知道。
+            let mut v = libsys::PROGRAM_DIR.as_bytes().to_vec();
             v.push(0);
             v
         }
