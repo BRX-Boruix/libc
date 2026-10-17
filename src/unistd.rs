@@ -410,11 +410,17 @@ pub unsafe extern "C" fn realpath(
         out.extend_from_slice(&comp);
 
         let mut nbuf = [0u8; 4096];
+        // **必须补 NUL**：`out` 是 `Vec<u8>`，本身不带结尾 0；直接把它当 C 字符串传给
+        // `readlink` 会让后者读到堆上的垃圾（是否越界、读到什么，取决于当时的堆布局）。
+        // 这个缺陷原先被"恰好没崩"掩盖着——一次无关的堆布局变化就把它暴露成
+        // 「realpath 有时失败」。临时补 0、调用完立刻弹掉，`out` 的语义不变。
+        out.push(0);
         let n = unsafe { readlink(
             out.as_ptr() as *const c_char,
             nbuf.as_mut_ptr() as *mut c_char,
             nbuf.len(),
         ) };
+        out.pop();
         if n > 0 {
             // 是符号链接：把目标接回待处理队列，并撤销刚压入的组件。
             links += 1;
