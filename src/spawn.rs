@@ -225,7 +225,7 @@ pub unsafe extern "C" fn posix_spawnattr_setflags(attr: *mut posix_spawnattr_t, 
 /// 拼命令行：`argv[1..]` 以空格连接（本 ABI 的 argv[0] 就是整条命令行）。
 ///
 /// 返回 `Err(errno)` 当某个参数含空白（无法无损表达）或过长。
-unsafe fn build_cmdline(argv: *const *const c_char, out: &mut [u8; 256]) -> Result<usize, c_int> {
+pub(crate) unsafe fn build_cmdline(argv: *const *const c_char, out: &mut [u8; 256]) -> Result<usize, c_int> {
     let mut n = 0usize;
     if argv.is_null() {
         return Ok(0);
@@ -410,8 +410,38 @@ pub unsafe extern "C" fn posix_spawnp(
         return EINVAL;
     }
     let f = unsafe { crate::stdio::cstr_bytes(file) };
-    if f.contains(&b'/') {
-        return unsafe { posix_spawn(pid, file, file_actions, attrp, argv, envp) };
+    unsafe {
+        search_path(&f, |p| {
+            let rc = posix_spawn(pid, p, file_actions, attrp, argv, envp);
+            if rc == 0 { Ok(()) } else { Err(rc) }
+        })
+    }
+}
+
+/// 按 `PATH` 逐个候选路径调用 `f`，直到某个候选成功或出现 `ENOENT` 以外的错误。
+///
+/// `file` 含 `/` 时**直接用它、不搜索**（POSIX）。`PATH` 取自本进程环境；未设
+/// `PATH` 时如实返回 `ENOENT`——**不内置默认**，因为本系统的默认 `PATH` 定义在
+/// **shell** 仓，libc 复制一份就是 S15 的漂移源（与 `confstr` 判不支持同因）。
+///
+/// `posix_spawnp`（成功返回 0、失败返回错误号）与 `execvp`（成功不返回、失败置
+/// errno 并返回 -1）的返回约定差异由 `f` 归一化成 `Result`，本函数只看"成功 /
+/// 换下一个 / 停"。
+pub(crate) unsafe fn search_path<F>(file: &[u8], mut f: F) -> c_int
+where
+    F: FnMut(*const c_char) -> Result<(), c_int>,
+{
+    if file.contains(&b'/') {
+        let mut buf = [0u8; 256];
+        if file.len() + 1 > buf.len() {
+            return crate::errno::ENAMETOOLONG;
+        }
+        buf[..file.len()].copy_from_slice(file);
+        buf[file.len()] = 0;
+        return match f(buf.as_ptr() as *const c_char) {
+            Ok(()) => 0,
+            Err(e) => e,
+        };
     }
     let pathv = unsafe { crate::stdlib::getenv(b"PATH\0".as_ptr() as *const c_char) };
     if pathv.is_null() {
@@ -420,33 +450,22 @@ pub unsafe extern "C" fn posix_spawnp(
     let path = unsafe { crate::stdio::cstr_bytes(pathv) };
     for dir in path.split(|&b| b == b':') {
         let mut buf = [0u8; 256];
-        let mut n = 0usize;
         let d: &[u8] = if dir.is_empty() { b"." } else { dir };
-        if d.len() + 1 + f.len() + 1 > buf.len() {
+        if d.len() + 1 + file.len() + 1 > buf.len() {
             continue;
         }
+        let mut n = 0usize;
         buf[..d.len()].copy_from_slice(d);
         n += d.len();
         buf[n] = b'/';
         n += 1;
-        buf[n..n + f.len()].copy_from_slice(f);
-        n += f.len();
+        buf[n..n + file.len()].copy_from_slice(file);
+        n += file.len();
         buf[n] = 0;
-        let rc = unsafe {
-            posix_spawn(
-                pid,
-                buf.as_ptr() as *const c_char,
-                file_actions,
-                attrp,
-                argv,
-                envp,
-            )
-        };
-        if rc == 0 {
-            return 0;
-        }
-        if rc != crate::errno::ENOENT {
-            return rc;
+        match f(buf.as_ptr() as *const c_char) {
+            Ok(()) => return 0,
+            Err(e) if e == crate::errno::ENOENT => continue,
+            Err(e) => return e,
         }
     }
     crate::errno::ENOENT

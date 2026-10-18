@@ -135,7 +135,7 @@ KNOWN_UNSUPPORTED = (
     "ioctl",                                     # 刻意无通用 ioctl（避免绕过能力门禁）
     "alloca",                                    # 编译器内建，不是 libc 函数
     "iconv",                                     # 无字符集转换表
-    "popen", "pclose",                           # 建立在 exec 替换之上（本系统无 exec）
+    "popen", "pclose",                           # **未实现**（不是设计不支持）：exec 已就绪（3P4-12），可做
     "dlopen", "dlsym", "dlclose", "dlerror",      # 由 rtld 提供（归属，不是缺口）
 )
 

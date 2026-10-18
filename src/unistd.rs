@@ -254,56 +254,33 @@ pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     }
 }
 
-/// `execvp(file, argv)`：**本系统不支持——如实失败，不伪造**。
+/// `execvp(file, argv)`：按 `PATH` 搜索并用找到的映像**替换当前进程**（POSIX）。
 ///
-/// BORUIX **没有"替换当前进程映像"的系统调用**：`SYS_TASK_SPAWN`（0x31）只**派生**新进程
-/// 并返回其 pid（见 libsys::process::exec_path）。而 POSIX `execvp` 的核心契约恰恰是
-/// "成功则不返回、当前进程变成新程序"——这在本系统上**无法成立**。
+/// `file` 含 `/` 时直接用它、不搜索（POSIX）。搜索规则与 `posix_spawnp` **同一实现**
+/// （[`crate::spawn::search_path`]）——两者都是「按 PATH 找一个程序并运行」，各写一份
+/// 就是同一语义两处实现的漂移源。
 ///
-/// 因此本实现**总是返回 -1**，但给出**有区分度**的 errno（不把"找不到"与"做不了"混为一谈）：
-/// - 程序按 PATH 找不到 → `ENOENT`（这是**真实**的查找结果）；
-/// - 找到了 → `ENOTSUP`（"找到了，但本系统做不了 exec"）。
-///
-/// **为什么不"派生+等待+退出"来近似**：那会**静默改变**进程语义——pid 变了、父进程与
-/// 观察者的关系变了、调用方的其余线程与资源处理也不同。库函数不该悄悄换语义。
-///
-/// 另注：本 ABI 的"命令行"是**单个字符串**（shell 已剥首词），不是 argv 数组；
-/// 即便将来有了真 exec，argv→cmdline 的拼接也需要先定成文契约。
+/// **成功不返回**：映像已换，本函数不会带着返回值回来。失败时置 errno 返回 -1，且
+/// errno 有区分度（`ENOENT` = 全部候选都没找到；`EACCES` 等 = 找到了但用不了）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execvp(
     file: *const c_char,
     argv: *const *const c_char,
 ) -> c_int {
-    let _ = argv;
     if file.is_null() {
         set_errno(EINVAL);
         return -1;
     }
-    let name = match unsafe { crate::stdio::cstr_to_str(file) } {
-        Some(s) => s,
-        None => { set_errno(EINVAL); return -1; }
+    let f = unsafe { crate::stdio::cstr_bytes(file) };
+    // `execv` 成功不返回 ⇒ 闭包只会以 `Err(errno)` 结束；"只有 ENOENT 才换下一个候选"
+    // 正是 POSIX execvp 的搜索规则。
+    let e = unsafe {
+        crate::spawn::search_path(&f, |p| {
+            crate::exec::execv(p, argv);
+            Err(crate::errno::errno())
+        })
     };
-    // 含 `/` 的按路径直接查；否则按 PATH 逐目录查（这一步是**真实**的，不是形式）。
-    let found = if name.contains('/') {
-        libsys::stat(name).is_ok()
-    } else {
-        let path = unsafe { crate::stdlib::getenv(c"PATH".as_ptr() as *const c_char) };
-        let mut hit = false;
-        if !path.is_null() {
-            if let Some(p) = unsafe { crate::stdio::cstr_to_str(path) } {
-                for dir in p.split(':') {
-                    let cand = alloc::format!("{}/{}", if dir.is_empty() { "." } else { dir }, name);
-                    if libsys::stat(&cand).is_ok() {
-                        hit = true;
-                        break;
-                    }
-                }
-            }
-        }
-        hit
-    };
-    // 找不到 → ENOENT（真实结果）；找到了 → ENOTSUP（本系统没有替换映像的 exec）。
-    set_errno(if found { crate::errno::ENOTSUP } else { crate::errno::ENOENT });
+    set_errno(e);
     -1
 }
 
