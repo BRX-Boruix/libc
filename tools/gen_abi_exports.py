@@ -42,13 +42,19 @@ ATTR = re.compile(r"__attribute__\s*\(\(.*?\)\)", re.S)
 VAR = re.compile(r"^\s*extern\s+[A-Za-z_][A-Za-z0-9_ \*]*?\b([a-z_][a-z0-9_]*)\s*;")
 
 
-def collect():
-    names = set()
+def collect_with_headers():
+    """返回 [(符号名, 声明它的头文件相对路径)]，按名字排序。
+
+    单一事实源：`collect()`（version script 用）与 `abi_manifest.py`（入档清单用）都走本函数，
+    否则「导出面」与「入档清单」会各算一遍、迟早漂移。
+    """
+    pairs = {}
     for root, _dirs, files in os.walk(INC):
         for fn in sorted(files):
             if not fn.endswith(".h"):
                 continue
             path = os.path.join(root, fn)
+            rel = os.path.relpath(path, INC).replace(os.sep, "/")
             with open(path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.split("/*")[0]
@@ -58,8 +64,14 @@ def collect():
                         if m:
                             n = m.group(1)
                             if n not in KEYWORDS:
-                                names.add(n)
-    return sorted(names)
+                                # 同名在多个头里声明（如 sys/types.h 与 unistd.h）时取首个，
+                                # 只是为了清单好看；导出面不受影响。
+                                pairs.setdefault(n, rel)
+    return sorted(pairs.items())
+
+
+def collect():
+    return sorted(n for n, _h in collect_with_headers())
 
 
 def main():
