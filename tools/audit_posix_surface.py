@@ -135,8 +135,8 @@ KNOWN_UNSUPPORTED = (
     "ioctl",                                     # 刻意无通用 ioctl（避免绕过能力门禁）
     "alloca",                                    # 编译器内建，不是 libc 函数
     "iconv",                                     # 无字符集转换表
-    "popen", "pclose",                           # **未实现**（不是设计不支持）：exec 已就绪（3P4-12）；
-                                                 # 落地路径与 shell 路径裁定见 3p.md 的 3P4-14
+    # popen/pclose 自 3P4-14 起已实现（读 SHELL 起 shell 子进程），故不在基线里——
+    # 留在基线里就是给「将来退化成桩」留盲区。
     "dlopen", "dlsym", "dlclose", "dlerror",      # 由 rtld 提供（归属，不是缺口）
 )
 

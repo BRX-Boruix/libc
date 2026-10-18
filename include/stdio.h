@@ -57,6 +57,12 @@ extern FILE *stderr;
 
 FILE *fopen(const char *path, const char *mode);
 FILE *fdopen(int fd, const char *mode);
+
+/* popen/pclose（3P4-14）：起一个 shell 子进程并接管道。
+ * shell 路径来自环境变量 SHELL（libc 不硬编码）；未设时 popen 返回 NULL + ENOENT。
+ * type 只接受 "r" / "w"；"e" 如实 EINVAL。 */
+FILE *popen(const char *command, const char *type);
+int pclose(FILE *stream);
 FILE *freopen(const char *path, const char *mode, FILE *fp);
 /* 删除文件（或空目录）。成功 0，失败 -1 置 errno。 */
 int remove(const char *path);

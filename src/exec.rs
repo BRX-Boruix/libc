@@ -9,26 +9,7 @@
 //! 含空白的元素**如实 EINVAL** 而不是静默切成两个参数。
 
 use crate::ctypes::{c_char, c_int};
-use crate::errno::{set_errno, EINVAL, ENOTSUP};
-
-/// `system(command)`：交给 shell 执行。
-///
-/// **诚实边界**：本系统**没有 `/bin/sh` 的约定**——`system` 需要「起 shell + 等它结束」，
-/// 而 shell 程序在 `/programs/shell.elf`，把这条路径硬编码进 libc 就是 S01 的硬编码环境。
-/// 故**如实返回 -1 并置 ENOTSUP**——提供符号是为了让 C++ 标准库（`<cstdlib>` 需要
-/// `system` 的声明）能编译链接，与 `ttyname` 同一处理原则（S09：宁可报错，绝不假装成功）。
-///
-/// **3P4-12 之后这条边界只剩一半**：exec 已经能替换映像了，缺的纯粹是"shell 在哪"
-/// 这条部署事实——它该由调用方或 shell 仓决定，不该由 libc 猜。
-/// `command == NULL` 时按 POSIX 返回「有 shell 可用」的非零值（本系统**有** shell 程序）。
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn system(command: *const c_char) -> c_int {
-    if command.is_null() {
-        return 1; // POSIX：非零 = 有 shell 可用。本系统确有 shell（只是路径不由 libc 决定）。
-    }
-    set_errno(ENOTSUP);
-    -1
-}
+use crate::errno::{set_errno, EINVAL};
 
 /// 环境里由**内核权威单源**提供的键（与内核 `RESERVED_ENV_KEYS` 同源，S15）。
 ///

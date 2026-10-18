@@ -50,7 +50,7 @@ LIBC = os.path.dirname(HERE)
 TRIAGED = {
     # execv/execve/execvp 自 3P4-12 起**是真实现**（SYS_TASK_EXEC 0x30），故不在此表——
     # 留一条死掉的豁免就是给"将来被改回桩"留盲区。
-    "system": "仍需 shell：exec 已就绪（3P4-12），缺的是「shell 程序在哪」这条部署事实——libc 不硬编码 /programs/shell.elf（S01），故 cmd!=NULL 时如实 ENOTSUP；cmd==NULL 返回 1（POSIX：非零=有 shell 可用，本系统确有）",
+    "system": "**已实现**（3P4-14）：fork + exec $SHELL + 收尸。命中的 ENOTSUP 分支是「环境里没有 SHELL」——那是部署事实缺失时的如实失败（不内置默认，S01/ADR-055），不是桩；cmd==NULL 返回 1（POSIX：非零=有 shell 可用）",
     "setvbuf": "刻意的空操作：本 libc 的 stdio 不做用户态缓冲，无缓冲可设——与 fflush 判空操作同一决定（函数文档已写明）",
     "fcntl": "部分实现：F_DUPFD 真实支持（含位置表复制）；其余命令如实 ENOTSUP，不伪造",
     "fflush": "刻意的空操作：本 libc 无用户态缓冲，无数据可冲——函数文档已写明，且与 setvbuf 判不支持同一决定",

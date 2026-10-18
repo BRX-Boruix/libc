@@ -72,8 +72,9 @@ int unsetenv(const char *name);
 int putenv(char *string);
 int clearenv(void);
 
-/* system：C 标准要求；本系统无 /bin/sh 约定且 libc 不硬编码 shell 路径 ⇒ 如实 ENOTSUP。
- * 提供符号是为让 C++ 标准库的 <cstdlib> 能编译（实测 'system' has not been declared in '::'）。 */
+/* system：把整条命令行交给 $SHELL 执行并等它结束（3P4-14）。
+ * shell 路径来自环境变量 SHELL——libc 不硬编码（那是部署事实，ADR-055）；
+ * 未设时如实 -1/ENOTSUP。返回值是 waitpid 原始状态（用 WEXITSTATUS 解码）。 */
 int system(const char *command);
 float strtof(const char *s, char **endptr);
 long double strtold(const char *s, char **endptr);

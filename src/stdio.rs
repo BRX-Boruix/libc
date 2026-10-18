@@ -87,6 +87,11 @@ pub struct FILE {
     pub str_src: *const u8,
     pub str_len: usize,
     pub str_pos: usize,
+    /// `popen` 流关联的子进程 pid（`0` = 不是 popen 流）。`pclose` 据此收尸。
+    ///
+    /// 为什么放在 `FILE` 里：`pclose` 只拿到 `FILE *`，没有别的途径知道该等谁。
+    /// C 侧 `FILE` 是不透明类型（`typedef struct FILE FILE;`），加字段不破坏 ABI。
+    pub pclose_pid: i32,
 }
 
 /// 全局锁：保护标准流初始化与输出（单进程模型下防重入）。
@@ -182,17 +187,17 @@ pub fn stdio_init() {
         static STREAM_STDIN: SyncStream = SyncStream::new(FILE {
             fd: 0, mode: FmMode::Read, buf_mode: FmBufMode::None, eof: false, error: false,
             buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, buf_cap: 0, buf_owned: false, closed: false, pushback: -1,
-            str_src: core::ptr::null(), str_len: 0, str_pos: 0,
+            str_src: core::ptr::null(), str_len: 0, str_pos: 0, pclose_pid: 0,
         });
         static STREAM_STDOUT: SyncStream = SyncStream::new(FILE {
             fd: 1, mode: FmMode::Write, buf_mode: FmBufMode::Line, eof: false, error: false,
             buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, buf_cap: 0, buf_owned: false, closed: false, pushback: -1,
-            str_src: core::ptr::null(), str_len: 0, str_pos: 0,
+            str_src: core::ptr::null(), str_len: 0, str_pos: 0, pclose_pid: 0,
         });
         static STREAM_STDERR: SyncStream = SyncStream::new(FILE {
             fd: 2, mode: FmMode::Write, buf_mode: FmBufMode::None, eof: false, error: false,
             buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, buf_cap: 0, buf_owned: false, closed: false, pushback: -1,
-            str_src: core::ptr::null(), str_len: 0, str_pos: 0,
+            str_src: core::ptr::null(), str_len: 0, str_pos: 0, pclose_pid: 0,
         });
         if stdin.is_null() {
             stdin = STREAM_STDIN.get();
@@ -220,7 +225,7 @@ unsafe fn alloc_file(fd: u64, fm: FmMode) -> *mut FILE {
             eof: false, error: false,
             buf_ptr: core::ptr::null_mut(), buf_len: 0, buf_pos: 0, buf_cap: 0, buf_owned: false, closed: false,
             pushback: -1,
-            str_src: core::ptr::null(), str_len: 0, str_pos: 0,
+            str_src: core::ptr::null(), str_len: 0, str_pos: 0, pclose_pid: 0,
         });
         // 登记以便 fflush(NULL) 与 exit 冲刷全部流。表满则如实放弃（该流仍可用，
         // 只是不会被 exit 自动冲刷——返回 false 不假装登记成功）。
@@ -1926,6 +1931,7 @@ pub unsafe extern "C" fn sscanf(s: *const c_char, fmt: *const c_char, ap: ...) -
         str_src: bytes.as_ptr(),
         str_len: bytes.len(),
         str_pos: 0,
+        pclose_pid: 0,
     };
     let ap: VaList = unsafe { core::mem::transmute(ap) };
     unsafe { vscan(&mut f, fmt, ap) }
