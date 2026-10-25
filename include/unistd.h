@@ -74,20 +74,23 @@ int nice(int inc);
  * 是每进程的——单线程进程下相同；setitimer 的周期语义与三种计时器未实现，如实缺。 */
 unsigned int alarm(unsigned int seconds);
 
-/* ttyname：返回该 fd 对应终端的路径（POSIX）。
+/* ttyname / ttyname_r：返回该 fd 对应终端的路径（POSIX）。
  *
- * **本系统按设计没有 TTY** ⇒ 本项属「设计性不支持」，不是「缺个组件」。
- * ADR-042（ACCEPTED）明定「canonical 模式与 termios 一概不做」，其事实表记着「全内核无
- * termios/tty/行规程实现」；内核只有输出侧的 console sink（term crate）。
+ * 实现方式：**身份比对**（仿 Linux 比对 /dev 条目）。isatty(fd) 为假 ⇒ ENOTTY；为真则取
+ * fstat(fd) 的 st_ino，逐个候选路径 stat 过去，命中同号的那条即答案（先 /devices/console，
+ * 再 /devices/consoles/<name>）。一条都不命中 ⇒ ENOTTY，绝不返回猜测的路径。
  *
- * 内核里唯一与终端有关的是 INode::is_terminal()——一个节点级布尔真值（ADR-044 / J-TOKEN-A），
- * 唯一用途是让 isatty 说真话。它为真的只有 vfs/src/stdio.rs 的两个节点（fd 0/1/2 背后的
- * **匿名**节点），而那些节点不在任何目录里 ⇒ **没有路径可命名**；
- * 而 /devices/console 没覆写 is_terminal ⇒ 按内核真值是 false，**它不是终端**。
+ * 成立的前提是**节点身份稳定**：fd 0/1/2 背后的 stdio 节点覆写了 stable_id 为 console 实例 0
+ * 的身份，与 /devices/console 同号（它们指向同一个环）。重定向后 fd 背后是别的节点，身份
+ * 自然不同 ⇒ 如实 ENOTTY。**终端性跟着节点走，不跟着 fd 号走。**
  *
- * 故本实现如实失败（NULL + ENOTTY），不返回伪造路径。将来若真要 ttyname，前提是先有
- * ADR 层面的新裁定（决定引入终端设备节点），而不是在 libc 里补一层转译。 */
+ * **仍然没有 TTY 语义**：ADR-042 决定不做 canonical 模式与 termios；本函数只回答「名字是
+ * 什么」，不提供行规程行为。
+ *
+ * ttyname 返回指向静态缓冲的指针（可能被后续调用覆盖、不保证线程安全，POSIX 如此）；
+ * ttyname_r **返回错误号本身**（0 = 成功），不置 errno。 */
 char *ttyname(int fd);
+int ttyname_r(int fd, char *buf, size_t len);
 
 /* dup2：把 oldfd 复制到 newfd（POSIX）。副本与原 fd 共享文件偏移。
  * 3P6-2 第二波：由 GCC 的真实报错驱动补上（libiberty 的 filedescriptor.c 需要它）。 */

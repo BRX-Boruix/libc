@@ -636,46 +636,6 @@ pub unsafe extern "C" fn flock(fd: c_int, operation: c_int) -> c_int {
 /// **诚实边界（S09）**：目前只有 **RamFS** 实现了该原语（根文件系统）。ext2 侧需先能从
 /// `Arc<dyn INode>` 拿回目标 inode 号（内核 `add_dir_entry` 已收 ino，缺的是跨 trait 边界的
 /// 身份通道），故 ext2 上如实返回 `ENOTSUP`——**不近似**（复制内容不是硬链接）。
-/// `ttyname(fd)`：返回该 fd 对应终端的**路径**（POSIX，声明见 `<unistd.h>`）。
-///
-/// **本实现只能忠实回答「不是终端」这一半**：非终端 ⇒ NULL 置 `ENOTTY`（POSIX）。
-/// 是终端时**如实返回 NULL 置 `ENOTTY`**——因为本系统目前**拿不到节点的名字**（见下），
-/// 而**编一个路径**（例如恒返回 `/devices/console`）会在 fd 属于别的终端时撒谎。
-///
-/// # 为什么本系统**没有**可以返回的路径（实测 + ADR 裁定，不是推断）
-///
-/// **本系统按设计没有 TTY。** [ADR-042](../../docs/adr/042-input-side-no-legacy-canonical-mode.md)
-/// （ACCEPTED）明定「输入侧同样不背历史债，**canonical 模式与 termios 一概不做**」，
-/// 其事实表记着「全内核无 `termios`/`tty`/行规程实现」；内核只有**输出**侧的 console sink
-/// （`term` crate）。⇒ `ttyname` 想返回的那个「终端**设备**的路径」在本系统**不存在**。
-///
-/// 内核里唯一与「终端」有关的是 `INode::is_terminal()`——一个**节点级布尔真值**
-/// （ADR-044 / J-TOKEN-A），**唯一用途是让 `isatty` 说真话**，不是 TTY。实测：
-///
-/// - 它为真的**只有** `vfs/src/stdio.rs` 的两个节点（`StdinNode` @190、stdout 节点 @280），
-///   即 **fd 0/1/2 背后的匿名节点**；
-/// - 那些节点**不在任何目录里**（不是 devfs 下的设备文件）⇒ **没有路径可命名**；
-/// - 而 `/devices/console`（devfs `ConsoleNode`）**没有覆写 `is_terminal`** ⇒ 按内核自己的
-///   真值是 **`false`**，**它不是终端**。
-///
-/// 所以「终端 ⇒ `/devices/console`」是一条**凭空的映射**（本文件早先的版本正是这么写的，
-/// 已订正）。即便退一步用 `st_ino` 做身份比对也不成立：`INode::stable_id` 默认是 `self`
-/// 地址，其文档明写「无状态视图节点（procfs/devfs/stdio）的 `lookup` 同样可能**每次新建
-/// 实例**」⇒ `fstat` 与 `stat` 拿到两个不同实例，身份必然不等（实测 `ttyname(1)` 返回 NULL）。
-/// 反向查找（遍历挂载树）也无效——那些匿名节点根本不在树里。
-///
-/// **⇒ 本项属「设计性不支持」**（与 ADR-042 同族），不是「缺个组件」。
-/// 若将来真要 `ttyname`，前提是先有 ADR 层面的新裁定（即决定引入终端设备节点），
-/// 而不是在 libc 里补一层转译。在此之前本函数如实失败，**不返回伪造路径**。
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ttyname(fd: c_int) -> *mut c_char {
-    // 非终端：忠实（POSIX 语义 + errno 都对）。
-    // 是终端：本系统尚无「节点自述名字」通道，如实失败而不是编一个路径。
-    let _ = fd;
-    set_errno(crate::errno::ENOTTY);
-    core::ptr::null_mut()
-}
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn link(target: *const c_char, link_path: *const c_char) -> c_int {
     if target.is_null() || link_path.is_null() {
@@ -702,6 +662,93 @@ pub unsafe extern "C" fn link(target: *const c_char, link_path: *const c_char) -
             set_errno(from_libsys(e));
             -1
         }
+    }
+}
+
+/// `ttyname(fd)` / `ttyname_r(fd, buf, len)`：返回该 fd 对应终端的**路径**（POSIX）。
+///
+/// **实现方式：身份比对**（3P4-13，仿 Linux 比对 `/dev` 条目）。`isatty(fd)` 为假 ⇒ `ENOTTY`；
+/// 为真则取 `fstat(fd).st_ino`，逐个候选路径 `stat` 过去，命中同号的那条即答案：先
+/// `/devices/console`，再 `/devices/consoles/<name>` 的每一项（名字来自 `read_dir`，**不硬编码
+/// 实例数**）。一条都不命中 ⇒ `ENOTTY`——**绝不返回猜测的路径**。
+///
+/// **为什么这条比对现在成立**（此前不成立，是实测结论）：
+/// - `fd 0/1/2` 背后的 `StdinNode`/`StdoutNode` 覆写了 `stable_id` 为 console **实例 0** 的身份，
+///   `ConsoleNode` 则返回「基数 + 实例 id」——两者指向**同一个环**，故「同一文件同一身份」是
+///   **事实**而非近似（见 `vfs/src/console.rs` 的 `CONSOLE_STABLE_ID_BASE`）；
+/// - 重定向之后 fd 背后是别的节点，身份自然不同 ⇒ 如实 `ENOTTY`。**终端性跟着节点走，不跟着
+///   fd 号走**（与 `is_terminal` 的设计一致）。
+///
+/// **仍然没有 TTY 语义**：ADR-042 决定不做 canonical 模式与 termios；本函数只回答「这个名字是
+/// 什么」，不提供任何行规程行为。
+static mut TTYNAME_BUF: [u8; 64] = [0; 64];
+
+/// 找 `fd` 对应终端的路径（不含 NUL）。失败返回 errno。
+fn find_tty_path(fd: c_int) -> Result<alloc::vec::Vec<u8>, c_int> {
+    if fd < 0 {
+        return Err(crate::errno::EBADF);
+    }
+    let st = libsys::fstat(fd as u64).map_err(|_| crate::errno::EBADF)?;
+    if isatty_from_info(&st) == 0 {
+        return Err(crate::errno::ENOTTY);
+    }
+    let ino = st.ino;
+    let mut cands: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+    cands.push(b"/devices/console".to_vec());
+    if let Ok(entries) = libsys::read_dir("/devices/consoles") {
+        for e in entries.iter() {
+            cands.push(alloc::format!("/devices/consoles/{}", e.name).into_bytes());
+        }
+    }
+    for c in cands.iter() {
+        if let Ok(p) = core::str::from_utf8(c) {
+            if let Ok(s) = libsys::stat(p) {
+                if s.ino == ino {
+                    return Ok(c.clone());
+                }
+            }
+        }
+    }
+    // 是终端但找不到名字：如实失败，不编路径。
+    Err(crate::errno::ENOTTY)
+}
+
+/// 把 `fd` 的终端路径写进 `out`（含 NUL）。缓冲不够 ⇒ `ERANGE`。
+fn ttyname_into(fd: c_int, out: &mut [u8]) -> Result<(), c_int> {
+    let path = find_tty_path(fd)?;
+    if path.len() + 1 > out.len() {
+        return Err(crate::errno::ERANGE);
+    }
+    out[..path.len()].copy_from_slice(&path);
+    out[path.len()] = 0;
+    Ok(())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ttyname(fd: c_int) -> *mut c_char {
+    // POSIX：返回的指针可能被后续调用覆盖、不保证线程安全 ⇒ 用静态缓冲（本库单进程模型）。
+    let buf: *mut [u8; 64] = core::ptr::addr_of_mut!(TTYNAME_BUF);
+    let arr: &mut [u8; 64] = unsafe { &mut *buf };
+    let slice = &mut arr[..];
+    match ttyname_into(fd, slice) {
+        Ok(()) => unsafe { (*buf).as_mut_ptr() as *mut c_char },
+        Err(e) => {
+            set_errno(e);
+            core::ptr::null_mut()
+        }
+    }
+}
+
+/// `ttyname_r(fd, buf, len)`：可重入版。POSIX：**返回错误号本身**（0 = 成功），不置 errno。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ttyname_r(fd: c_int, buf: *mut c_char, len: usize) -> c_int {
+    if buf.is_null() {
+        return crate::errno::EINVAL;
+    }
+    let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
+    match ttyname_into(fd, out) {
+        Ok(()) => 0,
+        Err(e) => e,
     }
 }
 
