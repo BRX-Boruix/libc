@@ -74,20 +74,29 @@ def collect():
     return sorted(n for n, _h in collect_with_headers())
 
 
-def main():
-    names = collect()
-    if not names:
-        sys.exit("未提取到任何符号——头文件路径或正则失效（拒绝产出空清单）")
-    # 输出 **version script**（不是 --dynamic-list）：
-    # -shared 下所有 global 符号默认都会导出，--dynamic-list 只能**增加**；
-    # 要**限制**导出面必须用 version script 的 `local: *;`。
+def render_version_script(names):
+    """把符号名渲染成 version script 文本（**本函数是落盘格式的唯一实现**）。
+
+    为什么是 version script 而不是 `--dynamic-list`：`-shared` 下所有 global 符号默认都
+    会导出，`--dynamic-list` 只能**增加**；要**限制**导出面必须靠 `local: *;`。
+
+    调用方：本脚本的 `main()`（写 `libc/abi-exports.txt`）与 `abi_manifest.py --check`
+    （校验那份文件没漂移）。两边同一实现，否则「生成」与「校验」会各算一遍。
+    """
     out = ["{", "  global:"]
     for n in names:
         out.append("    %s;" % n)
     out.append("  local:")
     out.append("    *;")
     out.append("};")
-    text = "\n".join(out) + "\n"
+    return "\n".join(out) + "\n"
+
+
+def main():
+    names = collect()
+    if not names:
+        sys.exit("未提取到任何符号——头文件路径或正则失效（拒绝产出空清单）")
+    text = render_version_script(names)
     # 默认写到 libc/abi-exports.txt；显式 ASCII + LF，**不经 shell 重定向**（见文件头说明）。
     dest = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(HERE), "abi-exports.txt")
     with open(dest, "w", encoding="ascii", newline="\n") as f:

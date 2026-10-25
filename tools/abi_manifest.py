@@ -17,6 +17,15 @@
     python libc/tools/abi_manifest.py            # 校验（默认；离线、秒级）
     python libc/tools/abi_manifest.py --write    # 重新生成
 
+校验**两份**落盘产物，它们都从同一份头文件派生：
+
+1. `docs/abi/libc-symbols.md`——给人看的入档清单；
+2. `libc/abi-exports.txt`——给 `ld.lld` 的 version script（`.so` 的实际导出面）。
+
+第 2 份**必须**一起校验：2026-10-25 的体检发现它**静默漂移了 31 个符号**
+（`popen`/`ttyname_r`/`fsync`/`link`/`nice`/`alarm`/`sigsuspend`/`sem_*` …）——
+没有任何门禁看它，于是「头文件加了、清单也更新了、`.so` 却导不出来」。
+
 退出码：0 = 一致；1 = 漂移（打印第一处差异）；2 = 文件缺失/头文件读不到。
 """
 import collections
@@ -26,6 +35,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 DOC = os.path.join(ROOT, "docs", "abi", "libc-symbols.md")
+# version script 的落盘位置（与 gen_abi_exports.py 的默认目标同一个文件）。
+EXPORTS = os.path.join(os.path.dirname(HERE), "abi-exports.txt")
 
 # 控制台可能是 GBK：无法编码的字符（如 ⇒）会让脚本在**输出阶段**崩掉，从而把
 # 「检查逻辑判定漂移」与「打印失败」混为一谈。显式降级，宁可打出 ?。
@@ -99,35 +110,56 @@ def render():
     return "\n".join(out)
 
 
-def main():
-    text = render()
-    if "--write" in sys.argv[1:]:
-        os.makedirs(os.path.dirname(DOC), exist_ok=True)
-        with open(DOC, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
-        print("[abi-manifest] 已写入 %s（%d 行）" % (DOC, text.count("\n")))
-        return 0
-    if not os.path.isfile(DOC):
-        print("[abi-manifest] 缺少 %s —— 先跑 --write 生成并提交" % DOC)
-        return 2
-    with open(DOC, "r", encoding="utf-8", newline="") as f:
-        have = f.read()
-    if have == text:
-        print("[abi-manifest] OK：清单与头文件一致（%d 个符号）" % len(gen.collect()))
-        return 0
+def _report_drift(title, path, have, want, hint):
+    """打印第一处差异。只打一行上下文——漂移通常只在少数几行，整表打印反而看不清。"""
     a = have.splitlines()
-    b = text.splitlines()
+    b = want.splitlines()
     for i in range(max(len(a), len(b))):
         la = a[i] if i < len(a) else "<缺行>"
         lb = b[i] if i < len(b) else "<多行>"
         if la != lb:
-            print("[abi-manifest] 漂移：清单与头文件不一致（第 %d 行）" % (i + 1))
-            print("  清单里: %s" % la[:160])
+            print("[abi-manifest] 漂移：%s（%s 第 %d 行）" % (title, os.path.basename(path), i + 1))
+            print("  落盘: %s" % la[:160])
             print("  头文件: %s" % lb[:160])
             break
-    print("  ⇒ 改的是头文件就跑 `python libc/tools/abi_manifest.py --write` 并提交那份清单；")
-    print("    改的是清单就把它改回去（清单是生成的，不是手写的）。")
-    return 1
+    print("  ⇒ %s" % hint)
+
+
+def _read(path, encoding):
+    with open(path, "r", encoding=encoding, newline="") as f:
+        return f.read()
+
+
+def main():
+    names = gen.collect()
+    if not names:
+        sys.exit("[abi-manifest] 未提取到任何符号——头文件路径或正则失效（拒绝产出空清单）")
+    doc_text = render()
+    exports_text = gen.render_version_script(names)
+    if "--write" in sys.argv[1:]:
+        os.makedirs(os.path.dirname(DOC), exist_ok=True)
+        with open(DOC, "w", encoding="utf-8", newline="\n") as f:
+            f.write(doc_text)
+        with open(EXPORTS, "w", encoding="ascii", newline="\n") as f:
+            f.write(exports_text)
+        print("[abi-manifest] 已写入 %s（%d 行）与 %s（%d 个符号）"
+              % (DOC, doc_text.count("\n"), os.path.basename(EXPORTS), len(names)))
+        return 0
+    hint = ("改的是头文件就跑 `python libc/tools/abi_manifest.py --write` 并提交这两份产物；"
+            "改的是产物就把它们改回去（两份都是生成的，不是手写的）。")
+    for path, want, title, enc in (
+        (DOC, doc_text, "入档清单与头文件不一致", "utf-8"),
+        (EXPORTS, exports_text, "version script 与头文件不一致", "ascii"),
+    ):
+        if not os.path.isfile(path):
+            print("[abi-manifest] 缺少 %s —— 先跑 --write 生成并提交" % path)
+            return 2
+        have = _read(path, enc)
+        if have != want:
+            _report_drift(title, path, have, want, hint)
+            return 1
+    print("[abi-manifest] OK：入档清单与 version script 均与头文件一致（%d 个符号）" % len(names))
+    return 0
 
 
 if __name__ == "__main__":
