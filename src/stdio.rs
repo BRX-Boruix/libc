@@ -203,6 +203,12 @@ pub fn stdio_init() {
             stdin = STREAM_STDIN.get();
             stdout = STREAM_STDOUT.get();
             stderr = STREAM_STDERR.get();
+            // 标准流**也**要进登记表：exit() -> fflush_all() 只遍历登记表，此前三个静态流
+            // 从未入表 ⇒ 退出时「冲刷了 0 个流并返回成功」，缓冲里的字节随进程消失。
+            // 与 fopen 走同一个 stream_register，故 fclose(stdout) 会自动注销。
+            let _ = stream_register(stdin);
+            let _ = stream_register(stdout);
+            let _ = stream_register(stderr);
         }
     }
     unlock();
@@ -597,8 +603,18 @@ unsafe fn wflush(f: &mut FILE) -> bool {
     }
 }
 
-/// 把字节交给写缓冲（必要时先冲刷）。`line_flush` = 行缓冲模式下遇到 '\n' 时的立即冲刷。
-unsafe fn wbuf_put(f: &mut FILE, bytes: &[u8], line_flush: bool) -> bool {
+/// 行缓冲是否应因本次写入而立即冲刷。**纯逻辑，不碰 I/O**（故宿主可测）。
+///
+/// 判据此前由**调用方**以布尔参数传入，而 `printf`/`puts`/`fwrite` 全传 `false` ⇒
+/// 行缓冲流永不因换行而冲刷，字节滞留到进程退出、`printf` 却返回成功的字节数。
+/// 收进纯函数后判据只有一处，用例与实现共用同一份代码。
+#[inline]
+pub(crate) fn line_flush_due(mode: FmBufMode, bytes: &[u8]) -> bool {
+    mode == FmBufMode::Line && bytes.iter().any(|&b| b == b'\n')
+}
+
+/// 把字节交给写缓冲（必要时先冲刷）。行缓冲的冲刷判据见 [`line_flush_due`]。
+unsafe fn wbuf_put(f: &mut FILE, bytes: &[u8]) -> bool {
     unsafe {
         // 无缓冲（stderr / 分配失败退回 / 显式 None）：直接落盘，语义与改造前一致。
         if f.buf_mode == FmBufMode::None || !wbuf_ensure(f) {
@@ -622,7 +638,7 @@ unsafe fn wbuf_put(f: &mut FILE, bytes: &[u8], line_flush: bool) -> bool {
             f.buf_len += take;
             off += take;
         }
-        if line_flush && f.buf_mode == FmBufMode::Line && !wflush(f) {
+        if line_flush_due(f.buf_mode, bytes) && !wflush(f) {
             return false;
         }
         true
@@ -697,7 +713,7 @@ pub unsafe extern "C" fn fwrite(ptr: *const c_void, size: size_t, nmemb: size_t,
         let buf = core::slice::from_raw_parts(ptr as *const u8, total);
         // 经用户态缓冲层（2026-10：见 wbuf_put 的说明——内核写直通 8.9ms/次，
         // 4049 次 fwrite 就是 36 秒）。无缓冲时 wbuf_put 内部直接落盘，语义不变。
-        if wbuf_put(f, buf, false) {
+        if wbuf_put(f, buf) {
             total / size
         } else {
             f.error = true;
@@ -895,9 +911,8 @@ pub unsafe extern "C" fn fputc(c: c_int, fp: *mut FILE) -> c_int {
             return EOF;
         }
         let b = [(c & 0xFF) as u8; 1];
-        // 行缓冲流遇换行符立即冲刷（保持交互可见性，同时仍把同行的多次写合并）。
-        let line_flush = (c & 0xFF) as u8 == b'\n';
-        if wbuf_put(f, &b, line_flush) {
+        // 行缓冲的换行冲刷由 wbuf_put 内部判定，此处不再传标志。
+        if wbuf_put(f, &b) {
             c & 0xFF
         } else {
             f.error = true;
@@ -1157,7 +1172,7 @@ pub unsafe extern "C" fn fputs(s: *const c_char, fp: *mut FILE) -> c_int {
             return 0;
         }
         let buf = core::slice::from_raw_parts(s as *const u8, len);
-        if wbuf_put(f, buf, false) {
+        if wbuf_put(f, buf) {
             return 0;
         }
         match fio_write(f.fd, buf) {
@@ -1591,7 +1606,7 @@ impl FdSink {
         }
         // **必须与 fputs/fwrite 走同一条写缓冲**（见 FdSink 的说明）。
         if !self.file.is_null() {
-            if unsafe { wbuf_put(&mut *self.file, bytes, false) } {
+            if unsafe { wbuf_put(&mut *self.file, bytes) } {
                 self.wrote += bytes.len() as ssize_t;
             }
             return;
@@ -1745,7 +1760,7 @@ pub unsafe extern "C" fn putchar(c: c_int) -> c_int {
             n if n >= 0 => c & 0xFF,
             _ => EOF,
         }
-    } else if wbuf_put(&mut *stdout, &b, false) {
+    } else if wbuf_put(&mut *stdout, &b) {
         c & 0xFF
     } else {
         EOF
@@ -2562,3 +2577,42 @@ pub unsafe extern "C" fn tmpfile() -> *mut FILE {
     fp
 }
 
+
+
+/// `exit()` 必须真的冲刷标准流——两条独立成因，任一条回来本组必红。
+///
+/// ① 行缓冲的换行判据曾被调用方传成 `false`；② 三个标准流从未进 `OPEN_STREAMS`，
+/// `fflush_all()` 于是遍历到 0 个流却返回「全部成功」。
+#[cfg(test)]
+mod a_flush_tests {
+    use super::*;
+
+    /// 行缓冲遇换行必须冲刷；不遇换行**不许**冲刷（否则每字节一次系统调用）。
+    #[test]
+    fn line_mode_flushes_exactly_on_newline() {
+        assert!(line_flush_due(FmBufMode::Line, b"abc\n"));
+        assert!(line_flush_due(FmBufMode::Line, b"\n"));
+        assert!(line_flush_due(FmBufMode::Line, b"a\nb"));
+        assert!(!line_flush_due(FmBufMode::Line, b"abc"));
+        assert!(!line_flush_due(FmBufMode::Line, b""));
+    }
+
+    /// 全缓冲与无缓冲流**不**因换行冲刷（POSIX 只对行缓冲要求行刷新）。
+    #[test]
+    fn only_line_mode_flushes_on_newline() {
+        assert!(!line_flush_due(FmBufMode::Full, b"abc\n"));
+        assert!(!line_flush_due(FmBufMode::None, b"abc\n"));
+    }
+
+    /// 三个标准流必须在 `stdio_init()` 后**已在登记表里**：`fflush_all()` 只遍历登记表。
+    #[test]
+    fn standard_streams_are_registered() {
+        stdio_init();
+        let streams = unsafe { [stdin, stdout, stderr] };
+        for p in streams {
+            assert!(!p.is_null(), "standard stream pointer is null after stdio_init");
+            let hit = OPEN_STREAMS.iter().any(|s| s.load(Ordering::Relaxed) == p as usize);
+            assert!(hit, "standard stream not registered: exit() would never flush it");
+        }
+    }
+}
