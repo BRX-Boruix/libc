@@ -32,6 +32,14 @@
 use crate::ctypes::{c_char, c_int, c_short, c_uint, c_ulonglong};
 use crate::errno::{from_libsys, set_errno, EINVAL, ENOMEM, ENOSYS, ENOTSUP};
 
+// ---------- 命令行长度上限 ----------
+
+/// 命令行缓冲上限：与内核 `loader::MAX_CMDLINE_BYTES` **同一份真值**（经 `libsys` 镜像）。
+///
+/// 此前本文件与 `exec.rs` 各自写死 `256`，而内核自 `3P4-2` 起就是 **4096** ⇒ 两者不一致：
+/// 一条 300 字节的命令行在 libc 侧被误判成「装不下」(`ERANGE`)，内核却完全接得住。
+pub(crate) const MAX_CMDLINE_BYTES: usize = libsys::cmdline::MAX_CMDLINE_BYTES;
+
 // ---------- 标志（取值与 glibc/Linux 一致） ----------
 
 pub use crate::abi_generated::POSIX_SPAWN_RESETIDS;
@@ -225,7 +233,7 @@ pub unsafe extern "C" fn posix_spawnattr_setflags(attr: *mut posix_spawnattr_t, 
 /// 拼命令行：`argv[1..]` 以空格连接（本 ABI 的 argv[0] 就是整条命令行）。
 ///
 /// 返回 `Err(errno)` 当某个参数含空白（无法无损表达）或过长。
-pub(crate) unsafe fn build_cmdline(argv: *const *const c_char, out: &mut [u8; 256]) -> Result<usize, c_int> {
+pub(crate) unsafe fn build_cmdline(argv: *const *const c_char, out: &mut [u8]) -> Result<usize, c_int> {
     let mut n = 0usize;
     if argv.is_null() {
         return Ok(0);
@@ -309,7 +317,7 @@ pub unsafe extern "C" fn posix_spawn(
         }
     }
     let _ = envp; // 见模块文档第 2 条：本系统的环境由内核重建，envp 无法转交。
-    let mut cmd = [0u8; 256];
+    let mut cmd = [0u8; MAX_CMDLINE_BYTES];
     let n = match unsafe { build_cmdline(argv, &mut cmd) } {
         Ok(n) => n,
         Err(e) => return e,

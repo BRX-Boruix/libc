@@ -1620,30 +1620,142 @@ fn getopt_long_basics() {
 // 覆盖面补齐（第三批）：exec 族的如实失败、环境变量族
 // ===========================================================================
 
-/// exec 族：本系统**没有替换进程映像的 syscall**（只有派生）⇒ 如实 ENOTSUP，
-/// 绝不返回"成功"。system 无命令处理器 ⇒ 按 POSIX 返回 1（cmd == NULL 时）。
+/// `execv(NULL, …)` / `execve(NULL, …)` 按 POSIX 如实 `EINVAL`，且在**调用 syscall 之前**
+/// 就拒绝——`path == NULL` 不该走到内核。
+///
+/// **为什么这里不测「不存在的路径返回什么」**：那要真发 `SYS_TASK_EXEC`。宿主上执行
+/// `syscall` 指令得到的是垃圾返回值（实测 `execv` 拿到 `1073741819`，不是 `-1`），
+/// 把它当断言只会制造一条「永远红、但红得没意义」的用例。那条链路归机内 `libccheck`
+/// 的 exec 组（`shell/src/libc_check.rs`，含 fork+exec 换映像、失败不留半个进程等）。
+/// ⇒ 宿主只留**不碰 syscall 就能判定**的部分：入参校验与命令行拼装。
 #[test]
-fn exec_family_honestly_fails() {
+fn exec_rejects_null_path_before_syscall() {
     let _g = ERRNO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         crate::errno::set_errno(0);
-        assert_eq!(crate::exec::execv(cs(b"/programs/nope.elf\0"), core::ptr::null()), -1);
-        assert_eq!(crate::errno::errno(), crate::errno::ENOTSUP);
+        assert_eq!(crate::exec::execv(core::ptr::null(), core::ptr::null()), -1);
+        assert_eq!(crate::errno::errno(), crate::errno::EINVAL);
         crate::errno::set_errno(0);
         assert_eq!(
-            crate::exec::execve(cs(b"/programs/nope.elf\0"), core::ptr::null(), core::ptr::null()),
+            crate::exec::execve(core::ptr::null(), core::ptr::null(), core::ptr::null()),
             -1
         );
-        assert_eq!(crate::errno::errno(), crate::errno::ENOTSUP);
-        crate::errno::set_errno(0);
-        assert_eq!(crate::unistd::execvp(cs(b"nope\0"), core::ptr::null()), -1);
+        assert_eq!(crate::errno::errno(), crate::errno::EINVAL);
+    }
+}
 
-        // system(NULL)：POSIX 规定此时返回非 0（有命令处理器）；本系统没有 ⇒ 返回 1。
-        assert_eq!(crate::exec::system(core::ptr::null()), 1);
-        // 非 NULL：无 shell 可执行 ⇒ 如实 ENOTSUP。
-        crate::errno::set_errno(0);
-        assert_eq!(crate::exec::system(cs(b"echo hi\0")), -1);
-        assert_eq!(crate::errno::errno(), crate::errno::ENOTSUP);
+/// `system(NULL)`：POSIX 规定返回非 0 表示「有命令处理器可用」。`NULL` 分支**不解环境、
+/// 不发 syscall**，故宿主可判定。
+#[test]
+fn system_null_reports_a_command_processor() {
+    let _g = ERRNO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        assert_eq!(crate::popen::system(core::ptr::null()), 1);
+    }
+}
+
+/// 命令行拼装：`argv[1..]` 以单个空格连接（本 ABI 的 `argv[0]` 由 `path` 承担）。
+///
+/// 这是 `execv`/`execve`/`posix_spawn` 共用的**唯一**拼接器，故它的边界就是三条路径的边界。
+#[test]
+fn build_cmdline_joins_tail_args_with_one_space() {
+    unsafe {
+        let a0 = b"prog\0";
+        let a1 = b"alpha\0";
+        let a2 = b"beta\0";
+        let argv = [
+            a0.as_ptr() as *const c_char,
+            a1.as_ptr() as *const c_char,
+            a2.as_ptr() as *const c_char,
+            core::ptr::null(),
+        ];
+        let mut out = [0u8; crate::spawn::MAX_CMDLINE_BYTES];
+        let n = crate::spawn::build_cmdline(argv.as_ptr(), &mut out).unwrap();
+        assert_eq!(&out[..n], b"alpha beta");
+    }
+}
+
+/// `argv == NULL` ⇒ 空命令行（长度 0），不是错误。
+#[test]
+fn build_cmdline_null_argv_is_empty() {
+    unsafe {
+        let mut out = [0u8; crate::spawn::MAX_CMDLINE_BYTES];
+        let n = crate::spawn::build_cmdline(core::ptr::null(), &mut out).unwrap();
+        assert_eq!(n, 0);
+    }
+}
+
+/// 含空白的参数**如实 `EINVAL`**，绝不静默切成两个参数。
+///
+/// 本 ABI 的命令行是**一个字符串**、拆词是用户程序的职责；静默切开会让
+/// `execv("prog", ["a b"])` 变成「两个参数」，调用方拿到的语义与它写下的不同。
+#[test]
+fn build_cmdline_rejects_args_with_whitespace() {
+    unsafe {
+        let a0 = b"prog\0";
+        let a1 = b"has space\0";
+        let argv = [
+            a0.as_ptr() as *const c_char,
+            a1.as_ptr() as *const c_char,
+            core::ptr::null(),
+        ];
+        let mut out = [0u8; crate::spawn::MAX_CMDLINE_BYTES];
+        assert_eq!(
+            crate::spawn::build_cmdline(argv.as_ptr(), &mut out),
+            Err(crate::errno::EINVAL)
+        );
+    }
+}
+
+/// 超长命令行**如实 `ERANGE`**，不截断。
+///
+/// 上限是 `MAX_CMDLINE_BYTES`（与内核 `loader::MAX_CMDLINE_BYTES` 同一份真值）——
+/// 此前这里是硬编码长度 ⇒ 长参数会被误判成「装不下」，与内核的实际上限不一致。
+#[test]
+fn build_cmdline_reports_erange_instead_of_truncating() {
+    unsafe {
+        let a0 = b"prog\0";
+        let long = alloc::vec![b'x'; crate::spawn::MAX_CMDLINE_BYTES + 8];
+        let mut z = long.clone();
+        z.push(0);
+        let argv = [
+            a0.as_ptr() as *const c_char,
+            z.as_ptr() as *const c_char,
+            core::ptr::null(),
+        ];
+        let mut out = [0u8; crate::spawn::MAX_CMDLINE_BYTES];
+        assert_eq!(
+            crate::spawn::build_cmdline(argv.as_ptr(), &mut out),
+            Err(crate::errno::ERANGE)
+        );
+    }
+}
+
+/// 缓冲刚好被**第一个参数**填满、后面还有第二个参数时，分隔符那一处的溢出也必须如实
+/// `ERANGE`——不能静默只写前半截。
+///
+/// 这条盯的是 `build_cmdline` 里**另一处**边界检查（写分隔符 ' ' 之前的那一处）。
+/// 它与逐字节拷贝那处是两个独立的分支：只测长参数会漏掉这一处。
+#[test]
+fn build_cmdline_reports_erange_on_separator_overflow() {
+    unsafe {
+        let a0 = b"prog\0";
+        let cap: usize = crate::spawn::MAX_CMDLINE_BYTES;
+        // 第一个参数恰好占满预算：不留下分隔符的位置。
+        let mut first = alloc::vec![b'y'; cap];
+        first.push(0);
+        let second = b"z\0";
+        let argv = [
+            a0.as_ptr() as *const c_char,
+            first.as_ptr() as *const c_char,
+            second.as_ptr() as *const c_char,
+            core::ptr::null(),
+        ];
+        let mut out = [0u8; crate::spawn::MAX_CMDLINE_BYTES];
+        assert_eq!(
+            crate::spawn::build_cmdline(argv.as_ptr(), &mut out),
+            Err(crate::errno::ERANGE)
+        );
     }
 }
 

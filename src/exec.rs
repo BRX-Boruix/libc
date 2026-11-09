@@ -82,7 +82,7 @@ unsafe fn exec_impl(
         set_errno(EINVAL);
         return -1;
     }
-    let mut cmd = [0u8; 256];
+    let mut cmd = [0u8; crate::spawn::MAX_CMDLINE_BYTES];
     let n = match unsafe { crate::spawn::build_cmdline(argv, &mut cmd) } {
         Ok(n) => n,
         Err(e) => {
