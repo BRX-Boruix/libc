@@ -2,8 +2,16 @@
 //!
 //! 核实结论与逐项理由见 `docs/TODO/libc-posix-surface.md`：C2 的 18 项里，
 //! **8 项可实现**（本文件 + `dirent.rs` 的 `seekdir`/`telldir`/`scandir`/`alphasort`），
-//! **10 项经核实不支持**并移入 B 类（`ioctl`/`fsync`/`fchmod`/`fchown`/`ttyname`/`alarm`/
+//! **11 项当时经核实不支持**并移入 B 类（`ioctl`/`fsync`/`fchmod`/`fchown`/`ttyname`/`alarm`/
 //! `sigpending`/`sigsuspend`/`sigaltstack`/`confstr`/`nice`）。
+//!
+//! **⚠ 其中 10 项后来已实现**（2026-11-10 复核订正；原文此处写「10 项」，而括号里实际列了 11 个名字）：
+//! `fsync`/`fchmod`/`fchown`/`ttyname`/`alarm`/`sigpending`/`sigsuspend`/`sigaltstack`/`confstr`/`nice`
+//! 全部有真实现，不再是「不支持」。原因不是当初判错——**判据是「内核当时没有那个出口」，
+//! 而内核后来补了**（如 `SYS_TASK_GROUPS_GET`、`SYS_TASK_NICE`、信号待决集出口）。
+//! ⇒ 本文档头的「不支持」清单**没有时效机制**，这正是它过期的方式；
+//! 长期有效的只剩 `ioctl`（ADR-014 设计性拒绝）。权威状态见 `docs/TODO/libc-posix-surface.md` 与
+//! `docs/TODO/3p.md` 的「二十五续」〜「二十九续」。
 //!
 //! 纪律同前几批：每项先核实数据源/底层能力（不预猜），真实实现，诚实边界写在函数上。
 
